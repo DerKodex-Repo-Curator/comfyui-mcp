@@ -115,9 +115,13 @@ COMFYUI_MCP_HTTP_TOKEN=my-long-random-secret \
 Then point your tunnel/proxy at `http://127.0.0.1:9100/mcp`.
 
 <Warning>
-Binding to a non-loopback host (e.g. `0.0.0.0`) **without** a token logs a
-warning and leaves the endpoint open. Always set `COMFYUI_MCP_HTTP_TOKEN` before
-exposing the server off-box.
+Binding to a non-loopback host (e.g. `0.0.0.0`) **without** a token is a **hard
+failure** — the server refuses to start rather than expose an open `/mcp`
+endpoint off-box. Set `COMFYUI_MCP_HTTP_TOKEN` (recommended), use `--tunnel`, or
+bind a loopback host. If you genuinely want an open endpoint (e.g. behind your
+own authenticating proxy), opt in explicitly with
+`--allow-unauthenticated-non-loopback` (env `COMFYUI_MCP_ALLOW_UNAUTH=1`), which
+downgrades the failure to a warning.
 </Warning>
 
 ## Auth reference
@@ -129,9 +133,11 @@ exposing the server off-box.
 | `--tunnel` / `MCP_TUNNEL=1` | Force HTTP, auto-generate a token if unset, open a cloudflared tunnel. |
 | `--http` / `MCP_TRANSPORT=http` | HTTP transport without a tunnel (auth still applies if a token is set). |
 | `--host`, `--port` | Bind address (default `127.0.0.1:9100`). |
+| `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1` | Opt into an OPEN `/mcp` on a non-loopback host. Without it, that combination is a hard startup failure. |
 
 Tokens are compared in constant time, and the gate is enforced on every HTTP
-method (`POST`/`GET`/`DELETE`) at the MCP endpoint.
+method (`POST`/`GET`/`DELETE`) at the MCP endpoint. Binding a non-loopback host
+with no token is refused at startup unless the escape hatch above is set.
 
 ## Roadmap: OAuth
 

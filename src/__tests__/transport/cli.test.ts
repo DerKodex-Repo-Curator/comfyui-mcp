@@ -12,6 +12,7 @@ describe("parseCliArgs", () => {
       panelOrchestrator: false,
       token: undefined,
       tunnel: false,
+      allowUnauthenticated: false,
     });
   });
 
@@ -25,17 +26,17 @@ describe("parseCliArgs", () => {
 
   it("supports --port value and --host value", () => {
     const o = parseCliArgs([...base, "--http", "--host", "0.0.0.0", "--port", "8080"], {});
-    expect(o).toEqual({ transport: "http", host: "0.0.0.0", port: 8080, panelOrchestrator: false, token: undefined, tunnel: false });
+    expect(o).toEqual({ transport: "http", host: "0.0.0.0", port: 8080, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false });
   });
 
   it("supports --flag=value form", () => {
     const o = parseCliArgs([...base, "--transport=http", "--port=3000", "--host=0.0.0.0"], {});
-    expect(o).toEqual({ transport: "http", host: "0.0.0.0", port: 3000, panelOrchestrator: false, token: undefined, tunnel: false });
+    expect(o).toEqual({ transport: "http", host: "0.0.0.0", port: 3000, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false });
   });
 
   it("reads env defaults", () => {
     const o = parseCliArgs(base, { MCP_TRANSPORT: "http", MCP_HOST: "0.0.0.0", MCP_PORT: "5000" });
-    expect(o).toEqual({ transport: "http", host: "0.0.0.0", port: 5000, panelOrchestrator: false, token: undefined, tunnel: false });
+    expect(o).toEqual({ transport: "http", host: "0.0.0.0", port: 5000, panelOrchestrator: false, token: undefined, tunnel: false, allowUnauthenticated: false });
   });
 
   it("reads token from COMFYUI_MCP_HTTP_TOKEN env and --token flag (flag wins)", () => {
@@ -53,6 +54,14 @@ describe("parseCliArgs", () => {
     const e = parseCliArgs(base, { MCP_TUNNEL: "1" });
     expect(e.tunnel).toBe(true);
     expect(e.transport).toBe("http");
+  });
+
+  it("reads the unauthenticated escape hatch from flag and env", () => {
+    expect(parseCliArgs(base, {}).allowUnauthenticated).toBe(false);
+    expect(
+      parseCliArgs([...base, "--allow-unauthenticated-non-loopback"], {}).allowUnauthenticated,
+    ).toBe(true);
+    expect(parseCliArgs(base, { COMFYUI_MCP_ALLOW_UNAUTH: "1" }).allowUnauthenticated).toBe(true);
   });
 
   it("--panel-orchestrator enables orchestrator mode; env works too", () => {

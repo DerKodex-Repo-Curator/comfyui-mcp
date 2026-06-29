@@ -30,7 +30,13 @@ let client: Client | undefined;
 afterEach(async () => {
   await client?.close();
   client = undefined;
-  await new Promise<void>((resolve) => httpServer?.close(() => resolve()));
+  // Guard: when a test never started a server (e.g. startHttpServer rejected),
+  // httpServer is undefined and `?.close(cb)` would short-circuit without ever
+  // invoking the callback — leaving the promise (and the hook) hanging forever.
+  await new Promise<void>((resolve) => {
+    if (httpServer) httpServer.close(() => resolve());
+    else resolve();
+  });
   httpServer = undefined;
 });
 
@@ -168,5 +174,37 @@ describe("startHttpServer auth (token configured)", () => {
     const client = await connectAuthedClient({ "X-API-Key": TOKEN });
     const tools = await client.listTools();
     expect(tools.tools.map((t) => t.name).sort()).toEqual(["echo", "ping"]);
+  });
+});
+
+describe("startHttpServer non-loopback safety gate", () => {
+  it("refuses to start on a non-loopback host with no token and no escape hatch", async () => {
+    await expect(
+      startHttpServer({
+        host: "0.0.0.0",
+        port: 0,
+        createServer: stubServerFactory,
+      }),
+    ).rejects.toThrow(/Refusing to start/);
+  });
+
+  it("starts on a non-loopback host with no token when the escape hatch is set", async () => {
+    httpServer = await startHttpServer({
+      host: "0.0.0.0",
+      port: 0,
+      allowUnauthenticated: true,
+      createServer: stubServerFactory,
+    });
+    expect((httpServer.address() as AddressInfo).port).toBeGreaterThan(0);
+  });
+
+  it("starts on a non-loopback host with a token (no escape hatch needed)", async () => {
+    httpServer = await startHttpServer({
+      host: "0.0.0.0",
+      port: 0,
+      token: TOKEN,
+      createServer: stubServerFactory,
+    });
+    expect((httpServer.address() as AddressInfo).port).toBeGreaterThan(0);
   });
 });

@@ -19,11 +19,20 @@ export interface HttpServerOptions {
    * unset, the endpoint is open (preserves the existing local stdio/http use).
    */
   token?: string;
+  /**
+   * Escape hatch for the "non-loopback host without a token" safety gate. By
+   * default, binding a non-loopback host (anything but 127.0.0.1/::1/localhost)
+   * with NO token is a HARD FAIL — an open MCP endpoint reachable off-box is a
+   * footgun next to the tunnel/hosted path. Set this (via
+   * `--allow-unauthenticated-non-loopback` / `COMFYUI_MCP_ALLOW_UNAUTH=1`) to
+   * downgrade the failure to a warning and start anyway.
+   */
+  allowUnauthenticated?: boolean;
 }
 
 // Hostnames that keep traffic on the local machine. Anything else (including
 // 0.0.0.0, which binds all interfaces) is reachable off-box, so an unset token
-// there is worth a one-line warning.
+// there is a hard failure unless explicitly allowed.
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"]);
 
 /**
@@ -95,10 +104,22 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<http.Ser
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
   if (!token && !LOOPBACK_HOSTS.has(opts.host.toLowerCase())) {
+    if (!opts.allowUnauthenticated) {
+      throw new Error(
+        `Refusing to start: HTTP MCP transport bound on non-loopback host ${opts.host} ` +
+          `WITHOUT an auth token — the /mcp endpoint would be OPEN to anyone who can reach ` +
+          `this host. Fix one of:\n` +
+          `  • set COMFYUI_MCP_HTTP_TOKEN=<secret> (recommended), or\n` +
+          `  • use --tunnel (auto-generates a token), or\n` +
+          `  • bind a loopback host (--host 127.0.0.1), or\n` +
+          `  • explicitly opt into an open endpoint with ` +
+          `--allow-unauthenticated-non-loopback (env COMFYUI_MCP_ALLOW_UNAUTH=1).`,
+      );
+    }
     logger.warn(
       `HTTP MCP transport bound on non-loopback host ${opts.host} WITHOUT an auth token — ` +
-        `the /mcp endpoint is OPEN to anyone who can reach this host. ` +
-        `Set COMFYUI_MCP_HTTP_TOKEN (or use --tunnel) to require a token.`,
+        `the /mcp endpoint is OPEN to anyone who can reach this host ` +
+        `(allowed via --allow-unauthenticated-non-loopback / COMFYUI_MCP_ALLOW_UNAUTH).`,
     );
   }
 

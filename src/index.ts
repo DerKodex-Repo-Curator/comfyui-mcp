@@ -217,6 +217,7 @@ async function main() {
       host: cli.host,
       port: cli.port,
       token,
+      allowUnauthenticated: cli.allowUnauthenticated,
       createServer: () => createConfiguredServer(),
     });
     logger.info(`ComfyUI MCP server running on http://${cli.host}:${cli.port}/mcp`);

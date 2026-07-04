@@ -1,0 +1,46 @@
+# Training config for gemma4-abliterated-comfyui-mcp (see finetune/README.md).
+# Run on a RunPod A100 80GB / RTX Pro 6000; verify the two TEMPLATE_* markers
+# against tokenizer.apply_chat_template output on the pod before training.
+
+base_model: huihui-ai/Huihui-gemma-4-12B-it-abliterated
+output_dir: outputs/gemma4-12b-comfyui-mcp
+
+# Full tool list (~30-40K tokens) + trajectory must fit. If OOM on 80GB,
+# drop to 32768 and enable the trimmed-context dataset variant.
+max_seq_length: 49152
+load_in_4bit: true
+
+lora:
+  r: 32
+  alpha: 32
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+training:
+  num_train_epochs: 2
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.001
+  optim: adamw_8bit
+  logging_steps: 5
+  save_steps: 200
+  seed: 3407
+
+# Loss masking: train only on assistant turns. These are the Gemma 4 turn
+# markers per Unsloth's docs — VERIFY on the pod by printing one rendered
+# sample (prepare_dataset.py --print-sample) before launching.
+template:
+  instruction_part: "<|turn>user"
+  response_part: "<|turn>model"
+
+data:
+  train_file: ../data/train.jsonl
+  val_file: ../data/val.jsonl
+  tools_file: ../data/tools-full.json
+
+export:
+  gguf_quants: [q4_k_m, q5_k_m, q8_0]
+  hf_repo: ""   # e.g. artokun/gemma4-12b-abliterated-comfyui-mcp (set to push)

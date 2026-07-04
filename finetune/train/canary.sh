@@ -16,7 +16,12 @@ python --version
 echo "═══ [canary] 2/6 · deps ═══"
 pip install -q -U pip
 pip install -q -U unsloth trl datasets pyyaml huggingface_hub hf_transfer
+# Gemma 4 12B (unified/encoder-free architecture) needs transformers >= 5.10.1;
+# Unsloth's default pull (5.5.0) is too old and errors "not supported yet".
+# Install AFTER unsloth so this version wins.
+pip install -q -U "transformers>=5.10.1"
 export HF_HUB_ENABLE_HF_TRANSFER=1
+python -c "import transformers; print('transformers', transformers.__version__)"
 python -c "import os; from huggingface_hub import login; login(os.environ['HF_TOKEN'])"
 
 echo "═══ [canary] 3/6 · assemble dataset (domain-only — isolates core pipeline) ═══"

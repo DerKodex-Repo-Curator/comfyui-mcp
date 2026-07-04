@@ -37,3 +37,7 @@ test-orch-debug.log
 
 # stray ComfyUI-Manager node-list dumps from arena registry runs
 cnl.json
+
+# fine-tune datagen intermediates (keep trajectories.jsonl, drop raw dumps/logs)
+arena-results*/raw/
+arena-results*/orchestrator-*.log

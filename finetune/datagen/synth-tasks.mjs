@@ -21,6 +21,11 @@ const BASE_URL = (
   process.env.SYNTH_BASE_URL ?? (process.env.OPENROUTER_API_KEY ? "https://openrouter.ai/api/v1" : "")
 ).replace(/\/$/, "");
 const PER_CATEGORY = Number(process.env.SYNTH_PER_CATEGORY ?? 40);
+// Override the tool source/output to synthesize for OTHER surfaces — e.g.
+// SYNTH_TOOLS_FILE=finetune/data/tools-panel.json SYNTH_OUT=panel-tasks.jsonl
+// generates live-canvas tasks for scripts/panel-arena.mjs.
+const TOOLS_FILE = process.env.SYNTH_TOOLS_FILE ?? TOOLS_JSON;
+const OUT_NAME = process.env.SYNTH_OUT ?? "tasks.jsonl";
 
 if (!MODEL || !BASE_URL) {
   console.error("[ft:tasks] set SYNTH_MODEL and SYNTH_BASE_URL (OpenAI-compatible).");
@@ -34,7 +39,7 @@ if (!isAllowedTeacher(MODEL) && !process.env.SYNTH_ALLOW_ANY) {
   process.exit(1);
 }
 
-const { tools } = JSON.parse(readFileSync(TOOLS_JSON, "utf8"));
+const { tools } = JSON.parse(readFileSync(TOOLS_FILE, "utf8"));
 const byCategory = new Map();
 for (const t of tools) {
   if (!byCategory.has(t.category)) byCategory.set(t.category, []);
@@ -123,6 +128,6 @@ for (const [category, catTools] of byCategory) {
 }
 
 mkdirSync(DATA_DIR, { recursive: true });
-const outPath = join(DATA_DIR, "tasks.jsonl");
+const outPath = join(DATA_DIR, OUT_NAME);
 writeFileSync(outPath, out.map((t) => JSON.stringify(t)).join("\n") + (out.length ? "\n" : ""));
 console.log(`[ft:tasks] wrote ${out.length} tasks → ${outPath}`);

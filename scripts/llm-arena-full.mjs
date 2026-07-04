@@ -31,7 +31,10 @@ const MODELS = (process.env.ARENA_MODELS ?? "gemma4:12b")
   .split(",")
   .map((m) => m.trim())
   .filter(Boolean);
-const MAX_ROUNDS = Number(process.env.ARENA_MAX_ROUNDS ?? 30);
+// 40 (was 30): the expert pack-based flows (read_pack_workflow → inspect nodes →
+// adapt → enqueue → poll to completion) legitimately need 24+ rounds, and a
+// quality render (krea2 etc.) is slow enough that polling eats several more.
+const MAX_ROUNDS = Number(process.env.ARENA_MAX_ROUNDS ?? 40);
 const TIER = process.env.ARENA_TIER ?? "local";
 const SCENARIO_TIMEOUT_MS = Number(process.env.ARENA_SCENARIO_TIMEOUT_MS ?? 360_000);
 const NUM_CTX = Number(process.env.ARENA_NUM_CTX ?? 65536);

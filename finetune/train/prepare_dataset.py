@@ -113,13 +113,13 @@ def main() -> None:
     args = ap.parse_args()
     rng = random.Random(args.seed)
 
+    # Gather EVERY harvested trajectory source: the seed rewrites plus every
+    # arena-results*/trajectories.jsonl (full/pod/panel/local-batch/bake-offs).
+    # New harvest dirs are picked up automatically — no need to edit this list.
     print("[prepare] loading domain trajectories")
-    records = load_domain(
-        [
-            DATA / "seed-trajectories.jsonl",
-            REPO / "arena-results-full" / "trajectories.jsonl",
-        ]
-    )
+    sources = [DATA / "seed-trajectories.jsonl"]
+    sources += sorted(REPO.glob("arena-results*/trajectories.jsonl"))
+    records = load_domain(sources)
     n_domain = len(records)
     if args.toucan:
         print(f"[prepare] sampling {args.toucan} Toucan trajectories")

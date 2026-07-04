@@ -34,3 +34,6 @@ test-orch-debug.log
 # Arena/test render outputs saved into the repo cwd
 /ComfyUI_*.png
 /lighthouse_*.png
+
+# stray ComfyUI-Manager node-list dumps from arena registry runs
+cnl.json

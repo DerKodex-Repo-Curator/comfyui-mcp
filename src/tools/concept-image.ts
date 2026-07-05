@@ -33,7 +33,7 @@ export function registerConceptImageTools(server: McpServer): void {
     "fetch_concept_image",
     "Generate a concept/reference image from Grok Imagine (xAI) or Google Nano Banana (Gemini image API) " +
       "and save it to a local temp file. Optionally upload to ComfyUI input/ for LoadImage nodes. " +
-      "Auth: XAI_API_KEY or ~/.grok/auth.json for grok; GEMINI_API_KEY or Gemini CLI OAuth for google. " +
+      "Auth: Grok CLI OAuth (~/.grok/auth.json from `grok login`) for grok; GEMINI_API_KEY or Gemini CLI OAuth for google. " +
       "Use apply_reference_to_workflow to wire the returned comfy_filename into a workflow.",
     {
       provider: z

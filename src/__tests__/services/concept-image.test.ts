@@ -38,7 +38,7 @@ describe("fetchConceptImage", () => {
       },
       {
         fetch: fetchMock as typeof fetch,
-        resolveGrokKey: async () => "test-xai-key",
+        resolveGrokBearer: async () => "test-oauth-bearer",
       },
     );
 
@@ -48,7 +48,7 @@ describe("fetchConceptImage", () => {
     expect(bytes.length).toBeGreaterThan(0);
     expect(fetchMock).toHaveBeenCalledOnce();
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer test-xai-key");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer test-oauth-bearer");
   });
 
   it("fetches google image via interactions API", async () => {
@@ -107,7 +107,7 @@ describe("fetchConceptImage", () => {
       },
       {
         fetch: fetchMock as typeof fetch,
-        resolveGrokKey: async () => "k",
+        resolveGrokBearer: async () => "k",
       },
     );
 

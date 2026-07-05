@@ -18,7 +18,7 @@ Use when the user wants a **layout / structure / wireframe concept** from an ext
 ## Pipeline (recommended)
 
 1. **Generate concept** — `fetch_concept_image`
-   - `provider: "grok"` — xAI Imagine (`XAI_API_KEY` or Grok CLI `~/.grok/auth.json`)
+   - `provider: "grok"` — xAI Imagine via Grok CLI OAuth (`grok login` → `~/.grok/auth.json`)
    - `provider: "google"` — Gemini image / Nano Banana (`GEMINI_API_KEY` or Gemini CLI OAuth)
    - Prompt: describe **layout only** (composition, camera, zones, silhouettes) — not final polish.
    - `upload_to_comfyui: true` (default) so you get `comfy_filename`.

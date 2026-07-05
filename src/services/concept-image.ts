@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { ValidationError } from "../utils/errors.js";
 import { uploadImageAuto } from "./image-management.js";
 import {
-  resolveGrokApiKey,
+  resolveGrokOAuthBearer,
   resolveGoogleImageAuth,
   type ConceptImageProvider,
 } from "./concept-image-auth.js";
@@ -43,7 +43,7 @@ export interface FetchConceptImageResult {
 
 export type ConceptImageDeps = {
   fetch?: typeof fetch;
-  resolveGrokKey?: typeof resolveGrokApiKey;
+  resolveGrokBearer?: typeof resolveGrokOAuthBearer;
   resolveGoogleAuth?: typeof resolveGoogleImageAuth;
   upload?: typeof uploadImageAuto;
   now?: () => number;
@@ -91,7 +91,7 @@ async function fetchGrokConceptImage(
   deps: ConceptImageDeps,
 ): Promise<{ bytes: Buffer; mimeType: string; sourceUrl?: string }> {
   const fetchFn = deps.fetch ?? fetch;
-  const apiKey = await (deps.resolveGrokKey ?? resolveGrokApiKey)();
+  const bearer = await (deps.resolveGrokBearer ?? resolveGrokOAuthBearer)();
   const model = args.model ?? process.env.COMFYUI_MCP_GROK_IMAGE_MODEL ?? DEFAULT_GROK_MODEL;
 
   const body: Record<string, unknown> = {
@@ -121,7 +121,7 @@ async function fetchGrokConceptImage(
   const res = await fetchFn(endpoint, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${bearer}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),

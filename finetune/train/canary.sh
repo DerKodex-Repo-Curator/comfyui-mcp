@@ -20,8 +20,15 @@ pip install -q -U unsloth trl datasets pyyaml huggingface_hub hf_transfer
 # Unsloth's default pull (5.5.0) is too old and errors "not supported yet".
 # Install AFTER unsloth so this version wins.
 pip install -q -U "transformers>=5.10.1"
+# The transformers upgrade bumps torch (→2.10) but leaves a stale torchaudio
+# compiled against the old torch → 'undefined symbol' at import (Gemma 4 is
+# multimodal, so importing it loads torchaudio). Reinstall torchaudio matched
+# to the resolved torch version.
+TORCH_VER=$(python -c "import torch; print(torch.__version__.split('+')[0])")
+pip install -q "torchaudio==${TORCH_VER}" --index-url https://download.pytorch.org/whl/cu128 || \
+  pip install -q -U torchaudio --index-url https://download.pytorch.org/whl/cu128
 export HF_HUB_ENABLE_HF_TRANSFER=1
-python -c "import transformers; print('transformers', transformers.__version__)"
+python -c "import transformers, torchaudio; print('transformers', transformers.__version__, '| torchaudio', torchaudio.__version__)"
 python -c "import os; from huggingface_hub import login; login(os.environ['HF_TOKEN'])"
 
 echo "═══ [canary] 3/6 · assemble dataset (domain-only — isolates core pipeline) ═══"

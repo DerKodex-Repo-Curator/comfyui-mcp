@@ -71,6 +71,16 @@ describe("backendReadiness", () => {
     expect(r.ready).toBe(true);
   });
 
+  it("grok: CLI on PATH AND auth.json on disk → ready", () => {
+    putOnPath(process.platform === "win32" ? "grok.cmd" : "grok");
+    mkdirSync(join(tmp, ".grok"), { recursive: true });
+    writeFileSync(join(tmp, ".grok", "auth.json"), "{}");
+    const r = backendReadiness("grok", { home: tmp });
+    expect(r.cli).toBe(true);
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+  });
+
   it("gemini: honors GEMINI_CLI_HOME for the oauth creds path", () => {
     putOnPath(process.platform === "win32" ? "gemini.cmd" : "gemini");
     const gh = join(tmp, "geminihome");

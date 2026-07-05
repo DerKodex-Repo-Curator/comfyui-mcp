@@ -28,6 +28,7 @@ export type BackendReadiness = {
 const CLI_NAMES: Record<string, string[]> = {
   codex: ["codex", "codex.cmd", "codex.exe"],
   gemini: ["gemini", "gemini.cmd", "gemini.exe"],
+  grok: ["grok", "grok.cmd", "grok.exe"],
   ollama: ["ollama", "ollama.exe"],
   lmstudio: ["lms", "lms.exe"],
   llamacpp: ["llama-server", "llama-server.exe"],
@@ -123,6 +124,11 @@ export function backendReadiness(
     const geminiHome = process.env.GEMINI_CLI_HOME || home;
     const auth = fileExists(geminiHome, ".gemini", "oauth_creds.json");
     return { backend: "gemini", cli, auth, ready: cli && auth };
+  }
+  if (b === "grok") {
+    const cli = onPath(CLI_NAMES.grok);
+    const auth = fileExists(home, ".grok", "auth.json");
+    return { backend: "grok", cli, auth, ready: cli && auth };
   }
   if (b === "ollama") {
     // No login concept — a local daemon. Binary presence is the readiness

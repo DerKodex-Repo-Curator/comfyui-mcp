@@ -9,7 +9,7 @@
 
 import type { ImageRef } from "./panel-agent.js";
 
-export type BackendId = "claude" | "codex" | "gemini" | "ollama" | "openrouter";
+export type BackendId = "claude" | "codex" | "gemini" | "grok" | "ollama" | "openrouter";
 
 /**
  * A user turn in PROVIDER-NEUTRAL form. PanelAgent owns the queue/turn-gate and
@@ -220,6 +220,21 @@ export const GEMINI_CAPABILITIES: AgentCapabilities = {
   slashCommands: false,
   hooks: false,
   vision: true, // gemini-2.5 sees images; delivered as inline base64 image ContentBlocks
+};
+
+/** Capability descriptor for the Grok CLI ACP backend (xAI / Grok Build).
+ *  Same ACP posture as Gemini: persistent session, streaming deltas, interrupt,
+ *  config-declared MCP servers, static model catalog at spawn. */
+export const GROK_CAPABILITIES: AgentCapabilities = {
+  persistentChannel: true,
+  streamingDeltas: true,
+  interruptMidTurn: true,
+  forkAtAnchor: false,
+  inProcessMcp: false,
+  modelEnumeration: true, // grok-composer-2.5-fast / grok-build — ACP exposes no catalog
+  slashCommands: false,
+  hooks: false,
+  vision: true,
 };
 
 /** Capability descriptor for the Ollama local-LLM backend (issue #97's panel

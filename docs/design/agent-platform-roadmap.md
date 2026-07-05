@@ -22,11 +22,12 @@ Extend comfyui-mcp orchestrator + panel with multi-provider agents, cross-provid
 - Add `grok` to `BackendId`, readiness probe, panel provider chip
 - Spike: auth token location, chat/tool wire format, MCP over HTTP parity
 
-## Phase 2 — Cross-provider concept images (P1)
+## Phase 2 — Cross-provider concept images (orchestrator done)
 
-- `fetch_concept_image` — Grok Imagine / Google image gen → temp files
-- `apply_reference_to_workflow` — wire refs into LoadImage / Qwen edit / Krea img2img nodes
-- Skill: structure-map → Qwen/Krea pipeline
+- `fetch_concept_image` — Grok Imagine (xAI API) / Google Nano Banana (Gemini interactions API) → temp files; optional ComfyUI upload
+- `apply_reference_to_workflow` — wire refs into LoadImage / Qwen edit encoder slots / control_image
+- Skill: `structure-map-concept` — structure-map → Qwen/Krea pipeline
+- Auth: `XAI_API_KEY` or `~/.grok/auth.json`; `GEMINI_API_KEY` or Gemini CLI OAuth
 
 ## Phase 3 — AI Toolkit supervisor (P2)
 

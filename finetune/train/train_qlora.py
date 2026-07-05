@@ -66,11 +66,37 @@ def main() -> None:
         random_state=cfg["training"]["seed"],
     )
 
-    tools_full = json.loads((HERE / cfg["data"]["tools_file"]).read_text(encoding="utf-8"))
-    comfyui_tools = [
-        {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}}
-        for t in tools_full["tools"]
-    ]
+    import random as _random
+
+    # Tool pool the per-example menu is drawn from (combined comfyui+panel
+    # surface). Trimmed-context training: each example is rendered with the tools
+    # it actually calls plus random distractors (capped), NOT all 113 — the full
+    # list per example blows seq len to 48K (~900s/step). The model still sees the
+    # full surface at inference; training on variable menus generalizes better.
+    pool_path = HERE / cfg["data"].get("tools_pool_file", cfg["data"]["tools_file"])
+    pool = json.loads(pool_path.read_text(encoding="utf-8"))["tools"]
+    tool_by_name = {
+        t["name"]: {"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}}
+        for t in pool
+    }
+    all_tool_names = list(tool_by_name)
+    max_tools = int(cfg["data"].get("max_tools_per_example", 24))
+    menu_rng = _random.Random(cfg["training"]["seed"])
+
+    def tool_menu(messages: list[dict]) -> list[dict]:
+        used = []
+        seen = set()
+        for m in messages:
+            for tc in m.get("tool_calls") or []:
+                n = (tc.get("function") or {}).get("name")
+                if n in tool_by_name and n not in seen:
+                    seen.add(n)
+                    used.append(n)
+        distractors = [n for n in all_tool_names if n not in seen]
+        menu_rng.shuffle(distractors)
+        chosen = used + distractors[: max(0, max_tools - len(used))]
+        menu_rng.shuffle(chosen)  # vary tool ORDER so the model can't memorize position
+        return [tool_by_name[n] for n in chosen]
 
     def normalize_messages(messages: list[dict]) -> list[dict]:
         """Coerce OpenAI-shaped messages into what the Gemma 4 Jinja template
@@ -106,7 +132,9 @@ def main() -> None:
         return out
 
     def to_text(rec: dict) -> str:
-        tools = comfyui_tools if rec["tools"] == "comfyui" else rec.get("inline_tools") or None
+        # comfyui/panel domain records → a trimmed per-example tool menu; external
+        # (Toucan/xLAM) records carry their own inline tool list.
+        tools = tool_menu(rec["messages"]) if rec["tools"] == "comfyui" else rec.get("inline_tools") or None
         return tokenizer.apply_chat_template(normalize_messages(rec["messages"]), tools=tools, tokenize=False)
 
     # Load JSONL with plain Python and render to text BEFORE building the

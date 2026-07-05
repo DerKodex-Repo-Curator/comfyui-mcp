@@ -26,18 +26,23 @@
 
 size: 12b
 size_ladder:
-  e2b:  { base_model: p-e-w/gemma-4-E2B-it-heretic-ara, max_seq_length: 32768 }
-  e4b:  { base_model: coder3101/gemma-4-E4B-it-heretic, max_seq_length: 32768 }
-  12b:  { base_model: coder3101/gemma-4-12B-it-heretic, max_seq_length: 49152 }
-  31b:  { base_model: coder3101/gemma-4-31B-it-heretic, max_seq_length: 49152 }
+  e2b:  { base_model: p-e-w/gemma-4-E2B-it-heretic-ara, max_seq_length: 12288 }
+  e4b:  { base_model: coder3101/gemma-4-E4B-it-heretic, max_seq_length: 12288 }
+  12b:  { base_model: coder3101/gemma-4-12B-it-heretic, max_seq_length: 16384 }
+  31b:  { base_model: coder3101/gemma-4-31B-it-heretic, max_seq_length: 16384 }
 
 # Overridden per-size from size_ladder above; left here as the resolved default.
 base_model: coder3101/gemma-4-12B-it-heretic
 output_dir: outputs/gemma4-comfyui-mcp
 
-# Full tool list (~30-40K tokens) + trajectory must fit. If OOM on 80GB,
-# drop to 32768 and enable the trimmed-context dataset variant.
-max_seq_length: 49152
+# TRIMMED-CONTEXT TRAINING (canary revealed the full 113-tool list per example
+# → 48K seq → ~900s/step → 5+ days/run). Instead we render each example with a
+# PER-EXAMPLE tool menu: the tools it actually calls + random distractors, capped
+# at max_tools_per_example, drawn from the combined pool. The model still sees the
+# FULL surface at inference — training on variable menus teaches menu-navigation
+# and generalizes (how xLAM/Toucan/Hermes tool-callers are trained), while cutting
+# seq len ~3x. 16384 comfortably fits ~24 tools + a long multi-round trajectory.
+max_seq_length: 16384
 load_in_4bit: true
 
 lora:
@@ -70,6 +75,11 @@ data:
   train_file: ../data/train.jsonl
   val_file: ../data/val.jsonl
   tools_file: ../data/tools-full.json
+  # Pool the per-example tool menu is drawn from — the COMBINED surface (113
+  # comfyui + 65 panel) so trajectories on either surface find their tools.
+  tools_pool_file: ../data/tools-combined.json
+  # Max tools rendered per training example (used tools + distractors up to this).
+  max_tools_per_example: 24
 
 export:
   gguf_quants: [q4_k_m, q5_k_m, q8_0]

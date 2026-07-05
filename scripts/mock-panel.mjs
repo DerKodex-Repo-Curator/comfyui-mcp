@@ -171,6 +171,13 @@ const EXEC = {
     wf.nodes.set(id, { id, type: `SubgraphBlueprint.${key}`, title: key, is_subgraph: true, widgets: {}, inputs: [], outputs: [] });
     return { added: summarize(wf.nodes.get(id)), from_blueprint: `SubgraphBlueprint.${key}` };
   },
+  open_lora_manager: (m) => ({ opened: true, count: (m.catalog || []).length }),
+  pick_lora: (m) => {
+    const first = (m.catalog || [])[0];
+    if (!first) throw new Error("empty catalog");
+    return { picked: m.allow_multiple ? [first] : first };
+  },
+  ask_user: (m) => (m.options && m.options[0] && m.options[0].label) || "yes",
 };
 
 const sock = new WebSocket(url);

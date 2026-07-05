@@ -9,6 +9,13 @@ Extend comfyui-mcp orchestrator + panel with multi-provider agents, cross-provid
 - Bridge: `set_workflow_target` / `workflow_target` sync
 - **Panel follow-up:** honor `workflow_path` in graph executors ([workflow-target.md](./workflow-target.md))
 
+## Phase 0b — LoRA manager (orchestrator done)
+
+- Persistent catalog per instance: `lora-catalog.json` + `lora-previews/`
+- MCP: `lora_catalog_sync`, `lora_catalog_list`, `lora_catalog_get`, `lora_catalog_upsert`, `lora_catalog_set_preview`, `lora_catalog_search`
+- Panel tools: `panel_open_lora_manager`, `panel_pick_lora` ([lora-manager.md](./lora-manager.md))
+- **Panel follow-up:** browse/pick UI with preview grid; implement `open_lora_manager` / `pick_lora` bridge handlers
+
 ## Phase 1 — Grok backend (P0)
 
 - `GrokBackend` implementing `AgentBackend` (OAuth via Grok Build / xAI CLI)

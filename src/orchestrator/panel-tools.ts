@@ -44,6 +44,7 @@ import {
 } from "../services/user-mcp-config.js";
 import { setComfyuiSecret, setAgentSecret, isAllowedAgentSecretKey } from "../services/panel-secrets.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
+import { getLoraCatalog, toLoraSummary } from "../services/lora-catalog.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
@@ -1662,6 +1663,93 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         }
 
         return ctx.call({ cmd: "show_media", items: resolved }, 60000);
+      },
+    ),
+    def(
+      "panel_open_lora_manager",
+      "Open the LoRA Manager UI in the panel so the user can browse curated LoRAs with previews, descriptions, setup notes, and trigger keywords. Optionally syncs from disk first. Also pushes the catalog to the panel for rendering.",
+      {
+        sync_first: z
+          .boolean()
+          .optional()
+          .describe("Scan ComfyUI for new/missing LoRA files before opening (default true)"),
+        query: z.string().optional().describe("Pre-filter the list shown in the manager"),
+      },
+      async (args: A, ctx) => {
+        const catalog = getLoraCatalog();
+        if (args.sync_first !== false) {
+          await catalog.syncFromDisk();
+        }
+        const entries = catalog.list({ query: typeof args.query === "string" ? args.query : undefined });
+        const payload = entries.map(toLoraSummary);
+        return ctx.call({ cmd: "open_lora_manager", catalog: payload }, 30000);
+      },
+    ),
+    def(
+      "panel_pick_lora",
+      "Let the user pick one or more LoRAs from the catalog (shows previews and metadata when the panel supports it). Returns the selected entries with rel_path, keywords, setup instructions, and strength hints — use these when wiring LoraLoader nodes. Run lora_catalog_sync or pass sync_first:true if the list may be stale.",
+      {
+        prompt: z.string().optional().describe("Question shown above the picker"),
+        query: z.string().optional().describe("Pre-filter candidates"),
+        allow_multiple: z.boolean().optional(),
+        sync_first: z.boolean().optional(),
+      },
+      async (args: A, ctx) => {
+        const catalog = getLoraCatalog();
+        if (args.sync_first !== false) {
+          await catalog.syncFromDisk();
+        }
+        const entries = catalog.list({
+          query: typeof args.query === "string" ? args.query : undefined,
+        });
+        if (!entries.length) {
+          return fail("LoRA catalog is empty. Download LoRAs, then lora_catalog_sync or panel_open_lora_manager.");
+        }
+
+        const header = typeof args.prompt === "string" && args.prompt.trim()
+          ? args.prompt.trim()
+          : "Pick a LoRA";
+        const multi = args.allow_multiple === true;
+
+        try {
+          const result = await ctx.bridge.send(
+            {
+              cmd: "pick_lora",
+              header,
+              allow_multiple: multi,
+              catalog: entries.map(toLoraSummary),
+            } as { cmd: string },
+            { tabId: ctx.tabId, timeoutMs: 300000 },
+          );
+          return ok(result);
+        } catch {
+          // Panel without pick_lora UI — fall back to ask_user text options.
+          const options = entries.slice(0, 12).map((e) => ({
+            label: e.displayName,
+            description: [
+              e.description?.slice(0, 80),
+              e.keywords.length ? `Keywords: ${e.keywords.slice(0, 4).join(", ")}` : "",
+              e.missing ? "(missing on disk)" : e.relPath,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          }));
+          const reply = await ctx.bridge.send(
+            {
+              cmd: "ask_user",
+              question: header,
+              header: "Pick LoRA",
+              options,
+            } as { cmd: string },
+            { tabId: ctx.tabId, timeoutMs: 300000 },
+          );
+          const label = typeof reply === "string" ? reply : String(reply);
+          const picked = entries.find((e) => e.displayName === label || e.relPath === label);
+          if (!picked) {
+            return ok({ picked: null, reply: label, note: "No exact catalog match for selection" });
+          }
+          return ok({ picked: toLoraSummary(picked) });
+        }
       },
     ),
   ];

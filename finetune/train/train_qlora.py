@@ -72,17 +72,27 @@ def main() -> None:
         for t in tools_full["tools"]
     ]
 
-    def render(example: dict) -> dict:
-        tools = comfyui_tools if example["tools"] == "comfyui" else example.get("inline_tools") or None
-        text = tokenizer.apply_chat_template(example["messages"], tools=tools, tokenize=False)
-        return {"text": text}
+    def to_text(rec: dict) -> str:
+        tools = comfyui_tools if rec["tools"] == "comfyui" else rec.get("inline_tools") or None
+        return tokenizer.apply_chat_template(rec["messages"], tools=tools, tokenize=False)
 
-    data_files = {
-        "train": str((HERE / cfg["data"]["train_file"]).resolve()),
-        "val": str((HERE / cfg["data"]["val_file"]).resolve()),
-    }
-    ds = load_dataset("json", data_files=data_files)
-    ds = ds.map(render, remove_columns=[c for c in ds["train"].column_names if c != "text"])
+    # Load JSONL with plain Python and render to text BEFORE building the
+    # Dataset — the HF json loader (pyarrow) chokes on our nested/variable
+    # messages schema ("Trailing data"), and once rendered every row is just
+    # {"text": str}, a trivial schema pyarrow handles cleanly.
+    def read_jsonl(path: Path) -> list[dict]:
+        return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    from datasets import Dataset, DatasetDict
+
+    ds = DatasetDict(
+        {
+            split: Dataset.from_list(
+                [{"text": to_text(r)} for r in read_jsonl((HERE / cfg["data"][key]).resolve())]
+            )
+            for split, key in (("train", "train_file"), ("val", "val_file"))
+        }
+    )
 
     if args.dry_run:
         for i in range(2):

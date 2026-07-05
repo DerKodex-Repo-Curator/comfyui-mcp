@@ -79,6 +79,7 @@ import {
   buildPanelSystemAppend,
   type EnvCapabilities,
 } from "../services/env-capabilities.js";
+import { WorkflowTargetStore } from "../services/workflow-target-store.js";
 
 const PANEL_SYSTEM_APPEND = `You are the autonomous assistant embedded directly in a ComfyUI sidebar panel. The person is working in ComfyUI and talks to you through that panel: their messages arrive as your prompts, and everything you write is shown to them in the panel chat. Write for that reader — lead with the result, keep replies short and concrete, and don't narrate routine internal steps.
 
@@ -93,6 +94,8 @@ If a workflow needs a custom node the user doesn't have, don't silently skip it 
 CRASH RECOVERY — when a custom node BREAKS or CRASHED ComfyUI, fix it before giving up. If your turn begins with a "⚠️ ComfyUI crashed …" note (it names the fatal log block and the most likely culprit custom node + file:line), or a run dies with a node-level error you can pin to one pack, do NOT just re-run the same graph — ESCALATE to actually fix that node, narrating each step to the user as you go: (a) UPDATE it to the latest code — call panel_update_node with the culprit's id (or the comfyui MCP update_custom_node / fix_custom_node). Try version 'nightly' to grab a just-landed upstream fix. Poll panel_node_queue_status, then panel_restart_comfyui → you resume and RETRY the action to see if the crash is gone. (b) If updating doesn't fix it, reach into COMFYUI_PATH/custom_nodes/<NodeDir> with your shell (Bash): if it's a git repo (a .git dir), run git fetch && git pull (or check out the nightly branch) to force the latest, reinstall its requirements if needed, then restart + retry. (c) If there's no git or it's still broken, attempt a TARGETED source patch of the crashing file:line, then VERIFY the fix actually resolves the crash (restart + retry the same action — confirm it no longer faults). Once verified, OFFER to suggest the fix upstream to the repo owner (open an issue or PR describing the crash + your patch) — describe it and ask the user first; do NOT auto-file anything. Combine this cleanly with the normal install→restart→continue flow above: a fresh install that crashes on first use is the same loop (update/patch the just-installed node, don't abandon it).
 
 WEDGED RENDER / OOM / VRAM PINNED — when a generation is stuck or hits CUDA out-of-memory, or a cancel didn't actually free GPU memory (models still resident, VRAM pinned, the next run still OOMs), call panel_free_vram to UNLOAD all models and free VRAM before retrying — it does NOT restart ComfyUI, so it's the cheap first move. Escalation ladder: cancel the run → panel_free_vram (unload + free) → retry; only as a LAST RESORT panel_restart_comfyui (which refuses mid-render and guards the running generation). Reach for panel_free_vram before a restart whenever a cancel left memory pinned.
+
+WORKFLOW TARGETING — by default your panel_* graph edits follow whichever workflow tab the user is currently viewing. If the user wants you to work on a DIFFERENT open workflow while they browse another tab, call panel_set_workflow_target(mode:"pinned", path:<from panel_list_workflows>) to pin edits to that workflow; panel_get_workflow_target shows the current binding. Set mode:"current" to follow the user's active tab again. Pinning does NOT switch what the user sees — it only routes your graph tools. When pinned, still use panel_open_workflow only when you intentionally want to switch the user's view.
 
 CRITICAL — never destroy the user's work. When they ask for a "new workflow", a "fresh canvas", or to "start over for a new project", call panel_new_workflow (it opens a NEW TAB and leaves their current workflow intact). NEVER use panel_clear for that — panel_clear wipes the CURRENTLY OPEN graph and is ONLY for an explicit "clear/reset this canvas". You can manage tabs with panel_list_workflows / panel_open_workflow / panel_rename_workflow / panel_close_workflow, and group nodes with panel_select_nodes / panel_create_subgraph. To label a node by its purpose, use panel_set_node_title. To read or edit nodes INSIDE a subgraph, call panel_enter_subgraph(node_id) first — then panel_query_graph / panel_graph_outline and the panel_* edit tools operate on the subgraph's inner nodes — and panel_exit_subgraph when you're done.
 
@@ -1098,6 +1101,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   const AGENT_KEY_SEP = "::";
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
   const headlessTabs = new Set<string>(); // tabs with no ComfyUI canvas (mobile/remote) — deliver renders in-turn
+  const workflowTargets = new WorkflowTargetStore();
   const backendForTab = (panelTabId: string): string =>
     tabBackends.get(panelTabId) ?? defaultBackend;
   const agentKeyFor = (panelTabId: string): string =>
@@ -1190,7 +1194,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   {
     const panelMcpPort = Number(process.env.COMFYUI_MCP_PANEL_MCP_PORT) || bridgePort + 1;
     try {
-      panelMcpHttp = await startPanelMcpHttpServer(bridge, panelMcpPort);
+      panelMcpHttp = await startPanelMcpHttpServer(bridge, panelMcpPort, "127.0.0.1", workflowTargets);
     } catch (err) {
       logger.error(
         `[panel-orchestrator] could not start the panel HTTP MCP on :${panelMcpPort} — codex/gemini tabs will lack live-graph tools: ${err instanceof Error ? err.message : String(err)}`,
@@ -1442,7 +1446,9 @@ export async function runPanelOrchestrator(): Promise<void> {
     // canvas through the loopback HTTP MCP instead). Bound to the PANEL tab so
     // panel_* tools reach the user's canvas regardless of the composite key.
     makePanelServer: (key) =>
-      backendOf(key) === "claude" ? createPanelMcpServer(bridge, panelTabOf(key)) : undefined,
+      backendOf(key) === "claude"
+        ? createPanelMcpServer(bridge, panelTabOf(key), workflowTargets)
+        : undefined,
     mcpServers: buildMcpServers(),
     // NOTE: manager callbacks fire with the composite agent key `tabId::backend`;
     // panelTabOf() recovers the PANEL tab so every push reaches the right socket.
@@ -1884,6 +1890,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       // switcher stops falsely showing "CLI not installed" behind a remote pod.
       pushReadiness(panelTab);
       if (backend === "claude") pushCommands(panelTab);
+      bridge.push({ type: "workflow_target", target: workflowTargets.get(panelTab) }, panelTab);
       // Re-push the last usage so the context meter isn't blank after a reload.
       const lastStatus = manager.lastStatusFor(key);
       if (lastStatus) pushStatus(panelTab, lastStatus);
@@ -2106,6 +2113,41 @@ export async function runPanelOrchestrator(): Promise<void> {
       logger.info(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} switched backend ${prev} → ${reqBackend}`);
       return;
     }
+    // Workflow target picker: pin agent edits to a specific open workflow tab.
+    if (event.type === "set_workflow_target" && event.tab_id) {
+      const panelTab = event.tab_id;
+      const mode = (event as { mode?: unknown }).mode;
+      const path =
+        typeof (event as { path?: unknown }).path === "string"
+          ? String((event as { path?: unknown }).path)
+          : undefined;
+      const filename =
+        typeof (event as { filename?: unknown }).filename === "string"
+          ? String((event as { filename?: unknown }).filename)
+          : undefined;
+      if (mode !== "current" && mode !== "pinned") {
+        bridge.push(
+          { type: "ack", ok: false, kind: "workflow_target", message: "mode must be 'current' or 'pinned'" },
+          panelTab,
+        );
+        return;
+      }
+      if (mode === "pinned" && !(path ?? "").trim()) {
+        bridge.push(
+          { type: "ack", ok: false, kind: "workflow_target", message: "path required when pinning" },
+          panelTab,
+        );
+        return;
+      }
+      const target = workflowTargets.set(panelTab, { mode, path, filename });
+      bridge.push({ type: "ack", ok: true, kind: "workflow_target", target }, panelTab);
+      bridge.push({ type: "workflow_target", target }, panelTab);
+      logger.info(
+        `[panel-orchestrator] tab ${panelTab.slice(0, 8)} workflow target → ${target.mode}${target.path ? ` (${target.path})` : ""}`,
+      );
+      return;
+    }
+
     // Live panel config: render-stall threshold, plus the user's agent-model
     // preferences (preferred_models list + ollama endpoint config), persisted to
     // ~/.comfyui-mcp/panel-settings.json. Sent by the panel on connect and

@@ -22,6 +22,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { UiBridge } from "../services/ui-bridge.js";
+import type { WorkflowTargetStore } from "../services/workflow-target-store.js";
 import { makePanelToolCtx, registerPanelTools } from "./panel-tools.js";
 import { logger } from "../utils/logger.js";
 
@@ -78,6 +79,7 @@ export function startPanelMcpHttpServer(
   bridge: UiBridge,
   port: number,
   host = "127.0.0.1",
+  workflowTargets?: WorkflowTargetStore,
 ): Promise<PanelMcpHttpServer> {
   // tabId -> (sessionId -> Session). A tab can hold multiple Codex sessions
   // across reconnects; each is its own server+transport over the SAME tab ctx.
@@ -87,7 +89,7 @@ export function startPanelMcpHttpServer(
     const server = new McpServer({ name: "comfyui-panel", version: "1.0.0" });
     // Tab-bound context: every tool forwards to the bridge for THIS tab — the
     // same surface the Claude in-process server exposes (shared defs).
-    registerPanelTools(server, makePanelToolCtx(bridge, tabId));
+    registerPanelTools(server, makePanelToolCtx(bridge, tabId, workflowTargets));
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       // Defense in depth against DNS rebinding (a malicious page resolving its own

@@ -33,6 +33,10 @@ import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { UiBridge } from "../services/ui-bridge.js";
 import {
+  type WorkflowTargetStore,
+  withWorkflowTarget,
+} from "../services/workflow-target-store.js";
+import {
   addUserMcpServer,
   readUserMcpServers,
   removeUserMcpServer,
@@ -233,13 +237,21 @@ export interface PanelToolCtx {
    *  (image screenshots, secret collection). */
   bridge: UiBridge;
   tabId: string;
+  /** Per-tab workflow pin store (optional for tests). */
+  workflowTarget?: WorkflowTargetStore;
 }
 
 /** Build a tab-bound execution context shared by both transports. */
-export function makePanelToolCtx(bridge: UiBridge, tabId: string): PanelToolCtx {
+export function makePanelToolCtx(
+  bridge: UiBridge,
+  tabId: string,
+  workflowTargets?: WorkflowTargetStore,
+): PanelToolCtx {
   const call = async (cmd: Record<string, unknown>, timeoutMs?: number): Promise<ToolResult> => {
     try {
-      return ok(await bridge.send(cmd as { cmd: string }, { tabId, timeoutMs }));
+      const target = workflowTargets?.get(tabId);
+      const routed = target ? withWorkflowTarget(cmd, target) : cmd;
+      return ok(await bridge.send(routed as { cmd: string }, { tabId, timeoutMs }));
     } catch (err) {
       return fail(err);
     }
@@ -269,7 +281,7 @@ export function makePanelToolCtx(bridge: UiBridge, tabId: string): PanelToolCtx 
       return false;
     }
   };
-  return { call, confirm, bridge, tabId };
+  return { call, confirm, bridge, tabId, workflowTarget: workflowTargets };
 }
 
 /** One shared tool definition: name, description, zod raw-shape schema, and a
@@ -1086,6 +1098,47 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (_args, ctx) => ctx.call({ cmd: "workflow_list" }),
     ),
     def(
+      "panel_get_workflow_target",
+      "Read which workflow this agent is bound to edit. mode 'current' means graph tools follow whatever tab the user is viewing; mode 'pinned' means edits go to the pinned workflow even if the user switched to another tab. Call this when unsure which workflow your panel_* edits will affect.",
+      {},
+      async (_args, ctx) => {
+        const target = ctx.workflowTarget?.get(ctx.tabId) ?? { mode: "current" as const };
+        return ok(target);
+      },
+    ),
+    def(
+      "panel_set_workflow_target",
+      "Pin the agent to a specific open workflow tab, or release the pin to follow the user's current tab. Use pinned when the user asks you to work on workflow A while they browse workflow B — set mode:'pinned' and path from panel_list_workflows. Set mode:'current' (or omit path) to follow the active tab again. Does NOT switch what the user sees; it only routes your panel_* graph edits.",
+      {
+        mode: z
+          .enum(["current", "pinned"])
+          .describe("'current' = follow the user's active workflow tab; 'pinned' = always edit the given path."),
+        path: z
+          .string()
+          .optional()
+          .describe("Workflow path/filename/key from panel_list_workflows — required when mode is 'pinned'."),
+        filename: z.string().optional().describe("Optional display label for the pinned workflow."),
+      },
+      async (args: A, ctx) => {
+        if (!ctx.workflowTarget) {
+          return fail("Workflow targeting is not available in this session.");
+        }
+        const mode = args.mode === "pinned" ? "pinned" : "current";
+        const path = typeof args.path === "string" ? args.path : undefined;
+        const filename = typeof args.filename === "string" ? args.filename : undefined;
+        if (mode === "pinned" && !(path ?? "").trim()) {
+          return fail("Provide path when pinning — use panel_list_workflows to list open workflows.");
+        }
+        const target = ctx.workflowTarget.set(ctx.tabId, { mode, path, filename });
+        ctx.bridge.push({ type: "workflow_target", target }, ctx.tabId);
+        const hint =
+          target.mode === "pinned"
+            ? `Pinned to "${target.filename ?? target.path}". Graph tools will target that workflow without switching the user's view.`
+            : "Following the user's current workflow tab.";
+        return ok({ ...target, note: hint });
+      },
+    ),
+    def(
       "panel_new_workflow",
       "Open a brand-new BLANK workflow in a NEW TAB. Use this whenever the user wants a 'new workflow' / 'fresh canvas' / 'start over for a new project'. This does NOT touch their current workflow — it opens a separate tab. NEVER use panel_clear for a new workflow (panel_clear wipes the CURRENT graph and is only for 'clear/reset this canvas').",
       {},
@@ -1619,8 +1672,9 @@ export function buildPanelToolDefs(): PanelToolDef[] {
 export function createPanelMcpServer(
   bridge: UiBridge,
   tabId: string,
+  workflowTargets?: WorkflowTargetStore,
 ): McpSdkServerConfigWithInstance {
-  const ctx = makePanelToolCtx(bridge, tabId);
+  const ctx = makePanelToolCtx(bridge, tabId, workflowTargets);
   const defs = buildPanelToolDefs();
   // The Anthropic SDK's tool() accepts (name, description, zodRawShape, cb). The
   // shared handler is transport-agnostic — bind it to this tab's ctx. Each def's

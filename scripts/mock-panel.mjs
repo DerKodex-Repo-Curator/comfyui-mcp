@@ -20,16 +20,22 @@ const duration = Number(process.env.DURATION_MS || 60000);
 const t0 = Date.now();
 const ms = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
-// --- in-memory graph ---
+// --- in-memory workflows (multi-tab) ---
 let seq = 0;
-const nodes = new Map(); // id -> {id,type,title,widgets,inputs,outputs}
-const blueprints = new Map(); // saved subgraph blueprints: name -> { name, type }
-let clipboard = []; // copied node descriptors (persists across switches)
-let selection = []; // currently-selected node ids
-function addNode(type, title) {
+const workflows = new Map(); // path -> { nodes, title }
+let activePath = "workflows/current.json";
+function ensureWorkflow(path) {
+  if (!workflows.has(path)) {
+    workflows.set(path, { title: path.replace(/.*\//, ""), nodes: new Map() });
+  }
+  return workflows.get(path);
+}
+function wfFor(args) {
+  return ensureWorkflow(args.workflow_path || activePath);
+}
+function addNode(wf, type, title) {
   const id = ++seq;
-  // Give every node a couple of generic typed slots so connect() can succeed.
-  nodes.set(id, {
+  wf.nodes.set(id, {
     id,
     type,
     title: title || type,
@@ -43,9 +49,13 @@ function addNode(type, title) {
       { name: "MODEL", type: "MODEL", links: [] },
     ],
   });
-  return nodes.get(id);
+  return wf.nodes.get(id);
 }
-for (let i = 0; i < seed; i++) addNode(`SeedNode${i}`, `Existing node ${i}`);
+const current = ensureWorkflow(activePath);
+for (let i = 0; i < seed; i++) addNode(current, `SeedNode${i}`, `Existing node ${i}`);
+const blueprints = new Map();
+let clipboard = [];
+let selection = [];
 
 const commands = []; // { cmd, args }
 const says = [];
@@ -55,37 +65,45 @@ function summarize(n) {
 }
 
 const EXEC = {
-  graph_get_state: () => ({
-    viewing: { scope: "root" },
-    node_count: nodes.size,
-    truncated: false,
-    nodes: [...nodes.values()].map(summarize),
-  }),
-  graph_add_node: ({ class_type, title }) => {
-    if (!class_type) throw new Error("class_type required");
-    return { added: summarize(addNode(class_type, title)) };
+  graph_get_state: (args) => {
+    const wf = wfFor(args);
+    return {
+      viewing: { scope: "root" },
+      workflow_path: args.workflow_path || activePath,
+      node_count: wf.nodes.size,
+      truncated: false,
+      nodes: [...wf.nodes.values()].map(summarize),
+    };
   },
-  graph_remove_node: ({ node_id }) => {
-    const n = nodes.get(Number(node_id));
-    if (!n) throw new Error(`no node ${node_id}`);
-    nodes.delete(Number(node_id));
+  graph_add_node: (args) => {
+    const wf = wfFor(args);
+    if (!args.class_type) throw new Error("class_type required");
+    return { added: summarize(addNode(wf, args.class_type, args.title)), workflow_path: args.workflow_path || activePath };
+  },
+  graph_remove_node: (args) => {
+    const wf = wfFor(args);
+    const n = wf.nodes.get(Number(args.node_id));
+    if (!n) throw new Error(`no node ${args.node_id}`);
+    wf.nodes.delete(Number(args.node_id));
     return { removed: summarize(n) };
   },
-  graph_clear: () => {
-    const c = nodes.size;
-    nodes.clear();
-    return { cleared: c };
+  graph_clear: (args) => {
+    const wf = wfFor(args);
+    const c = wf.nodes.size;
+    wf.nodes.clear();
+    return { cleared: c, workflow_path: args.workflow_path || activePath };
   },
   graph_connect: ({ from_node_id, to_node_id }) => ({
     connected: { from: { node_id: from_node_id }, to: { node_id: to_node_id } },
   }),
   graph_disconnect: ({ node_id }) => ({ disconnected: { node_id } }),
-  graph_set_widget: ({ node_id, widget, value }) => {
-    const n = nodes.get(Number(node_id));
-    if (!n) throw new Error(`no node ${node_id}`);
-    const prev = n.widgets[widget];
-    n.widgets[widget] = value;
-    return { set: { node_id, widget, previous: prev, value } };
+  graph_set_widget: (args) => {
+    const wf = wfFor(args);
+    const n = wf.nodes.get(Number(args.node_id));
+    if (!n) throw new Error(`no node ${args.node_id}`);
+    const prev = n.widgets[args.widget];
+    n.widgets[args.widget] = args.value;
+    return { set: { node_id: args.node_id, widget: args.widget, previous: prev, value: args.value } };
   },
   graph_move_node: ({ node_id, pos }) => ({ moved: { node_id, to: pos } }),
   graph_canvas: ({ action }) => ({ canvas: { action } }),
@@ -96,41 +114,62 @@ const EXEC = {
   // New-workflow opens a NEW TAB — in the mock it must NOT wipe the seeded graph.
   workflow_new: () => ({ created: true, active: "Untitled (new tab)" }),
   workflow_list: () => ({
-    active: { path: "workflows/current.json", filename: "current.json", key: "current" },
-    open: [{ path: "workflows/current.json", filename: "current.json", key: "current", active: true, modified: true, persisted: true }],
+    active: { path: activePath, filename: activePath.replace(/.*\//, ""), key: "current" },
+    open: [...workflows.entries()].map(([path, wf]) => ({
+      path,
+      filename: wf.title,
+      key: path,
+      active: path === activePath,
+      modified: true,
+      persisted: true,
+    })),
   }),
-  workflow_open: ({ path }) => ({ opened: { path, filename: path } }),
+  workflow_open: ({ path }) => {
+    ensureWorkflow(path);
+    activePath = path;
+    return { opened: { path, filename: path } };
+  },
   workflow_rename: ({ name }) => ({ renamed: { to: `${name}.json` } }),
   workflow_close: ({ path }) => ({ closed: { path } }),
   graph_select_nodes: ({ node_ids }) => { selection = (node_ids || []).map(Number); return { selected: node_ids }; },
-  graph_create_subgraph: ({ node_ids }) => { const id = ++seq; nodes.set(id, { id, type: "Subgraph", title: "Subgraph", is_subgraph: true, widgets: {}, inputs: [], outputs: [] }); selection = [id]; return { subgraph: { node_id: id, name: "Subgraph", from_nodes: node_ids } }; },
-  graph_copy_nodes: ({ node_ids }) => {
-    const ids = (Array.isArray(node_ids) && node_ids.length ? node_ids.map(Number) : selection);
-    const src = ids.map((id) => nodes.get(Number(id))).filter(Boolean);
+  graph_create_subgraph: (args) => {
+    const wf = wfFor(args);
+    const id = ++seq;
+    wf.nodes.set(id, { id, type: "Subgraph", title: "Subgraph", is_subgraph: true, widgets: {}, inputs: [], outputs: [] });
+    selection = [id];
+    return { subgraph: { node_id: id, name: "Subgraph", from_nodes: args.node_ids } };
+  },
+  graph_copy_nodes: (args) => {
+    const wf = wfFor(args);
+    const ids = (Array.isArray(args.node_ids) && args.node_ids.length ? args.node_ids.map(Number) : selection);
+    const src = ids.map((id) => wf.nodes.get(Number(id))).filter(Boolean);
     if (!src.length) throw new Error("nothing selected to copy");
     clipboard = src.map((n) => ({ type: n.type, title: n.title, widgets: { ...n.widgets } }));
     return { copied: clipboard.length };
   },
-  graph_paste_nodes: () => {
+  graph_paste_nodes: (args) => {
+    const wf = wfFor(args);
     if (!clipboard.length) throw new Error("clipboard empty");
-    const pasted = clipboard.map((c) => addNode(c.type, c.title));
+    const pasted = clipboard.map((c) => addNode(wf, c.type, c.title));
     return { pasted_count: pasted.length, pasted_node_ids: pasted.map((n) => n.id), pasted: pasted.map(summarize) };
   },
-  graph_save_subgraph: ({ node_id, name }) => {
-    const id = node_id != null ? Number(node_id) : selection[0];
-    const n = id != null ? nodes.get(id) : null;
+  graph_save_subgraph: (args) => {
+    const wf = wfFor(args);
+    const id = args.node_id != null ? Number(args.node_id) : selection[0];
+    const n = id != null ? wf.nodes.get(id) : null;
     if (!n || !n.is_subgraph) throw new Error("select a subgraph node first");
-    const finalName = (typeof name === "string" && name.trim()) ? name.trim() : (n.title || "Subgraph");
+    const finalName = (typeof args.name === "string" && args.name.trim()) ? args.name.trim() : (n.title || "Subgraph");
     blueprints.set(finalName, { name: finalName, type: `SubgraphBlueprint.${finalName}` });
     return { saved: { name: finalName, from_node_id: id, type: `SubgraphBlueprint.${finalName}` } };
   },
   graph_list_subgraphs: () => ({ count: blueprints.size, blueprints: [...blueprints.values()].map((b) => ({ ...b, display_name: b.name, description: null, is_global: false })) }),
-  graph_add_subgraph: ({ name }) => {
-    const key = String(name).replace(/^SubgraphBlueprint\./, "");
-    if (!blueprints.has(key)) throw new Error(`No blueprint "${name}"`);
+  graph_add_subgraph: (args) => {
+    const wf = wfFor(args);
+    const key = String(args.name).replace(/^SubgraphBlueprint\./, "");
+    if (!blueprints.has(key)) throw new Error(`No blueprint "${args.name}"`);
     const id = ++seq;
-    nodes.set(id, { id, type: `SubgraphBlueprint.${key}`, title: key, is_subgraph: true, widgets: {}, inputs: [], outputs: [] });
-    return { added: summarize(nodes.get(id)), from_blueprint: `SubgraphBlueprint.${key}` };
+    wf.nodes.set(id, { id, type: `SubgraphBlueprint.${key}`, title: key, is_subgraph: true, widgets: {}, inputs: [], outputs: [] });
+    return { added: summarize(wf.nodes.get(id)), from_blueprint: `SubgraphBlueprint.${key}` };
   },
 };
 
@@ -180,7 +219,8 @@ setTimeout(() => {
   console.log("commands:", JSON.stringify(counts));
   console.log("graph_clear called:", counts.graph_clear ? `YES x${counts.graph_clear} (DESTRUCTIVE!)` : "no");
   console.log("workflow_new called:", counts.workflow_new ? `yes x${counts.workflow_new} (correct for new workflow)` : "no");
-  console.log("final node count:", nodes.size, `(seeded ${seed})`);
+  console.log("final node count (active):", current.nodes.size, `(seeded ${seed})`);
+  console.log("workflows:", [...workflows.keys()].join(", "));
   console.log("say count:", says.length);
   sock.close();
   process.exit(0);

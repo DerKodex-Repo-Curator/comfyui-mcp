@@ -14,9 +14,11 @@ import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   buildPanelToolDefs,
+  makePanelToolCtx,
   registerPanelTools,
   type PanelToolCtx,
 } from "../../orchestrator/panel-tools.js";
+import { WorkflowTargetStore } from "../../services/workflow-target-store.js";
 
 type Forwarded = Record<string, unknown>;
 
@@ -454,5 +456,59 @@ describe("panel-tools: panel_subgraph_group (wrap a group into a subgraph)", () 
     expect(calls[0]).toMatchObject({ cmd: "graph_subgraph_group", group: "REPLACEMENT MODE" });
     await defByName("panel_subgraph_group").handler({ group: 2 }, ctx);
     expect(calls[1]).toMatchObject({ cmd: "graph_subgraph_group", group: 2 });
+  });
+});
+
+describe("panel-tools: workflow target (per-workflow agent)", () => {
+  it("registers get/set workflow target tools", () => {
+    const names = buildPanelToolDefs().map((d) => d.name);
+    expect(names).toContain("panel_get_workflow_target");
+    expect(names).toContain("panel_set_workflow_target");
+  });
+
+  it("injects workflow_path on graph commands when pinned", async () => {
+    const store = new WorkflowTargetStore();
+    store.set("test-tab", { mode: "pinned", path: "workflows/pinned.json" });
+    const calls: Forwarded[] = [];
+    const bridge = {
+      send: async (cmd: Record<string, unknown>) => {
+        calls.push(cmd);
+        return { ok: true };
+      },
+      push: () => 1,
+    } as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "test-tab", store);
+    await defByName("panel_get_graph").handler({}, ctx);
+    expect(calls[0]).toMatchObject({
+      cmd: "graph_get_state",
+      workflow_path: "workflows/pinned.json",
+    });
+  });
+
+  it("panel_set_workflow_target pins and returns note", async () => {
+    const store = new WorkflowTargetStore();
+    const pushes: unknown[] = [];
+    const bridge = {
+      send: async () => ({}),
+      push: (frame: unknown) => {
+        pushes.push(frame);
+        return 1;
+      },
+    } as PanelToolCtx["bridge"];
+    const ctx = makePanelToolCtx(bridge, "test-tab", store);
+    const res = await defByName("panel_set_workflow_target").handler(
+      { mode: "pinned", path: "workflows/a.json", filename: "a.json" },
+      ctx,
+    );
+    expect(store.get("test-tab")).toMatchObject({
+      mode: "pinned",
+      path: "workflows/a.json",
+    });
+    expect(pushes[0]).toMatchObject({
+      type: "workflow_target",
+      target: { mode: "pinned", path: "workflows/a.json", filename: "a.json" },
+    });
+    const text = (res.content[0] as { text: string }).text;
+    expect(text).toContain("Pinned");
   });
 });

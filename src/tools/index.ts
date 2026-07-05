@@ -43,6 +43,7 @@ import { registerModelExplorerTools } from "./model-explorer.js";
 import { registerPromptDirectorTools } from "./prompt-director.js";
 import { registerLoraManagerTools } from "./lora-manager.js";
 import { registerConceptImageTools } from "./concept-image.js";
+import { registerToolkitTools } from "./toolkit.js";
 import { registerImageConvertTools } from "./image-convert.js";
 import { registerColorAnalysisTools } from "./color-analysis.js";
 import { registerStorageUploadTools } from "./storage-upload.js";
@@ -77,6 +78,7 @@ const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: 
   ["workflow-authoring", registerWorkflowLibraryTools],
   ["workflows", registerWorkflowUrlTools],
   ["server", registerProcessControlTools],
+  ["server", registerToolkitTools],
   ["images-assets", registerImageManagementTools],
   ["server", registerMemoryManagementTools],
   ["generation", registerGenerationTrackerTools],

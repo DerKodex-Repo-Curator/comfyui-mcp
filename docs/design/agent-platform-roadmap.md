@@ -29,10 +29,11 @@ Extend comfyui-mcp orchestrator + panel with multi-provider agents, cross-provid
 - Skill: `structure-map-concept` — structure-map → Qwen/Krea pipeline
 - Auth: Grok CLI OAuth (`~/.grok/auth.json`, auto-refresh); `GEMINI_API_KEY` or Gemini CLI OAuth
 
-## Phase 3 — AI Toolkit supervisor (P2)
+## Phase 3 — AI Toolkit supervisor (orchestrator done)
 
 - Process supervisor for local AI Toolkit installs (start/stop, job queue, health)
 - MCP tools: `toolkit_status`, `toolkit_run_job`, `toolkit_list_models`
+- Env: `AI_TOOLKIT_ROOT`, `AI_TOOLKIT_PORT` / `AI_TOOLKIT_URL`, `AI_TOOLKIT_AUTH` ([ai-toolkit-supervisor.md](./ai-toolkit-supervisor.md))
 
 ## Phase 4 — RunComfy connector (P3)
 

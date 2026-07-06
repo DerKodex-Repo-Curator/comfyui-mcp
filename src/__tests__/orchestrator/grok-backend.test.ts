@@ -177,13 +177,32 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 let GrokBackend: typeof import("../../orchestrator/grok-backend.js").GrokBackend;
+let buildAcpMcpServers: typeof import("../../orchestrator/grok-backend.js").buildAcpMcpServers;
 
 beforeEach(async () => {
   hoisted.procs.length = 0;
   hoisted.spawnArgs.length = 0;
   hoisted.received.length = 0;
   hoisted.config.mode = "complete";
-  ({ GrokBackend } = await import("../../orchestrator/grok-backend.js"));
+  ({ GrokBackend, buildAcpMcpServers } = await import("../../orchestrator/grok-backend.js"));
+});
+
+describe("buildAcpMcpServers", () => {
+  it("serializes HTTP panel MCP as SSE with empty headers (Grok rejects type:http)", () => {
+    const out = buildAcpMcpServers({
+      comfyui: { transport: "stdio", command: "node", args: ["mcp.js"], env: { FOO: "bar" } },
+      panel: { transport: "http", url: "http://127.0.0.1:9181/tab-1" },
+    });
+    expect(out).toEqual([
+      {
+        name: "comfyui",
+        command: "node",
+        args: ["mcp.js"],
+        env: [{ name: "FOO", value: "bar" }],
+      },
+      { type: "sse", name: "panel", url: "http://127.0.0.1:9181/tab-1", headers: [] },
+    ]);
+  });
 });
 
 /** A push-driven async channel of NeutralTurns (PanelAgent's "channel in" seam). */

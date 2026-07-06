@@ -53,3 +53,8 @@ arena-results*/transcripts/
 finetune/artifacts/
 arena-results-podverify/
 arena-results-quality-probe/
+/*.mp4
+/*.webp
+/*.mov
+/*.jpg
+/*.jpeg

@@ -292,3 +292,148 @@ export async function photomapIndexProgress(
   const progress = await readJson<unknown>(res);
   return { album_key: key, progress };
 }
+
+// ---------------------------------------------------------------------------
+// Curation (PhotoMapAI MIT — https://github.com/lstein/PhotoMapAI)
+// Monte Carlo FPS / K-means subset selection for LoRA training packs.
+// ---------------------------------------------------------------------------
+
+export type PhotomapCurationMethod = "fps" | "kmeans";
+
+export interface PhotomapCurationRequest {
+  album: string;
+  target_count: number;
+  iterations?: number;
+  method?: PhotomapCurationMethod;
+  excluded_indices?: number[];
+}
+
+export interface PhotomapCurationResult {
+  status: string;
+  count: number;
+  target_count: number;
+  selected_indices: number[];
+  selected_files: string[];
+  analysis_results?: Array<{
+    filename: string;
+    subfolder?: string;
+    filepath: string;
+    index: number;
+    count: number;
+    frequency: number;
+  }>;
+  error?: string;
+}
+
+export interface PhotomapCurationJobStart {
+  status: string;
+  job_id: string;
+  iterations: number;
+}
+
+function curationBody(request: PhotomapCurationRequest): Record<string, unknown> {
+  const album = request.album.trim();
+  if (!album) throw new ValidationError("album is required");
+  const target = request.target_count;
+  if (!Number.isInteger(target) || target <= 0) {
+    throw new ValidationError("target_count must be a positive integer");
+  }
+  const method = request.method ?? "fps";
+  if (method !== "fps" && method !== "kmeans") {
+    throw new ValidationError('method must be "fps" or "kmeans"');
+  }
+  return {
+    album,
+    target_count: target,
+    iterations: request.iterations ?? 1,
+    method,
+    excluded_indices: request.excluded_indices ?? [],
+  };
+}
+
+export async function photomapCurateSync(
+  request: PhotomapCurationRequest,
+  deps: PhotomapDeps = {},
+): Promise<PhotomapCurationResult> {
+  const cfg = resolvePhotomapConfig();
+  const res = await photomapFetch(
+    cfg,
+    "/curate_sync",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(curationBody(request)),
+      signal: AbortSignal.timeout(300_000),
+    },
+    deps,
+  );
+  return readJson<PhotomapCurationResult>(res);
+}
+
+export async function photomapCurateAsync(
+  request: PhotomapCurationRequest,
+  deps: PhotomapDeps = {},
+): Promise<PhotomapCurationJobStart> {
+  const cfg = resolvePhotomapConfig();
+  const res = await photomapFetch(
+    cfg,
+    "/curate",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(curationBody(request)),
+    },
+    deps,
+  );
+  return readJson<PhotomapCurationJobStart>(res);
+}
+
+export async function photomapCurateProgress(
+  jobId: string,
+  deps: PhotomapDeps = {},
+): Promise<{
+  status: string;
+  progress?: unknown;
+  result?: PhotomapCurationResult;
+  error?: string;
+}> {
+  const cfg = resolvePhotomapConfig();
+  const id = jobId.trim();
+  if (!id) throw new ValidationError("job_id is required");
+  const res = await photomapFetch(cfg, `/curate/progress/${encodeURIComponent(id)}`, {}, deps);
+  return readJson(res);
+}
+
+export async function photomapExportDataset(
+  input: {
+    album: string;
+    filenames: string[];
+    output_folder: string;
+  },
+  deps: PhotomapDeps = {},
+): Promise<{ status: string; exported: number; errors: string[] }> {
+  const cfg = resolvePhotomapConfig();
+  const album = input.album.trim();
+  if (!album) throw new ValidationError("album is required");
+  const output = input.output_folder.trim();
+  if (!output) throw new ValidationError("output_folder is required");
+  if (!input.filenames.length) {
+    throw new ValidationError("filenames must include at least one file path");
+  }
+  const res = await photomapFetch(
+    cfg,
+    "/export",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        album,
+        filenames: input.filenames,
+        output_folder: output,
+      }),
+      signal: AbortSignal.timeout(300_000),
+    },
+    deps,
+  );
+  return readJson(res);
+}

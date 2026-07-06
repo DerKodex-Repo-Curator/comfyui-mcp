@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  photomapCurateSync,
+  photomapExportDataset,
   photomapHealth,
   photomapImagePath,
   photomapListAlbums,
@@ -82,5 +84,52 @@ describe("photomap service", () => {
 
     const result = await photomapListAlbums({ fetch: fetchMock as typeof fetch });
     expect(result.baseUrl).toBe("http://nas.local:8050");
+  });
+
+  it("curate_sync POSTs /curate_sync", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          status: "success",
+          count: 2,
+          target_count: 2,
+          selected_indices: [1, 4],
+          selected_files: ["/photos/a.jpg", "/photos/b.jpg"],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await photomapCurateSync(
+      { album: "faces", target_count: 2, method: "fps", iterations: 3 },
+      { fetch: fetchMock as typeof fetch },
+    );
+    expect(result.count).toBe(2);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8050/curate_sync");
+    expect(init.method).toBe("POST");
+    const body = JSON.parse(String(init.body));
+    expect(body.album).toBe("faces");
+    expect(body.method).toBe("fps");
+  });
+
+  it("export POSTs filenames and output folder", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ status: "success", exported: 2, errors: [] }), {
+        status: 200,
+      }),
+    );
+
+    const result = await photomapExportDataset(
+      {
+        album: "faces",
+        filenames: ["/photos/a.jpg"],
+        output_folder: "/tmp/pack",
+      },
+      { fetch: fetchMock as typeof fetch },
+    );
+    expect(result.exported).toBe(2);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toBe("http://127.0.0.1:8050/export");
   });
 });

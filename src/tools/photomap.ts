@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
+  photomapCurateAsync,
+  photomapCurateProgress,
+  photomapCurateSync,
+  photomapExportDataset,
   photomapGetAlbum,
   photomapGetMetadata,
   photomapHealth,
@@ -159,6 +163,81 @@ export function registerPhotomapTools(server: McpServer): void {
     async (args) => {
       try {
         const result = await photomapIndexProgress(args.album_key);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "photomap_curate_sync",
+    "Run PhotoMapAI Monte Carlo curation synchronously (FPS or kmeans) to pick a diverse training subset. " +
+      "Returns selected_indices and selected_files. PhotoMapAI MIT — requires server on PHOTOMAP_URL.",
+    {
+      album: z.string().describe("PhotoMap album key"),
+      target_count: z.number().int().positive().describe("How many images to select"),
+      iterations: z.number().int().min(1).max(30).optional().describe("Monte Carlo iterations (default 3)"),
+      method: z.enum(["fps", "kmeans"]).optional().describe("fps (default) or kmeans"),
+      excluded_indices: z.array(z.number().int().nonnegative()).optional(),
+    },
+    async (args) => {
+      try {
+        const result = await photomapCurateSync(args);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "photomap_curate",
+    "Start async PhotoMapAI curation; poll with photomap_curate_progress until completed.",
+    {
+      album: z.string(),
+      target_count: z.number().int().positive(),
+      iterations: z.number().int().min(1).max(30).optional(),
+      method: z.enum(["fps", "kmeans"]).optional(),
+      excluded_indices: z.array(z.number().int().nonnegative()).optional(),
+    },
+    async (args) => {
+      try {
+        const result = await photomapCurateAsync(args);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "photomap_curate_progress",
+    "Poll async PhotoMapAI curation job status and result.",
+    {
+      job_id: z.string(),
+    },
+    async (args) => {
+      try {
+        const result = await photomapCurateProgress(args.job_id);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "photomap_export",
+    "Export selected image file paths from a PhotoMap album into a folder (copies sidecar captions when present).",
+    {
+      album: z.string(),
+      filenames: z.array(z.string()).describe("Absolute file paths from curation selected_files"),
+      output_folder: z.string().describe("Destination directory (created if needed)"),
+    },
+    async (args) => {
+      try {
+        const result = await photomapExportDataset(args);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return errorToToolResult(err);

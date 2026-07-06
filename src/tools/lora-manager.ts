@@ -5,6 +5,7 @@ import {
   toLoraSummary,
   type LoraCatalogEntry,
 } from "../services/lora-catalog.js";
+import { enrichLoraCatalogFromCivitai } from "../services/lora-civitai-enrich.js";
 import { errorToToolResult } from "../utils/errors.js";
 
 function formatEntry(entry: LoraCatalogEntry): string {
@@ -194,6 +195,26 @@ export function registerLoraManagerTools(server: McpServer): void {
             },
           ],
         };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "lora_catalog_enrich_civitai",
+    "Backfill CivitAI metadata into the LoRA catalog: model/version ids, trigger words, base model, tags, and source URL. " +
+      "Hashes local .safetensors files and queries CivitAI by AutoV2 hash. Run lora_catalog_sync first. " +
+      "CIVITAI_API_TOKEN recommended; COMFYUI_PATH required for hash lookup.",
+    {
+      limit: z.number().int().min(1).max(100).optional().describe("Max entries to process this call"),
+      force: z.boolean().optional().describe("Re-fetch even when civitai ids already set"),
+      id_or_path: z.string().optional().describe("Enrich a single catalog entry only"),
+    },
+    async (args) => {
+      try {
+        const result = await enrichLoraCatalogFromCivitai(args);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return errorToToolResult(err);
       }

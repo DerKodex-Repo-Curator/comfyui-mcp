@@ -12,6 +12,8 @@ import { extname, join, resolve, sep } from "node:path";
 import { allBackendReadiness } from "./backend-readiness.js";
 import { getLoraCatalog, loraPreviewsDir } from "../services/lora-catalog.js";
 import { setPanelSecret, listPanelSecretsMasked, CREDENTIAL_SLOTS } from "../services/panel-secrets.js";
+import { listTrainingPacks } from "../services/training-pack.js";
+import { photomapHealth } from "../services/photomap.js";
 import { logger } from "../utils/logger.js";
 
 const KNOWN_BACKENDS = [
@@ -186,12 +188,21 @@ function consoleLandingHtml(opts: {
     </section>
 
     <section>
+      <h2>Vault &amp; PhotoMap</h2>
+      <p id="vault-status">Loading vault…</p>
+      <ul>
+        <li><code>GET /api/vault</code> — LoRA catalog + training packs</li>
+        <li><code>GET /api/photomap</code> — PhotoMapAI health</li>
+      </ul>
+    </section>
+
+    <section>
       <h2>Coming here (panel stays in ComfyUI)</h2>
       <ul>
         <li>Start / stop / restart orchestrator</li>
         <li>MCP server mappings &amp; inherited <code>~/.claude.json</code> tools</li>
         <li>OAuth &amp; API provider sign-in</li>
-        <li>LoRA library, image collections, Photomap-style tooling</li>
+        <li>LoRA library UI, mapper wizard, Apple Photos (Face G)</li>
         <li>A2UI-rich tool surfaces</li>
       </ul>
     </section>
@@ -207,7 +218,9 @@ function consoleLandingHtml(opts: {
 
     <section>
       <h2>API</h2>
-      <pre>GET /api/status</pre>
+      <pre>GET /api/status
+GET /api/vault
+GET /api/photomap</pre>
     </section>
   </main>
   <script>
@@ -219,6 +232,15 @@ function consoleLandingHtml(opts: {
       el.innerHTML = '<span class="ok">Orchestrator running</span> — ' + (rows || 'no backends');
     }).catch(() => {
       document.getElementById('status').innerHTML = '<span class="warn">Could not load status</span>';
+    });
+    fetch('/api/vault').then(r => r.json()).then(d => {
+      const el = document.getElementById('vault-status');
+      if (!d.ok) { el.textContent = 'Vault unavailable'; return; }
+      el.innerHTML = 'LoRA catalog: <strong>' + d.lora_count + '</strong> entries · ' +
+        'Training packs: <strong>' + d.training_pack_count + '</strong>';
+    }).catch(() => {
+      const el = document.getElementById('vault-status');
+      if (el) el.textContent = 'Vault status unavailable';
     });
   </script>
 </body>
@@ -403,6 +425,45 @@ export function startPanelConsoleHttpServer(opts: {
       const bound = server.address();
       const boundPort = bound && typeof bound === "object" ? bound.port : opts.port;
       sendFramedHtml(res, 200, credentialsHtml(CREDENTIAL_SLOTS, `http://${host}:${boundPort}`, opts.token ?? ""));
+      return;
+    }
+    if (req.method === "GET" && path === "/api/vault") {
+      try {
+        const catalog = getLoraCatalog();
+        const loras = catalog.list({ limit: 500 });
+        const packs = listTrainingPacks();
+        sendJson(res, 200, {
+          ok: true,
+          lora_count: loras.length,
+          loras: loras.slice(0, 50).map((e) => ({
+            id: e.id,
+            displayName: e.displayName,
+            relPath: e.relPath,
+            missing: !!e.missing,
+            civitaiVersionId: e.civitaiVersionId,
+          })),
+          training_pack_count: packs.length,
+          training_packs: packs.slice(0, 20),
+        });
+      } catch (err) {
+        sendJson(res, 500, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+    if (req.method === "GET" && path === "/api/photomap") {
+      try {
+        const health = await photomapHealth();
+        sendJson(res, 200, { reachable: true, ...health });
+      } catch (err) {
+        sendJson(res, 200, {
+          ok: false,
+          reachable: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       return;
     }
     if (req.method === "GET" && (path === "/" || path === "/console")) {

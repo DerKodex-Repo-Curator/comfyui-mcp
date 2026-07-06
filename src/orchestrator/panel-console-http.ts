@@ -6,8 +6,11 @@
 //
 // Bound to 127.0.0.1 only; never exposed off-host.
 
+import { createReadStream, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { extname, join, resolve } from "node:path";
 import { allBackendReadiness } from "./backend-readiness.js";
+import { getLoraCatalog, loraPreviewsDir } from "../services/lora-catalog.js";
 import { setPanelSecret, listPanelSecretsMasked, CREDENTIAL_SLOTS } from "../services/panel-secrets.js";
 import { logger } from "../utils/logger.js";
 
@@ -91,6 +94,51 @@ function readJsonBody(req: IncomingMessage): Promise<any> {
     req.on("error", (e) => { settle(() => reject(e)); });
     req.on("close", () => { settle(() => reject(new Error("request closed before body was fully received"))); });
   });
+}
+
+const PREVIEW_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
+function serveLoraPreview(req: IncomingMessage, res: ServerResponse): void {
+  let id = "";
+  try {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    id = (url.searchParams.get("id") ?? "").trim();
+  } catch {
+    sendJson(res, 400, { ok: false, error: "bad request" });
+    return;
+  }
+  if (!id) {
+    sendJson(res, 400, { ok: false, error: "id required" });
+    return;
+  }
+  const catalog = getLoraCatalog();
+  const entry = catalog.get(id);
+  if (!entry?.previewFile) {
+    sendJson(res, 404, { ok: false, error: "no preview" });
+    return;
+  }
+  const previewsRoot = resolve(loraPreviewsDir());
+  const abs = resolve(join(previewsRoot, entry.previewFile));
+  if (!abs.startsWith(previewsRoot + "/") && abs !== previewsRoot) {
+    sendJson(res, 403, { ok: false, error: "invalid preview path" });
+    return;
+  }
+  if (!existsSync(abs)) {
+    sendJson(res, 404, { ok: false, error: "preview file missing" });
+    return;
+  }
+  const mime = PREVIEW_MIME[extname(abs).toLowerCase()] ?? "application/octet-stream";
+  res.writeHead(200, {
+    "Content-Type": mime,
+    "Cache-Control": "private, max-age=3600",
+  });
+  createReadStream(abs).pipe(res);
 }
 
 function consoleLandingHtml(opts: {
@@ -341,6 +389,10 @@ export function startPanelConsoleHttpServer(opts: {
         backends,
         any_ready,
       });
+      return;
+    }
+    if (req.method === "GET" && path === "/api/lora-preview") {
+      serveLoraPreview(req, res);
       return;
     }
     if (req.method === "GET" && path === "/credentials") {

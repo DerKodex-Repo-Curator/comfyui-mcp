@@ -54,6 +54,7 @@ import { GeminiBackend, GEMINI_DEFAULT_MODEL } from "./gemini-backend.js";
 import { OllamaBackend } from "./ollama-backend.js";
 import { allBackendReadiness } from "./backend-readiness.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
+import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "./panel-console-http.js";
 import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor, type StallReport } from "../services/queue-monitor.js";
@@ -1168,6 +1169,23 @@ export async function runPanelOrchestrator(): Promise<void> {
     }
   }
 
+  // Loopback MCP console (control plane): OAuth, MCP mappings, service lifecycle.
+  // Default port bridge+2 (9180→9182). Opened from the panel Advanced section.
+  let panelConsoleHttp: PanelConsoleHttpServer | null = null;
+  const consolePort = Number(process.env.COMFYUI_MCP_CONSOLE_PORT) || bridgePort + 2;
+  try {
+    panelConsoleHttp = await startPanelConsoleHttpServer({
+      port: consolePort,
+      bridgePort,
+      comfyuiUrl,
+    });
+  } catch (err) {
+    logger.warn(
+      `[panel-orchestrator] could not start MCP console on :${consolePort}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const consoleUrl = panelConsoleHttp?.url ?? `http://127.0.0.1:${consolePort}`;
+
   // Shared MCP server config for BOTH the Codex and Gemini backends — they take an
   // identical { transport } spec (the headless comfyui stdio MCP + the panel HTTP
   // MCP for this tab). Claude keeps its own in-process server set unchanged.
@@ -1693,7 +1711,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS, {
         customEndpointConfigured: !!customBaseUrl,
       });
-      bridge.push({ type: "backends", backends, any_ready }, tabId);
+      bridge.push({ type: "backends", backends, any_ready, console_url: consoleUrl }, tabId);
       // llama.cpp reality check (async re-push): the binary is often unzipped
       // anywhere (not on PATH), so static detection says "not installed" while
       // a server is HAPPILY ANSWERING. A live endpoint beats a missing binary —
@@ -1708,7 +1726,7 @@ export async function runPanelOrchestrator(): Promise<void> {
             lc.cli = true;
             lc.auth = true;
             lc.ready = true;
-            bridge.push({ type: "backends", backends, any_ready: true }, tabId);
+            bridge.push({ type: "backends", backends, any_ready: true, console_url: consoleUrl }, tabId);
           })
           .catch(() => {});
       }
@@ -2552,7 +2570,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       ? " — no local ComfyUI install found (COMFYUI_PATH unset, auto-detect came up empty); node/model installs still run via ComfyUI-Manager"
       : " — remote target: installs/downloads run ON the ComfyUI host via its Manager (a local path would be the wrong filesystem; only local-FS tools like verify_custom_node are unavailable)";
   logger.info(
-    `[panel-orchestrator] ready — bridge on ws://127.0.0.1:${bridgePort}; an agent spawns per ComfyUI tab on its first message (model=${model}, comfyui=${comfyuiUrl}${pathNote})`,
+    `[panel-orchestrator] ready — bridge on ws://127.0.0.1:${bridgePort}, console on ${consoleUrl}; an agent spawns per ComfyUI tab on its first message (model=${model}, comfyui=${comfyuiUrl}${pathNote})`,
   );
 
   let shuttingDown = false;
@@ -2572,6 +2590,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     }
     // Tear down the loopback panel HTTP MCP (codex/gemini mode only).
     if (panelMcpHttp) await panelMcpHttp.stop().catch(() => {});
+    if (panelConsoleHttp) await panelConsoleHttp.stop().catch(() => {});
     secureBridge?.stop();
     await bridge.stop();
     // Only remove the lockfile if it still names us — avoid clobbering a fresh

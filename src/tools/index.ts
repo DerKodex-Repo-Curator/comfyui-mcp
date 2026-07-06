@@ -45,6 +45,7 @@ import { registerLoraManagerTools } from "./lora-manager.js";
 import { registerConceptImageTools } from "./concept-image.js";
 import { registerToolkitTools } from "./toolkit.js";
 import { registerRunComfyTools } from "./runcomfy.js";
+import { registerWorkflowPipelineTools } from "./workflow-pipeline.js";
 import { registerImageConvertTools } from "./image-convert.js";
 import { registerColorAnalysisTools } from "./color-analysis.js";
 import { registerStorageUploadTools } from "./storage-upload.js";
@@ -68,6 +69,7 @@ import { ToolCatalog } from "./catalog.js";
 const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: McpServer) => void]> = [
   ["comfy-cli", registerComfyCliTools],
   ["workflows", registerWorkflowExecuteTools],
+  ["workflows", registerWorkflowPipelineTools],
   ["workflow-authoring", registerWorkflowVisualizeTools],
   ["workflow-authoring", registerWorkflowComposeTools],
   ["workflow-authoring", registerWorkflowValidateTools],

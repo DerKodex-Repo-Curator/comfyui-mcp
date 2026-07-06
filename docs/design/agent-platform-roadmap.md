@@ -41,10 +41,10 @@ Extend comfyui-mcp orchestrator + panel with multi-provider agents, cross-provid
 - MCP tools: `runcomfy_list_pods`, `runcomfy_sync_workflow`, `runcomfy_queue`
 - Env: `RUNCOMFY_API_KEY`, `RUNCOMFY_USER_ID`, optional `RUNCOMFY_API_BASE` ([runcomfy-connector.md](./runcomfy-connector.md))
 
-## Phase 5 — Multi-workflow projects (P4)
+## Phase 5 — Multi-workflow projects (orchestrator done)
 
-- YAML project manifest (ordered workflows, shared assets)
-- `run_workflow_pipeline` — execute stages with per-workflow pins
+- YAML project manifest (ordered stages, shared assets, chain_from between stages)
+- MCP tool: `run_workflow_pipeline` — per-stage pins, inputs, wait/timeout, dry_run ([workflow-pipeline.md](./workflow-pipeline.md))
 
 ## Notes
 

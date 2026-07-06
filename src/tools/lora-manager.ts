@@ -6,6 +6,10 @@ import {
   type LoraCatalogEntry,
 } from "../services/lora-catalog.js";
 import { enrichLoraCatalogFromCivitai } from "../services/lora-civitai-enrich.js";
+import {
+  detectLoraManagerInstall,
+  importLoraCatalogFromSidecars,
+} from "../services/lora-manager-sidecar.js";
 import { errorToToolResult } from "../utils/errors.js";
 
 function formatEntry(entry: LoraCatalogEntry): string {
@@ -195,6 +199,43 @@ export function registerLoraManagerTools(server: McpServer): void {
             },
           ],
         };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "lora_catalog_detect_lora_manager",
+    "Detect whether willmiao's ComfyUI LoRA Manager is installed and whether its Civitai API key is configured. " +
+      "LoRA Manager stores rich Civitai metadata in .metadata.json sidecars beside each LoRA and offers a /loras web UI plus browser extension for one-click Civitai downloads.",
+    {},
+    async () => {
+      try {
+        const result = detectLoraManagerInstall();
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "lora_catalog_import_sidecars",
+    "Import metadata from ComfyUI LoRA Manager .metadata.json sidecar files into the comfyui-mcp catalog. " +
+      "Pulls Civitai trigger words (trainedWords), usage_tips strength/clip_skip, tags, descriptions, and optional preview images. " +
+      "Run lora_catalog_sync first. Prefer this over lora_catalog_enrich_civitai when LoRA Manager has already fetched Civitai data. " +
+      "COMFYUI_PATH required.",
+    {
+      limit: z.number().int().min(1).max(500).optional(),
+      force: z.boolean().optional().describe("Overwrite existing curated catalog fields"),
+      import_previews: z.boolean().optional().describe("Copy sidecar preview_url into catalog previews (default true)"),
+      rel_path: z.string().optional().describe("Import a single LoRA by models/ relative path"),
+    },
+    async (args) => {
+      try {
+        const result = await importLoraCatalogFromSidecars(args);
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return errorToToolResult(err);
       }

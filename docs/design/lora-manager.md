@@ -23,11 +23,26 @@ Overrides for tests: `COMFYUI_MCP_LORA_CATALOG`, `COMFYUI_MCP_LORA_PREVIEWS`.
 - `sourceUrl`, CivitAI ids, `tags`, `notes`
 - `missing` — set by sync when file no longer on disk
 
+## ComfyUI LoRA Manager integration (willmiao)
+
+[ComfyUI LoRA Manager](https://github.com/willmiao/ComfyUI-Lora-Manager) stores rich Civitai metadata in **`.metadata.json` sidecars** beside each LoRA (trigger words, `usage_tips` strength/clip_skip, previews, tags). It also provides a `/loras` web UI and a Civitai browser extension for one-click downloads when a Civitai API key is set in LoRA Manager settings.
+
+comfyui-mcp does not replace LoRA Manager — it **imports** sidecar data into the agent catalog so orchestrator/panel tools share the same trigger words and strength hints.
+
+Recommended flow when LoRA Manager is installed:
+
+1. `lora_catalog_sync` — ensure every on-disk LoRA has a catalog stub
+2. `lora_catalog_import_sidecars` — pull Civitai + usage_tips from sidecars (fast, no API calls)
+3. `lora_catalog_enrich_civitai` — only for LoRAs missing sidecars or hash-only matches
+
 ## MCP tools (headless `comfyui` server)
 
 | Tool | Role |
 |------|------|
 | `lora_catalog_sync` | Scan `list_local_models(loras)` and merge into catalog |
+| `lora_catalog_detect_lora_manager` | Detect LoRA Manager install + Civitai API key in its settings |
+| `lora_catalog_import_sidecars` | Import `.metadata.json` sidecars (Civitai trainedWords, usage_tips, previews) |
+| `lora_catalog_enrich_civitai` | Hash-based Civitai backfill when sidecars are absent |
 | `lora_catalog_list` | Human-readable list with filters |
 | `lora_catalog_get` | One entry by id or path |
 | `lora_catalog_upsert` | Create/update metadata |

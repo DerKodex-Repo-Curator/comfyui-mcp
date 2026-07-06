@@ -35,10 +35,11 @@ Extend comfyui-mcp orchestrator + panel with multi-provider agents, cross-provid
 - MCP tools: `toolkit_status`, `toolkit_run_job`, `toolkit_list_models`
 - Env: `AI_TOOLKIT_ROOT`, `AI_TOOLKIT_PORT` / `AI_TOOLKIT_URL`, `AI_TOOLKIT_AUTH` ([ai-toolkit-supervisor.md](./ai-toolkit-supervisor.md))
 
-## Phase 4 — RunComfy connector (P3)
+## Phase 4 — RunComfy connector (orchestrator done)
 
-- API recon for RunComfy pod lifecycle
-- Tools: `runcomfy_list_pods`, `runcomfy_sync_workflow`, `runcomfy_queue`
+- Server API client for dedicated ComfyUI pods (`beta-api.runcomfy.net`)
+- MCP tools: `runcomfy_list_pods`, `runcomfy_sync_workflow`, `runcomfy_queue`
+- Env: `RUNCOMFY_API_KEY`, `RUNCOMFY_USER_ID`, optional `RUNCOMFY_API_BASE` ([runcomfy-connector.md](./runcomfy-connector.md))
 
 ## Phase 5 — Multi-workflow projects (P4)
 

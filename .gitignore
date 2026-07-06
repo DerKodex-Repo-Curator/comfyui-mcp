@@ -50,3 +50,6 @@ arena-results*/panel-arena-results.json
 /*.png
 arena-results-local-batch/
 arena-results*/transcripts/
+finetune/artifacts/
+arena-results-podverify/
+arena-results-quality-probe/

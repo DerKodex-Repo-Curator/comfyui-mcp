@@ -393,7 +393,7 @@ Create a **Pod template** (or fill these on a one-off GPU pod):
 |-----|---------|---------|
 | `JUPYTER_PASSWORD` | *(unset)* | set to enable JupyterLab on :8888 (base behavior) |
 | `PUBLIC_KEY` | *(RunPod injects)* | SSH public key (base behavior) |
-| `COMFY_SECURITY_LEVEL` | `normal-` | Manager security level (`weak` = most permissive) |
+| `COMFY_SECURITY_LEVEL` | `weak` | Manager security level — `weak` lets the agent install nodes from git URLs (single-user pod); set `normal-` to restore Manager's guardrails |
 | `COMFY_NETWORK_MODE` | `personal_cloud` | must stay `personal_cloud` for remote installs |
 | `COMFY_EXTRA_ARGS` | *(empty)* | extra ComfyUI flags appended verbatim by the entrypoint |
 | `COMFY_HOME` | `/opt/ComfyUI` | baked ComfyUI path (rarely overridden) |
@@ -500,7 +500,7 @@ To shave that:
   (`python -c "import torch;print(torch.__version__, torch.version.cuda)"`) —
   some older `cu1281` tags shipped a cu-default torch.
 
-> **DRAFT — not build-tested.** Build once locally and watch for: (a) the base's
+> **First build on a new base tag?** Watch for: (a) the base's
 > `/start.sh` actually invokes `/post_start.sh` (it does in `runpod/containers`,
 > but confirm for your exact tag); (b) `main.py --help` lists `--user-directory`,
 > `--input-directory`, `--output-directory`, `--extra-model-paths-config`,

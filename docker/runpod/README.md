@@ -423,6 +423,14 @@ Manager's aria2 path (like its built-in one) does not attach `HF_TOKEN` to
 download requests — gated-model fetches need a token-authenticated URL either
 way.
 
+aria2 only covers Manager's install-model route. The **other** fetch path —
+custom nodes (Impact, WAS, …) and ComfyUI internals downloading via
+`huggingface_hub` — is accelerated separately: the image bakes `hf_transfer`
+(HF's Rust parallel downloader) + `hf_xet` and sets
+`HF_HUB_ENABLE_HF_TRANSFER=1`. The two ship together deliberately: with the
+flag set and the package missing, `huggingface_hub` raises at download time
+(the integrity gate asserts the import for exactly that reason).
+
 > **First boot vs warm restart:** both are fast. First boot additionally creates
 > the volume data dirs and copies the spotcheck model (if baked); warm restart
 > skips even those. Watch the pod log / the "starting" page; ComfyUI init is

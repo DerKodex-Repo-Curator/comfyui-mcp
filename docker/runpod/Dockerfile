@@ -331,6 +331,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends aria2 \
  && rm -rf /var/lib/apt/lists/* \
  && "${VPIP}" install --no-cache-dir aria2p
 
+# hf_transfer — Rust parallel downloader for the OTHER model-fetch path: aria2
+# only covers Manager's install-model; many custom nodes (Impact, WAS, …) and
+# ComfyUI internals download via huggingface_hub, which stays single-stream
+# unless HF_HUB_ENABLE_HF_TRANSFER=1 (env set in §10) AND the hf_transfer
+# package is importable — the hub RAISES at download time if the flag is set
+# without the package, so they ship together. hf_xet accelerates Xet-backed
+# repos the same way (hub uses it automatically when present).
+RUN "${VPIP}" install --no-cache-dir hf_transfer hf_xet
+
 # -----------------------------------------------------------------------------
 # custom_nodes PERSISTENCE seed. Move the image's baked custom_nodes (the Agent
 # Panel + ComfyUI's builtins) to a SEED dir. At boot, post_start.sh symlinks
@@ -366,7 +375,9 @@ RUN set -e; \
       || { echo "INTEGRITY GATE FAILED: aria2c missing (fast model downloads)"; exit 1; }; \
     "${COMFY_HOME}/venv/bin/python" -c "import aria2p" \
       || { echo "INTEGRITY GATE FAILED: aria2p not importable in venv (Manager would crash at startup with COMFYUI_MANAGER_ARIA2_SERVER set)"; exit 1; }; \
-    echo "integrity gate passed: panel seed + configs + entrypoint + venv + aria2 all sane"
+    "${COMFY_HOME}/venv/bin/python" -c "import hf_transfer" \
+      || { echo "INTEGRITY GATE FAILED: hf_transfer not importable in venv (HF_HUB_ENABLE_HF_TRANSFER=1 is baked — huggingface_hub downloads would raise at runtime)"; exit 1; }; \
+    echo "integrity gate passed: panel seed + configs + entrypoint + venv + aria2 + hf_transfer all sane"
 
 # -----------------------------------------------------------------------------
 # 10. Volume hygiene (LAST so it doesn't bust the expensive build-layer cache).
@@ -381,7 +392,8 @@ ENV PIP_CACHE_DIR=/root/.cache/pip \
     HF_HOME=/root/.cache/huggingface \
     UV_CACHE_DIR=/root/.cache/uv \
     VIRTUALENV_OVERRIDE_APP_DATA=/root/.cache/virtualenv \
-    XDG_CACHE_HOME=/root/.cache
+    XDG_CACHE_HOME=/root/.cache \
+    HF_HUB_ENABLE_HF_TRANSFER=1
 
 # Runtime-only env overrides (late on purpose — they never affect build steps,
 # so tweaking them must not bust the torch/ComfyUI layer cache above):

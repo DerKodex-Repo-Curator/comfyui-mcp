@@ -263,6 +263,22 @@ interface OrchestratorLock {
   pid?: unknown;
   startedAt?: unknown;
   version?: unknown;
+  comfyuiUrl?: unknown;
+}
+
+/** Can the target ComfyUI answer /system_stats within timeoutMs? */
+async function probeComfyUi(url: string, timeoutMs = 3000): Promise<boolean> {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const res = await fetch(new URL("system_stats", url.endsWith("/") ? url : `${url}/`), {
+      signal: ctl.signal,
+    });
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 function readOrchestratorLock(lockPath: string): OrchestratorLock | null {
@@ -319,12 +335,23 @@ async function tryReclaimBridgePort(
     heldVersion !== "unknown" && myVersion !== "unknown" && heldVersion !== myVersion
       ? `an older comfyui-mcp v${heldVersion} (this is v${myVersion})`
       : `another comfyui-mcp v${heldVersion} session`;
+  // Show WHICH ComfyUI each side is driving — the classic tangle is a stale
+  // session recalled from shell history still "driving" a terminated pod while
+  // the user tries to connect to the live one; without the URLs both sessions
+  // look identical and the takeover choice is a coin flip.
+  const heldUrl = typeof lock?.comfyuiUrl === "string" ? lock.comfyuiUrl : null;
+  const myUrl = process.env.COMFYUI_URL || "http://127.0.0.1:8188";
+  let heldUrlNote = "";
+  if (heldUrl) {
+    const alive = await probeComfyUi(heldUrl);
+    heldUrlNote = `, driving ${heldUrl}${alive ? "" : " (NOT RESPONDING — likely a terminated pod / stale session)"}`;
+  }
   logger.warn(
     `[panel-orchestrator] port ${port} is already held by ${holderNote} — pid ${pid}` +
-      `${startedAt ? `, started ${startedAt}` : ""}.`,
+      `${startedAt ? `, started ${startedAt}` : ""}${heldUrlNote}.`,
   );
   const ok = await promptYesNo(
-    `Stop pid ${pid} and take over this port with the current version? [y/N] `,
+    `Stop pid ${pid} and take over port ${port} for ${myUrl}? [y/N] `,
   );
   if (!ok) return false;
 
@@ -565,6 +592,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         // npm package version — read by a NEXT orchestrator's tryReclaimBridgePort
         // to tell the user whose/which version currently holds the port.
         version: detectInstallMode().currentVersion ?? null,
+        // The ComfyUI this session drives — shown by a NEXT orchestrator's
+        // takeover prompt so a stale session (dead pod URL from shell history)
+        // identifies itself instead of looking like a twin.
+        comfyuiUrl: process.env.COMFYUI_URL || null,
       }),
     );
   } catch (err) {
@@ -581,6 +612,23 @@ export async function runPanelOrchestrator(): Promise<void> {
   // whatever ComfyUI (local or a RunPod proxy) the browser is actually on. No
   // `connect <url>` needed.
   let comfyuiUrl = process.env.COMFYUI_URL ?? "http://127.0.0.1:8188";
+  // Dead-target guard: a `connect` aimed at a TERMINATED pod (an old URL
+  // recalled from shell history) otherwise looks perfectly alive — bridge up,
+  // tunnel up — while its advertise goes to a dead host, so the panel never
+  // receives this session's token and spams "missing/invalid token". Name the
+  // real problem up front. Warn-only and fire-and-forget: the target may
+  // legitimately still be booting, and a panel `hello` can retarget us later.
+  void (async () => {
+    const target = comfyuiUrl;
+    if (await probeComfyUi(target, 6000)) return;
+    logger.warn(
+      `[panel-orchestrator] the target ComfyUI at ${target} is NOT responding. ` +
+        `If it is a pod that is still starting, this resolves itself — but if the pod was ` +
+        `TERMINATED, this is a stale URL (shell history?) and the panel will never be able to ` +
+        `connect to this session (it shows up as 'missing/invalid token' rejections). ` +
+        `Double-check the pod id in the URL and re-run connect with the current one.`,
+    );
+  })();
   // ComfyUI install path — when set AND the target is loopback, the spawned agent's
   // MCP runs in LOCAL mode (download_model / apply_manifest / installer-pack /
   // model-scan tools). A REMOTE target (non-loopback) forces remote-only, so we

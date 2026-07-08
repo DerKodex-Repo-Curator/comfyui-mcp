@@ -1801,8 +1801,18 @@ export async function runPanelOrchestrator(): Promise<void> {
   const downloadTimer = setInterval(pollDownloads, 700);
   downloadTimer.unref?.();
 
+  // The no-path suffix must not read as an error when it is BY DESIGN: for a
+  // remote target a local path is the wrong filesystem and is deliberately
+  // dropped — installs/downloads run host-side via ComfyUI-Manager (remote
+  // parity), so the agent is NOT install-limited there. Only a LOOPBACK target
+  // with no resolvable install is a real (and now rare, post-auto-detect) gap.
+  const pathNote = comfyuiPath
+    ? `, path=${comfyuiPath}`
+    : isLoopbackUrl(comfyuiUrl)
+      ? " — no local ComfyUI install found (COMFYUI_PATH unset, auto-detect came up empty); node/model installs still run via ComfyUI-Manager"
+      : " — remote target: installs/downloads run ON the ComfyUI host via its Manager (a local path would be the wrong filesystem; only local-FS tools like verify_custom_node are unavailable)";
   logger.info(
-    `[panel-orchestrator] ready — bridge on ws://127.0.0.1:${bridgePort}; an agent spawns per ComfyUI tab on its first message (model=${model}, comfyui=${comfyuiUrl}${comfyuiPath ? `, path=${comfyuiPath}` : " — no COMFYUI_PATH, local install/pack tools limited"})`,
+    `[panel-orchestrator] ready — bridge on ws://127.0.0.1:${bridgePort}; an agent spawns per ComfyUI tab on its first message (model=${model}, comfyui=${comfyuiUrl}${pathNote})`,
   );
 
   let shuttingDown = false;

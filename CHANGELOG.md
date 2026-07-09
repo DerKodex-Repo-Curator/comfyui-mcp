@@ -6,6 +6,25 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.28.0] - 2026-07-09
+
+### RunPod image
+
+#### Added
+- generalize boot auto-update to all baked git nodes (panel + Crystools) (#157)
+- bake ComfyUI-Crystools — VRAM/RAM/CPU/GPU monitor in the topbar (#156)
+
+### MCP
+
+#### Added
+- full hands-off model/server lifecycle (#160 follow-up) (#164)
+- LM Studio as a first-class local backend (#160) (#163)
+
+#### Fixed
+- pin temperature 0 — nondeterministic empty finals after tool results (#166)
+- deliver renders in-turn for headless (mobile/remote) tabs (#165)
+
+
 ## [0.27.0] - 2026-07-08
 
 _No user-facing changes._

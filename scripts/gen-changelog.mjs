@@ -126,7 +126,14 @@ function today() {
 
 // ── main ─────────────────────────────────────────────────────────────────────
 const backfill = process.argv.includes("--backfill");
-const version = (process.argv.find((a) => /^v?\d+\.\d+\.\d+/.test(a)) || "").replace(/^v/, "");
+let version = (process.argv.find((a) => /^v?\d+\.\d+\.\d+/.test(a)) || "").replace(/^v/, "");
+// --from-pkg: read the version npm just wrote to package.json. The lifecycle
+// hook previously passed $npm_package_version, an sh-only expansion that is
+// silently EMPTY under cmd.exe — `npm version` then died mid-release on
+// Windows (files bumped, commit+tag never made).
+if (!version && process.argv.includes("--from-pkg")) {
+  version = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf-8")).version;
+}
 if (!backfill && !/^\d+\.\d+\.\d+/.test(version)) {
   console.error(`usage: node scripts/gen-changelog.mjs <version> | --backfill`);
   process.exit(1);

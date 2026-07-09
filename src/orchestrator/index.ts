@@ -1173,11 +1173,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Default port bridge+2 (9180→9182). Opened from the panel Advanced section.
   let panelConsoleHttp: PanelConsoleHttpServer | null = null;
   const consolePort = Number(process.env.COMFYUI_MCP_CONSOLE_PORT) || bridgePort + 2;
+  const consoleToken = randomBytes(24).toString("hex");
   try {
     panelConsoleHttp = await startPanelConsoleHttpServer({
       port: consolePort,
       bridgePort,
       comfyuiUrl,
+      token: consoleToken,
     });
   } catch (err) {
     logger.warn(
@@ -1711,7 +1713,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS, {
         customEndpointConfigured: !!customBaseUrl,
       });
-      bridge.push({ type: "backends", backends, any_ready, console_url: consoleUrl }, tabId);
+      bridge.push({ type: "backends", backends, any_ready, console_url: consoleUrl, console_token: consoleToken }, tabId);
       // llama.cpp reality check (async re-push): the binary is often unzipped
       // anywhere (not on PATH), so static detection says "not installed" while
       // a server is HAPPILY ANSWERING. A live endpoint beats a missing binary —
@@ -1726,7 +1728,7 @@ export async function runPanelOrchestrator(): Promise<void> {
             lc.cli = true;
             lc.auth = true;
             lc.ready = true;
-            bridge.push({ type: "backends", backends, any_ready: true, console_url: consoleUrl }, tabId);
+            bridge.push({ type: "backends", backends, any_ready: true, console_url: consoleUrl, console_token: consoleToken }, tabId);
           })
           .catch(() => {});
       }

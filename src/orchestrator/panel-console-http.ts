@@ -60,9 +60,25 @@ function tokenOk(req: IncomingMessage, expected?: string): boolean {
 function readJsonBody(req: IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (c) => { data += c; if (data.length > 1_000_000) req.destroy(); });
-    req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
-    req.on("error", reject);
+    let settled = false;
+    let oversized = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+    req.on("data", (c) => {
+      if (oversized) return; // already over limit: drain and discard the rest, don't destroy mid-stream
+      data += c;
+      if (data.length > 1_000_000) {
+        oversized = true;
+        data = "";
+        settle(() => reject(new Error("body too large")));
+      }
+    });
+    req.on("end", () => { settle(() => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } }); });
+    req.on("error", (e) => { settle(() => reject(e)); });
+    req.on("close", () => { settle(() => reject(new Error("request closed before body was fully received"))); });
   });
 }
 

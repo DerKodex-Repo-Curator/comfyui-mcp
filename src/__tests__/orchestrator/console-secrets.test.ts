@@ -42,4 +42,14 @@ describe("console /api/secrets", () => {
     });
     expect(bad.status).toBe(400);
   });
+
+  it("rejects an oversized body instead of hanging", async () => {
+    const oversized = JSON.stringify({ slot: "civitai", value: "x".repeat(1_100_000) });
+    const r = await fetch(`${base()}/api/secrets?token=${TOKEN}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    expect(r.status).toBe(400);
+    await r.text().catch(() => {});
+  }, 5000);
 });

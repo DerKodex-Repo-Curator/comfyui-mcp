@@ -1460,17 +1460,47 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             const filename = p.replace(/.*[\/]/, "");
             resolved.push({ kind, dataUrl, filename, caption: item.caption });
           } else {
-            // ComfyUI /view ref — forward to panel; panel builds the URL.
-            resolved.push({
-              kind: "viewRef",
-              viewRef: {
+            // ComfyUI /view ref. A browser panel fetches it same-origin — but a
+            // HEADLESS (mobile/remote) client can't reach ComfyUI, so resolve the
+            // bytes HERE and inline them as a data URL. Best-effort: any failure
+            // (fetch error, non-media, too big) falls back to forwarding the ref,
+            // which the client renders as a caption card.
+            let inlined = false;
+            if (ctx.bridge.isHeadless(ctx.tabId)) {
+              try {
+                const base = (process.env.COMFYUI_URL ?? "http://127.0.0.1:8188").replace(/\/+$/, "");
+                const qs = new URLSearchParams({ filename: src.filename, type: src.type ?? "output" });
+                if (src.subfolder) qs.set("subfolder", src.subfolder);
+                const resp = await fetch(`${base}/view?${qs.toString()}`);
+                if (resp.ok) {
+                  const mime = resp.headers.get("content-type") ?? "";
+                  const buf = Buffer.from(await resp.arrayBuffer());
+                  if ((mime.startsWith("image/") || mime.startsWith("video/")) && buf.length <= MAX_BYTES) {
+                    resolved.push({
+                      kind: mime.startsWith("video/") ? "video" : "image",
+                      dataUrl: `data:${mime};base64,${buf.toString("base64")}`,
+                      filename: src.filename,
+                      caption: item.caption,
+                    });
+                    inlined = true;
+                  }
+                }
+              } catch {
+                // fall through to the viewRef path
+              }
+            }
+            if (!inlined) {
+              resolved.push({
+                kind: "viewRef",
+                viewRef: {
+                  filename: src.filename,
+                  subfolder: src.subfolder,
+                  type: src.type,
+                },
                 filename: src.filename,
-                subfolder: src.subfolder,
-                type: src.type,
-              },
-              filename: src.filename,
-              caption: item.caption,
-            });
+                caption: item.caption,
+              });
+            }
           }
         }
 

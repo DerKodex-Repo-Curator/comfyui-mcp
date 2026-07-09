@@ -8,7 +8,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { allBackendReadiness } from "./backend-readiness.js";
-import { setPanelSecret, listPanelSecretsMasked } from "../services/panel-secrets.js";
+import { setPanelSecret, listPanelSecretsMasked, CREDENTIAL_SLOTS } from "../services/panel-secrets.js";
 import { logger } from "../utils/logger.js";
 
 const KNOWN_BACKENDS = [
@@ -43,6 +43,17 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Length": Buffer.byteLength(html),
     "Cache-Control": "no-store",
+  });
+  res.end(html);
+}
+
+const FRAME_ANCESTORS = "frame-ancestors http://127.0.0.1:8188 http://localhost:8188 'self'";
+function sendFramedHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": Buffer.byteLength(html),
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": FRAME_ANCESTORS,
   });
   res.end(html);
 }
@@ -163,6 +174,117 @@ function consoleLandingHtml(opts: {
 </html>`;
 }
 
+function credentialsHtml(
+  slots: { id: string; label: string; help?: string }[],
+  consoleUrl: string,
+  token: string,
+): string {
+  const rows = slots
+    .map(
+      (s) => `      <div class="row" data-slot="${escapeHtml(s.id)}">
+        <div class="meta"><span class="label">${escapeHtml(s.label)}</span>${s.help ? `<span class="help">${escapeHtml(s.help)}</span>` : ""}</div>
+        <div class="state"><span class="badge" data-badge>—</span></div>
+        <div class="entry"><input type="password" placeholder="Paste key…" data-input autocomplete="off" spellcheck="false" /><button data-save>Save</button></div>
+      </div>`,
+    )
+    .join("\n");
+  const cfg = JSON.stringify({ consoleUrl, token });
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>API Keys</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+    body { margin: 0; background: #0f1115; color: #e8eaed; }
+    main { padding: 0.9rem 1rem 1.2rem; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+    h1 { font-size: 1.05rem; font-weight: 600; margin: 0; }
+    .close { background: none; border: none; color: #9aa0a6; font-size: 1.1rem; cursor: pointer; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 0.35rem 0.6rem; padding: 0.6rem 0; border-bottom: 1px solid #23272f; }
+    .meta { display: flex; flex-direction: column; }
+    .label { font-size: 0.9rem; font-weight: 500; }
+    .help { font-size: 0.72rem; color: #9aa0a6; }
+    .state { grid-column: 2; align-self: center; }
+    .badge { font-size: 0.72rem; color: #9aa0a6; }
+    .badge.set { color: #81c995; }
+    .entry { grid-column: 1 / -1; display: flex; gap: 0.4rem; }
+    input { flex: 1; background: #0b0d11; border: 1px solid #2a2f3a; border-radius: 7px; color: #e8eaed; padding: 0.4rem 0.5rem; font-size: 0.82rem; }
+    button { background: #2a3140; border: 1px solid #3a4150; color: #e8eaed; border-radius: 7px; padding: 0.4rem 0.7rem; font-size: 0.82rem; cursor: pointer; }
+    button:hover { background: #333c4d; }
+    button[data-save].ok { color: #81c995; border-color: #2f6b41; }
+    footer { margin-top: 0.9rem; display: flex; justify-content: space-between; align-items: center; }
+    .advanced { background: none; border: 1px solid #2a2f3a; color: #8ab4f8; }
+    .err { color: #f28b82; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>API Keys</h1><button class="close" data-close title="Close">✕</button></header>
+    <div id="rows">
+${rows}
+    </div>
+    <p class="err" id="err"></p>
+    <footer>
+      <span class="help">Stored locally, per instance. Values never leave this machine.</span>
+      <button class="advanced" data-advanced>Advanced ↗</button>
+    </footer>
+  </main>
+  <script>
+    const CFG = ${cfg};
+    const q = (t) => "?token=" + encodeURIComponent(t);
+    function postHeight() {
+      try { parent.postMessage({ type: "resize", height: document.body.scrollHeight }, "*"); } catch {}
+    }
+    async function load() {
+      try {
+        const r = await fetch("/api/secrets" + q(CFG.token));
+        const d = await r.json();
+        for (const s of (d.slots || [])) {
+          const row = document.querySelector('.row[data-slot="' + s.id + '"]');
+          if (!row) continue;
+          const badge = row.querySelector("[data-badge]");
+          badge.textContent = s.set ? "set · " + s.masked : "not set";
+          badge.classList.toggle("set", !!s.set);
+        }
+      } catch (e) { document.getElementById("err").textContent = "Could not load status — reconnect the panel."; }
+      postHeight();
+    }
+    document.querySelectorAll(".row").forEach((row) => {
+      const btn = row.querySelector("[data-save]");
+      const input = row.querySelector("[data-input]");
+      btn.addEventListener("click", async () => {
+        const value = input.value.trim();
+        if (!value) return;
+        btn.disabled = true; btn.textContent = "Saving…";
+        try {
+          const r = await fetch("/api/secrets" + q(CFG.token), {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ slot: row.dataset.slot, value }),
+          });
+          const d = await r.json();
+          if (!r.ok || !d.ok) throw new Error(d.error || "save failed");
+          input.value = "";
+          const badge = row.querySelector("[data-badge]");
+          badge.textContent = "set · " + d.masked; badge.classList.add("set");
+          btn.textContent = "Saved ✓"; btn.classList.add("ok");
+          setTimeout(() => { btn.textContent = "Save"; btn.classList.remove("ok"); btn.disabled = false; }, 1500);
+        } catch (e) {
+          document.getElementById("err").textContent = String(e.message || e);
+          btn.textContent = "Save"; btn.disabled = false;
+        }
+      });
+    });
+    document.querySelector("[data-close]").addEventListener("click", () => { try { parent.postMessage({ type: "close" }, "*"); } catch {} });
+    document.querySelector("[data-advanced]").addEventListener("click", () => { window.open(CFG.consoleUrl + "/console", "_blank", "noopener"); });
+    window.addEventListener("load", load);
+    new ResizeObserver(postHeight).observe(document.body);
+  </script>
+</body>
+</html>`;
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -219,6 +341,13 @@ export function startPanelConsoleHttpServer(opts: {
         backends,
         any_ready,
       });
+      return;
+    }
+    if (req.method === "GET" && path === "/credentials") {
+      if (!tokenOk(req, opts.token)) { sendHtml(res, 401, "<p>Unauthorized — reconnect the panel.</p>"); return; }
+      const bound = server.address();
+      const boundPort = bound && typeof bound === "object" ? bound.port : opts.port;
+      sendFramedHtml(res, 200, credentialsHtml(CREDENTIAL_SLOTS, `http://${host}:${boundPort}`, opts.token ?? ""));
       return;
     }
     if (req.method === "GET" && (path === "/" || path === "/console")) {

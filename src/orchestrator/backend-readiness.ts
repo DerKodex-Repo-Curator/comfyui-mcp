@@ -29,6 +29,7 @@ const CLI_NAMES: Record<string, string[]> = {
   codex: ["codex", "codex.cmd", "codex.exe"],
   gemini: ["gemini", "gemini.cmd", "gemini.exe"],
   ollama: ["ollama", "ollama.exe"],
+  lmstudio: ["lms", "lms.exe"],
 };
 
 /** Well-known Ollama install locations probed in addition to PATH (the Windows
@@ -41,6 +42,21 @@ function ollamaInstalled(home: string): boolean {
     return fileExists(localAppData, "Programs", "Ollama", "ollama.exe");
   }
   return fileExists("/usr/local/bin/ollama") || fileExists("/opt/homebrew/bin/ollama");
+}
+
+/** LM Studio install signals: the app drops its `lms` CLI at ~/.lmstudio/bin on
+ *  every platform (best cross-OS marker), plus the per-OS app locations. */
+function lmstudioInstalled(home: string): boolean {
+  if (onPath(CLI_NAMES.lmstudio)) return true;
+  if (fileExists(home, ".lmstudio", "bin", process.platform === "win32" ? "lms.exe" : "lms")) {
+    return true;
+  }
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || join(home, "AppData", "Local");
+    return fileExists(localAppData, "Programs", "LM Studio", "LM Studio.exe");
+  }
+  if (process.platform === "darwin") return fileExists("/Applications", "LM Studio.app");
+  return fileExists(home, ".lmstudio");
 }
 
 /** True if any of `names` resolves on the local PATH. */
@@ -101,6 +117,13 @@ export function backendReadiness(backend: string, opts?: { home?: string }): Bac
     // via the connect ack's model probe (GET /api/tags fails → degraded ack).
     const cli = ollamaInstalled(home);
     return { backend: "ollama", cli, auth: cli ? true : null, ready: cli };
+  }
+  if (b === "lmstudio") {
+    // Same posture as ollama: a local server, no login concept. App/CLI
+    // presence is the readiness signal; a stopped server still surfaces via
+    // the connect ack's model probe (GET /v1/models fails → degraded ack).
+    const cli = lmstudioInstalled(home);
+    return { backend: "lmstudio", cli, auth: cli ? true : null, ready: cli };
   }
   if (b === "openrouter") {
     // Hosted — no CLI. Readiness = an OpenRouter API key in the orchestrator's

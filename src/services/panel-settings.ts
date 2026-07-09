@@ -36,6 +36,9 @@ export interface AgentSettings {
   /** User-curated model ids pinned to the top of the panel's model picker. */
   preferredModels?: string[];
   ollama?: OllamaAgentConfig;
+  /** LM Studio provider (issue #160) — same shape; api/baseUrl unused today
+   *  (fixed openai dialect + COMFYUI_MCP_LMSTUDIO_HOST) but kept for #162. */
+  lmstudio?: OllamaAgentConfig;
 }
 
 export interface PanelSettings {
@@ -107,6 +110,9 @@ export function setAgentSettings(patch: AgentSettings): AgentSettings {
   }
   if (patch.ollama !== undefined) {
     next.ollama = { ...prev.ollama, ...patch.ollama };
+  }
+  if (patch.lmstudio !== undefined) {
+    next.lmstudio = { ...prev.lmstudio, ...patch.lmstudio };
   }
   settings.agent = next;
   write(settings);

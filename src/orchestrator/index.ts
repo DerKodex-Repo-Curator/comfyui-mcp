@@ -918,6 +918,16 @@ export async function runPanelOrchestrator(): Promise<void> {
       ...(key ? { apiKey: key } : {}),
     };
   };
+  // LM Studio (issue #160) = the same openai dialect pinned to LM Studio's
+  // local server. No API key, no login. Default model is EMPTY on purpose —
+  // LM Studio model ids are user-specific, so ensureModels() below fills it
+  // with the first id the server actually offers.
+  const LMSTUDIO_BASE_URL = (
+    process.env.COMFYUI_MCP_LMSTUDIO_HOST ?? "http://127.0.0.1:1234/v1"
+  ).replace(/[/]$/, "");
+  let lmstudioModel =
+    process.env.COMFYUI_MCP_LMSTUDIO_MODEL ?? persistedAgent.lmstudio?.model ?? "";
+  const lmstudioDeps = () => ({ api: "openai" as const, host: LMSTUDIO_BASE_URL });
   // ── Per-tab backend (single-port multi-provider) ──────────────────────────
   // ONE orchestrator on ONE bridge port serves ALL providers; the panel picks a
   // provider per tab via the `hello`/`set_backend` handshake, instead of the node
@@ -927,7 +937,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // provider (the panel replays the transcript to seed it) while a same-provider
   // reconnect RESUMES. `backendId`/`codexModel`/`geminiModel` above are the
   // DEFAULT + per-provider model config; the process is no longer pinned to one.
-  const KNOWN_BACKENDS = new Set(["claude", "codex", "gemini", "ollama", "openrouter"]);
+  const KNOWN_BACKENDS = new Set(["claude", "codex", "gemini", "ollama", "openrouter", "lmstudio"]);
   const defaultBackend = KNOWN_BACKENDS.has(backendId) ? backendId : "claude";
   const AGENT_KEY_SEP = "::";
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
@@ -1095,6 +1105,16 @@ export async function runPanelOrchestrator(): Promise<void> {
         ...openrouterDeps(),
       });
     }
+    if (backend === "lmstudio") {
+      return new OllamaBackend({
+        cwd: comfyuiPath ?? process.cwd(),
+        model: lmstudioModel,
+        systemAppend: panelSystemAppend,
+        comfyuiUrl,
+        mcpServers: makeHttpBackendMcpServers(panelTabId),
+        ...lmstudioDeps(),
+      });
+    }
     return undefined; // claude → built-in ClaudeBackend
   };
   logger.info(
@@ -1118,7 +1138,9 @@ export async function runPanelOrchestrator(): Promise<void> {
             ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: ollamaModel, ...ollamaDeps() })
             : backend === "openrouter"
               ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: openrouterModel, ...openrouterDeps() })
-              : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
+              : backend === "lmstudio"
+                ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: lmstudioModel, ...lmstudioDeps() })
+                : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
       probeBackends.set(backend, pb);
     }
     return pb;
@@ -1387,6 +1409,14 @@ export async function runPanelOrchestrator(): Promise<void> {
         : fetchSupportedModels(model);
       p = probe.then((list) => {
         if (!list.length) modelsByBackend.delete(backend); // don't cache a failed probe
+        // LM Studio ships no sane hardcoded default (model ids are whatever the
+        // user downloaded) — adopt the server's first offering when unset.
+        if (backend === "lmstudio" && !lmstudioModel && list.length) {
+          lmstudioModel = (list[0] as { value?: string }).value ?? "";
+          if (lmstudioModel) {
+            logger.info(`[panel-orchestrator] lmstudio default model → ${lmstudioModel} (first served)`);
+          }
+        }
         // User-curated preferred models (panel Settings → set_config) pin to the
         // top of the ollama picker, ahead of the discovered catalog. Read fresh
         // on every probe; set_config evicts the cache so edits apply live.
@@ -1420,6 +1450,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "gemini") return geminiModel;
     if (backend === "ollama") return ollamaModel;
     if (backend === "openrouter") return openrouterModel;
+    if (backend === "lmstudio") return lmstudioModel || undefined;
     return model;
   }
   function pushModels(panelTabId: string): void {
@@ -1543,6 +1574,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isGm = backend === "gemini";
       const isOl = backend === "ollama";
       const isOr = backend === "openrouter";
+      const isLs = backend === "lmstudio";
       // TRUTHFUL "connected": only claim ready after PROVING the SELECTED backend
       // can run, by probing its model list. If the probe fails — the "connected
       // but dead" wedge — send a degraded ack so the panel shows the real state.
@@ -1573,9 +1605,11 @@ export async function runPanelOrchestrator(): Promise<void> {
                 ? (geminiModel ?? (models[0] as { value?: string }).value ?? "Gemini")
                 : isOl
                   ? (ollamaModel ?? (models[0] as { value?: string }).value ?? "Ollama")
-                  : isOr
-                    ? (openrouterModel ?? (models[0] as { value?: string }).value ?? "OpenRouter")
-                    : model;
+                  : isLs
+                    ? (lmstudioModel || ((models[0] as { value?: string }).value ?? "LM Studio"))
+                    : isOr
+                      ? (openrouterModel ?? (models[0] as { value?: string }).value ?? "OpenRouter")
+                      : model;
             // Greet only on a FRESH session (a resume/reconnect already has the thread).
             if (!resume) {
               const readyText = isCx
@@ -1584,7 +1618,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Google account (Gemini Code Assist). Ask away.`
                   : isOl
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via Ollama (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
-                    : isOr
+                    : isLs
+                      ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via LM Studio (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
+                      : isOr
                       ? `🟢 comfyui-mcp agent ready — ${agentLabel} via OpenRouter (hosted API, your OPENROUTER_API_KEY). Ask away.`
                       : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
               bridge.push({ type: "say", text: readyText }, panelTab);
@@ -1598,7 +1634,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                 ? "⚠️ The background agent isn't responding — the Gemini CLI couldn't start. Make sure the Gemini CLI is installed and signed in (run `gemini` once and complete the Google sign-in), then Disconnect → Connect to retry."
                 : isOl
                   ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite; `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB), then Disconnect → Connect to retry."
-                  : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
+                  : isLs
+                    ? `⚠️ The background agent isn't responding — LM Studio isn't reachable at ${LMSTUDIO_BASE_URL}. Open LM Studio → Developer → Start Server and load a tool-calling model (our gemma4-comfyui-mcp GGUFs from Hugging Face work great), or set COMFYUI_MCP_LMSTUDIO_HOST if it serves elsewhere — then Disconnect → Connect to retry.`
+                    : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
             bridge.push({ type: "say", text: degradedText }, panelTab);
             bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);
             logger.warn(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (${backend}) but model probe empty — degraded ack`);
@@ -1680,6 +1718,20 @@ export async function runPanelOrchestrator(): Promise<void> {
           logger.info(
             `[panel-orchestrator] ollama config → model=${ollamaModel} api=${ollamaApi} host=${ollamaBaseUrl ?? "(default)"}`,
           );
+        }
+      }
+      const lcfg = (event as { lmstudio?: unknown }).lmstudio;
+      if (lcfg && typeof lcfg === "object") {
+        const o = lcfg as { model?: unknown };
+        if (typeof o.model === "string" && o.model.trim()) {
+          const m = o.model.trim();
+          if (!process.env.COMFYUI_MCP_LMSTUDIO_MODEL) lmstudioModel = m;
+          setAgentSettings({ lmstudio: { model: m } });
+          const pb = probeBackends.get("lmstudio");
+          if (pb?.close) void pb.close().catch(() => {});
+          probeBackends.delete("lmstudio");
+          modelsByBackend.delete("lmstudio");
+          logger.info(`[panel-orchestrator] lmstudio config → model=${lmstudioModel}`);
         }
       }
       if (ollamaChanged) {

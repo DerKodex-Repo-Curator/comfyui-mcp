@@ -194,6 +194,19 @@ orchestrator log: it warns when a turn fills ≥85% of the window. Weights, LoRA
 pipeline are open: [`artokun/gemma4-comfyui-mcp`](https://huggingface.co/artokun/gemma4-comfyui-mcp)
 (dataset: [`artokun/comfyui-mcp-trajectories`](https://huggingface.co/datasets/artokun/comfyui-mcp-trajectories)).
 
+## LM Studio
+
+The panel speaks LM Studio natively: pick **LM Studio** in the backend picker
+and the orchestrator drives its local server (`http://127.0.0.1:1234/v1`,
+override with `COMFYUI_MCP_LMSTUDIO_HOST`). Setup is two clicks: install from
+[lmstudio.ai](https://lmstudio.ai), then **Developer → Start Server** with a
+**tool-calling model** loaded. The model picker mirrors whatever the server
+offers; with no default set, the first served model is adopted automatically.
+
+Our fine-tuned GGUFs work here too — search `artokun/gemma4-comfyui-mcp` in
+LM Studio's model downloader and grab a `model-q4_k_m.gguf`. Expect the same
+JIT cold-load pause on the first message that Ollama has (30s+ is normal).
+
 ## Ollama & local models — the LLM Arena
 
 Any MCP harness that talks to Ollama (or an OpenAI-compatible endpoint) can

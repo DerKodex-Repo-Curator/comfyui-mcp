@@ -29,6 +29,8 @@ function ndjsonStream(chunks: Array<Record<string, unknown>>, hang = false): Rea
 }
 
 let hangNextChat = false;
+let modelsRequests: Array<{ url: string; headers: Record<string, string> }> = [];
+let modelsResponse: string[] | "404" = [];
 
 const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const url = String(input);
@@ -40,6 +42,13 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Pr
       JSON.stringify({ models: [{ name: "gemma4:e4b" }, { name: "qwen3:4b" }] }),
       { status: 200 },
     );
+  }
+  if (url.endsWith("/v1/models") || url.endsWith(":1234/models") || url.includes("1234/v1/models")) {
+    // openai-dialect model listing (LM Studio-shaped). Capture headers so tests
+    // can assert no Authorization leaks when no apiKey is configured.
+    modelsRequests.push({ url, headers: { ...((init?.headers as Record<string, string>) ?? {}) } });
+    if (modelsResponse === "404") return new Response("not found", { status: 404 });
+    return new Response(JSON.stringify({ data: modelsResponse.map((id) => ({ id })) }), { status: 200 });
   }
   if (url.endsWith("/api/chat")) {
     const body = JSON.parse(String(init?.body));
@@ -96,6 +105,8 @@ beforeEach(() => {
   chatScript = [];
   chatRequests = [];
   hangNextChat = false;
+  modelsRequests = [];
+  modelsResponse = [];
   hangingStreamController = null;
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockClear();
@@ -313,6 +324,24 @@ describe("OllamaBackend", () => {
       { id: "gemma4:e4b", label: "gemma4:e4b" },
       { id: "qwen3:4b", label: "qwen3:4b" },
     ]);
+  });
+
+  it("lmstudio-shaped openai dialect: listModels lists served ids and sends NO auth header without a key", async () => {
+    const backend = new OllamaBackend({ api: "openai", host: "http://127.0.0.1:1234/v1", model: "qwen2.5-7b" });
+    modelsResponse = ["qwen2.5-7b", "gemma-4-e4b"];
+    const models = await backend.listModels();
+    expect(models.map((m) => m.id)).toContain("qwen2.5-7b");
+    expect(models.map((m) => m.id)).toContain("gemma-4-e4b");
+    expect(modelsRequests).toHaveLength(1);
+    const headerKeys = Object.keys(modelsRequests[0].headers).map((k) => k.toLowerCase());
+    expect(headerKeys).not.toContain("authorization");
+  });
+
+  it("openai dialect: listModels falls back to the configured model when /models 404s", async () => {
+    const backend = new OllamaBackend({ api: "openai", host: "http://127.0.0.1:1234/v1", model: "my-local-model" });
+    modelsResponse = "404";
+    const models = await backend.listModels();
+    expect(models).toEqual([{ id: "my-local-model", label: "my-local-model" }]);
   });
 
   it("isOllamaModel accepts local tags and rejects provider ids", () => {

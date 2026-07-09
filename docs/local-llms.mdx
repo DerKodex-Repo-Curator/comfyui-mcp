@@ -212,6 +212,22 @@ Our fine-tuned GGUFs work here too — search `artokun/gemma4-comfyui-mcp` in
 LM Studio's model downloader and grab a `model-q4_k_m.gguf`. Expect the same
 JIT cold-load pause on the first message that Ollama has (30s+ is normal).
 
+## llama.cpp (llama-server)
+
+Running raw `llama.cpp`? Pick **llama.cpp** in the backend picker — the
+orchestrator drives `llama-server`'s OpenAI-compatible endpoint
+(`http://127.0.0.1:8080/v1`, override with `COMFYUI_MCP_LLAMACPP_HOST`):
+
+```bash
+llama-server -m gemma4-comfyui-mcp-e2b.Q4_K_M.gguf -c 16384
+```
+
+Notes from the field: context is a **launch flag** (`-c`) — the agent warns if
+the server runs under 16K (the tool payload needs it). Tool calling is on by
+default in current builds; **older builds need `--jinja`** (the panel detects a
+tools-incapable server at connect and says exactly that). The single loaded
+model is adopted automatically — no picking needed.
+
 ## Ollama & local models — the LLM Arena
 
 Any MCP harness that talks to Ollama (or an OpenAI-compatible endpoint) can

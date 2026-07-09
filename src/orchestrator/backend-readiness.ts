@@ -30,6 +30,7 @@ const CLI_NAMES: Record<string, string[]> = {
   gemini: ["gemini", "gemini.cmd", "gemini.exe"],
   ollama: ["ollama", "ollama.exe"],
   lmstudio: ["lms", "lms.exe"],
+  llamacpp: ["llama-server", "llama-server.exe"],
 };
 
 /** Well-known Ollama install locations probed in addition to PATH (the Windows
@@ -133,6 +134,16 @@ export function backendReadiness(backend: string, opts?: { home?: string }): Bac
     // the connect ack's model probe (GET /v1/models fails → degraded ack).
     const cli = lmstudioInstalled(home);
     return { backend: "lmstudio", cli, auth: cli ? true : null, ready: cli };
+  }
+  if (b === "llamacpp") {
+    // llama.cpp's llama-server: PATH presence is the install signal (no app
+    // dirs — people build it or unzip a release anywhere). A stopped server
+    // surfaces via the connect ack's probe; when the binary isn't findable we
+    // still allow a REACHABLE server to count (checked at connect), so `cli`
+    // false + a live endpoint is fine — mirrors the "installed elsewhere"
+    // reality of this tool.
+    const cli = onPath(CLI_NAMES.llamacpp);
+    return { backend: "llamacpp", cli, auth: cli ? true : null, ready: cli };
   }
   if (b === "openrouter") {
     // Hosted — no CLI. Readiness = an OpenRouter API key in the orchestrator's

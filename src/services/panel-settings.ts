@@ -39,6 +39,8 @@ export interface AgentSettings {
   /** LM Studio provider (issue #160) — same shape; api/baseUrl unused today
    *  (fixed openai dialect + COMFYUI_MCP_LMSTUDIO_HOST) but kept for #162. */
   lmstudio?: OllamaAgentConfig;
+  /** llama.cpp provider (issue #161) — same shape as lmstudio. */
+  llamacpp?: OllamaAgentConfig;
 }
 
 export interface PanelSettings {
@@ -113,6 +115,9 @@ export function setAgentSettings(patch: AgentSettings): AgentSettings {
   }
   if (patch.lmstudio !== undefined) {
     next.lmstudio = { ...prev.lmstudio, ...patch.lmstudio };
+  }
+  if (patch.llamacpp !== undefined) {
+    next.llamacpp = { ...prev.llamacpp, ...patch.llamacpp };
   }
   settings.agent = next;
   write(settings);

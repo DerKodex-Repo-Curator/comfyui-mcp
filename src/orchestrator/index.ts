@@ -57,6 +57,7 @@ import {
   unloadAllLmstudio,
   warmLmstudio,
 } from "../services/lmstudio-lifecycle.js";
+import { llamacppProps, llamacppToolsReady } from "../services/llamacpp-probe.js";
 import { getAgentSettings, setAgentSettings } from "../services/panel-settings.js";
 import {
   gatherEnvCapabilities,
@@ -951,6 +952,15 @@ export async function runPanelOrchestrator(): Promise<void> {
   let lmstudioModel =
     process.env.COMFYUI_MCP_LMSTUDIO_MODEL ?? persistedAgent.lmstudio?.model ?? "";
   const lmstudioDeps = () => ({ api: "openai" as const, host: LMSTUDIO_BASE_URL });
+  // llama.cpp (issue #161) — llama-server's OpenAI-compatible /v1. No key, no
+  // login, ONE model fixed at launch (-m). Context is a LAUNCH flag (-c), and
+  // tool calling needs --jinja — both probed at connect (services/llamacpp-probe).
+  const LLAMACPP_BASE_URL = (
+    process.env.COMFYUI_MCP_LLAMACPP_HOST ?? "http://127.0.0.1:8080/v1"
+  ).replace(/[/]$/, "");
+  let llamacppModel =
+    process.env.COMFYUI_MCP_LLAMACPP_MODEL ?? persistedAgent.llamacpp?.model ?? "";
+  const llamacppDeps = () => ({ api: "openai" as const, host: LLAMACPP_BASE_URL });
   // ── Per-tab backend (single-port multi-provider) ──────────────────────────
   // ONE orchestrator on ONE bridge port serves ALL providers; the panel picks a
   // provider per tab via the `hello`/`set_backend` handshake, instead of the node
@@ -960,7 +970,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   // provider (the panel replays the transcript to seed it) while a same-provider
   // reconnect RESUMES. `backendId`/`codexModel`/`geminiModel` above are the
   // DEFAULT + per-provider model config; the process is no longer pinned to one.
-  const KNOWN_BACKENDS = new Set(["claude", "codex", "gemini", "ollama", "openrouter", "lmstudio"]);
+  const KNOWN_BACKENDS = new Set(["claude", "codex", "gemini", "ollama", "openrouter", "lmstudio", "llamacpp"]);
   const defaultBackend = KNOWN_BACKENDS.has(backendId) ? backendId : "claude";
   const AGENT_KEY_SEP = "::";
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
@@ -1139,6 +1149,16 @@ export async function runPanelOrchestrator(): Promise<void> {
         ...lmstudioDeps(),
       });
     }
+    if (backend === "llamacpp") {
+      return new OllamaBackend({
+        cwd: comfyuiPath ?? process.cwd(),
+        model: llamacppModel,
+        systemAppend: panelSystemAppend,
+        comfyuiUrl,
+        mcpServers: makeHttpBackendMcpServers(panelTabId),
+        ...llamacppDeps(),
+      });
+    }
     return undefined; // claude → built-in ClaudeBackend
   };
   logger.info(
@@ -1164,7 +1184,9 @@ export async function runPanelOrchestrator(): Promise<void> {
               ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: openrouterModel, ...openrouterDeps() })
               : backend === "lmstudio"
                 ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: lmstudioModel, ...lmstudioDeps() })
-                : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
+                : backend === "llamacpp"
+                  ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: llamacppModel, ...llamacppDeps() })
+                  : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
       probeBackends.set(backend, pb);
     }
     return pb;
@@ -1442,12 +1464,20 @@ export async function runPanelOrchestrator(): Promise<void> {
         : fetchSupportedModels(model);
       p = probe.then((list) => {
         if (!list.length) modelsByBackend.delete(backend); // don't cache a failed probe
-        // LM Studio ships no sane hardcoded default (model ids are whatever the
-        // user downloaded) — adopt the server's first offering when unset.
+        // LM Studio / llama.cpp ship no sane hardcoded default (the model is
+        // whatever the user downloaded/launched) — adopt the server's first
+        // offering when unset. llama-server serves exactly one model, so this
+        // IS the model.
         if (backend === "lmstudio" && !lmstudioModel && list.length) {
           lmstudioModel = (list[0] as { value?: string }).value ?? "";
           if (lmstudioModel) {
             logger.info(`[panel-orchestrator] lmstudio default model → ${lmstudioModel} (first served)`);
+          }
+        }
+        if (backend === "llamacpp" && !llamacppModel && list.length) {
+          llamacppModel = (list[0] as { value?: string }).value ?? "";
+          if (llamacppModel) {
+            logger.info(`[panel-orchestrator] llamacpp model → ${llamacppModel} (the server's loaded model)`);
           }
         }
         // User-curated preferred models (panel Settings → set_config) pin to the
@@ -1484,6 +1514,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "ollama") return ollamaModel;
     if (backend === "openrouter") return openrouterModel;
     if (backend === "lmstudio") return lmstudioModel || undefined;
+    if (backend === "llamacpp") return llamacppModel || undefined;
     return model;
   }
   function pushModels(panelTabId: string): void {
@@ -1542,6 +1573,24 @@ export async function runPanelOrchestrator(): Promise<void> {
     try {
       const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS);
       bridge.push({ type: "backends", backends, any_ready }, tabId);
+      // llama.cpp reality check (async re-push): the binary is often unzipped
+      // anywhere (not on PATH), so static detection says "not installed" while
+      // a server is HAPPILY ANSWERING. A live endpoint beats a missing binary —
+      // probe it and, when it answers, re-push the frame with llamacpp ready.
+      const lc = backends.find((b) => b.backend === "llamacpp");
+      if (lc && !lc.ready) {
+        void fetch(`${LLAMACPP_BASE_URL.replace(/\/v1$/, "")}/health`, {
+          signal: AbortSignal.timeout(1500),
+        })
+          .then((r) => {
+            if (!r.ok) return;
+            lc.cli = true;
+            lc.auth = true;
+            lc.ready = true;
+            bridge.push({ type: "backends", backends, any_ready: true }, tabId);
+          })
+          .catch(() => {});
+      }
     } catch (err) {
       logger.warn(`[panel-orchestrator] readiness probe failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1612,6 +1661,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isOl = backend === "ollama";
       const isOr = backend === "openrouter";
       const isLs = backend === "lmstudio";
+      const isLc = backend === "llamacpp";
       // TRUTHFUL "connected": only claim ready after PROVING the SELECTED backend
       // can run, by probing its model list. If the probe fails — the "connected
       // but dead" wedge — send a degraded ack so the panel shows the real state.
@@ -1647,9 +1697,44 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? (ollamaModel ?? (models[0] as { value?: string }).value ?? "Ollama")
                   : isLs
                     ? (lmstudioModel || ((models[0] as { value?: string }).value ?? "LM Studio"))
-                    : isOr
+                    : isLc
+                      ? (llamacppModel || ((models[0] as { value?: string }).value ?? "llama.cpp"))
+                      : isOr
                       ? (openrouterModel ?? (models[0] as { value?: string }).value ?? "OpenRouter")
                       : model;
+            // llama.cpp launch gotchas (issue #161): a reachable server can still
+            // be useless for us — tool calling needs --jinja (rejected requests),
+            // and a launch-time -c under ~16K silently truncates the tool payload.
+            // Probe both and degrade/warn with the exact fix instead of letting
+            // the first real message fail cryptically.
+            if (isLc) {
+              const activeModel = llamacppModel || ((models[0] as { value?: string }).value ?? "");
+              void (async () => {
+                const [tools, props] = await Promise.all([
+                  llamacppToolsReady(LLAMACPP_BASE_URL, activeModel),
+                  llamacppProps(LLAMACPP_BASE_URL),
+                ]);
+                if (tools === "no") {
+                  bridge.push(
+                    {
+                      type: "say",
+                      text:
+                        "⚠️ Your llama-server is running WITHOUT `--jinja`, so tool calling is disabled — every agent action would fail. " +
+                        "Restart it with tool support: `llama-server -m <model>.gguf --jinja -c 16384` (current builds enable jinja by default; older ones need the flag), then Disconnect → Connect.",
+                    },
+                    panelTab,
+                  );
+                } else if (props.nCtx && props.nCtx < 16384) {
+                  bridge.push(
+                    {
+                      type: "say",
+                      text: `ℹ️ Your llama-server context is ${props.nCtx} tokens (launch flag -c). The agent's tool payload wants ≥16384 — below that, long turns silently truncate. Consider restarting with \`-c 16384\` or higher.`,
+                    },
+                    panelTab,
+                  );
+                }
+              })();
+            }
             // Greet only on a FRESH session (a resume/reconnect already has the thread).
             if (!resume) {
               const readyText = isCx
@@ -1660,7 +1745,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via Ollama (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
                     : isLs
                       ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via LM Studio (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
-                      : isOr
+                      : isLc
+                        ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via llama.cpp (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
+                        : isOr
                       ? `🟢 comfyui-mcp agent ready — ${agentLabel} via OpenRouter (hosted API, your OPENROUTER_API_KEY). Ask away.`
                       : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
               bridge.push({ type: "say", text: readyText }, panelTab);
@@ -1676,7 +1763,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite; `:e2b` for ~2 GB VRAM, `:12b` for ~8 GB), then Disconnect → Connect to retry."
                   : isLs
                     ? `⚠️ The background agent isn't responding — LM Studio isn't reachable at ${LMSTUDIO_BASE_URL}. Open LM Studio → Developer → Start Server and load a tool-calling model (our gemma4-comfyui-mcp GGUFs from Hugging Face work great), or set COMFYUI_MCP_LMSTUDIO_HOST if it serves elsewhere — then Disconnect → Connect to retry.`
-                    : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
+                    : isLc
+                      ? `⚠️ The background agent isn't responding — llama-server isn't reachable at ${LLAMACPP_BASE_URL}. Start it with \`llama-server -m <model>.gguf -c 16384\` (our gemma4-comfyui-mcp GGUFs work great; add --jinja on older builds — required there for tool calling), or set COMFYUI_MCP_LLAMACPP_HOST — then Disconnect → Connect to retry.`
+                      : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
             bridge.push({ type: "say", text: degradedText }, panelTab);
             bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);
             logger.warn(`[panel-orchestrator] tab ${panelTab.slice(0, 8)} connected (${backend}) but model probe empty — degraded ack`);
@@ -1772,6 +1861,17 @@ export async function runPanelOrchestrator(): Promise<void> {
           logger.info(
             `[panel-orchestrator] ollama config → model=${ollamaModel} api=${ollamaApi} host=${ollamaBaseUrl ?? "(default)"}`,
           );
+        }
+      }
+      const lccfg = (event as { llamacpp?: unknown }).llamacpp;
+      if (lccfg && typeof lccfg === "object") {
+        const o = lccfg as { model?: unknown };
+        if (typeof o.model === "string" && o.model.trim()) {
+          const m = o.model.trim();
+          if (!process.env.COMFYUI_MCP_LLAMACPP_MODEL) llamacppModel = m;
+          setAgentSettings({ llamacpp: { model: m } });
+          modelsByBackend.delete("llamacpp");
+          logger.info(`[panel-orchestrator] llamacpp config → model=${llamacppModel}`);
         }
       }
       const lcfg = (event as { lmstudio?: unknown }).lmstudio;

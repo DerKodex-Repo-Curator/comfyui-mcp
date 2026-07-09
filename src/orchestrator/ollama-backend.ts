@@ -875,9 +875,19 @@ export class OllamaBackend implements AgentBackend {
         const recommended = RECOMMENDED_OPENROUTER_MODELS.filter((m) => available.has(m.id));
         const recIds = new Set(recommended.map((m) => m.id));
         const rest = ids.filter((id) => id !== this.model && !recIds.has(id)).slice(0, 40);
+        // llama-server reports its single model as the GGUF's FILE PATH —
+        // keep the id verbatim (the server echoes it) but label by basename
+        // so the picker isn't a wall of C:\...\model.gguf.
+        const labelOf = (id: string) => {
+          const cut = Math.max(id.lastIndexOf("/"), id.lastIndexOf("\\"));
+          const base = cut >= 0 ? id.slice(cut + 1) : id;
+          return base !== id && /\.gguf$/i.test(base) ? base : id;
+        };
         const out: ModelChoice[] = recommended.map((m) => ({ id: m.id, label: m.label }));
-        if (!recIds.has(this.model)) out.push({ id: this.model, label: this.model });
-        for (const id of rest) out.push({ id, label: id });
+        // Guard: an UNSET configured model ("" — LM Studio/llama.cpp presets
+        // adopt-first-served) must not inject an empty picker entry.
+        if (this.model && !recIds.has(this.model)) out.push({ id: this.model, label: labelOf(this.model) });
+        for (const id of rest) out.push({ id, label: labelOf(id) });
         return out;
       }
       const res = await fetch(`${this.host}/api/tags`, { signal: AbortSignal.timeout(5000) });

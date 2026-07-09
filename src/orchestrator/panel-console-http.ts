@@ -8,6 +8,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { allBackendReadiness } from "./backend-readiness.js";
+import { setPanelSecret, listPanelSecretsMasked } from "../services/panel-secrets.js";
 import { logger } from "../utils/logger.js";
 
 const KNOWN_BACKENDS = [
@@ -44,6 +45,25 @@ function sendHtml(res: ServerResponse, status: number, html: string): void {
     "Cache-Control": "no-store",
   });
   res.end(html);
+}
+
+function tokenOk(req: IncomingMessage, expected?: string): boolean {
+  if (!expected) return true; // no token configured → open (dev)
+  try {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const q = url.searchParams.get("token");
+    const h = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
+    return q === expected || h === expected;
+  } catch { return false; }
+}
+
+function readJsonBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (c) => { data += c; if (data.length > 1_000_000) req.destroy(); });
+    req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
+    req.on("error", reject);
+  });
 }
 
 function consoleLandingHtml(opts: {
@@ -140,11 +160,34 @@ export function startPanelConsoleHttpServer(opts: {
   host?: string;
   bridgePort: number;
   comfyuiUrl: string;
+  token?: string;
 }): Promise<PanelConsoleHttpServer> {
   const host = opts.host ?? "127.0.0.1";
 
   const server: Server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0];
+    if (path === "/api/secrets") {
+      if (!tokenOk(req, opts.token)) { sendJson(res, 401, { ok: false, error: "unauthorized" }); return; }
+      if (req.method === "GET") { sendJson(res, 200, { ok: true, slots: listPanelSecretsMasked() }); return; }
+      if (req.method === "POST") {
+        let body: any;
+        try { body = await readJsonBody(req); } catch { sendJson(res, 400, { ok: false, error: "bad json" }); return; }
+        const slot = String(body?.slot ?? "");
+        const value = String(body?.value ?? "");
+        if (!slot || !value) { sendJson(res, 400, { ok: false, error: "slot and value required" }); return; }
+        try {
+          setPanelSecret(slot, value);
+          const masked = listPanelSecretsMasked().find((s) => s.id === slot)?.masked ?? null;
+          sendJson(res, 200, { ok: true, slot, masked });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          sendJson(res, /unknown credential slot/i.test(msg) ? 400 : 500, { ok: false, error: msg });
+        }
+        return;
+      }
+      sendJson(res, 405, { ok: false, error: "method not allowed" });
+      return;
+    }
     if (req.method === "GET" && path === "/api/status") {
       const { backends, any_ready } = allBackendReadiness(KNOWN_BACKENDS);
       const bound = server.address();

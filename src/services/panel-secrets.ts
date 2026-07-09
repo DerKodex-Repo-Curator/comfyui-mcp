@@ -45,6 +45,12 @@ export const COMFYUI_SECRET_ENV_ALLOWLIST = [
   "CIVITAI_API_TOKEN",
   "HUGGINGFACE_TOKEN",
   "HF_TOKEN",
+  "XAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_GENERATIVE_AI_API_KEY",
+  "GOOGLE_API_KEY",
+  "RUNCOMFY_API_KEY",
+  "REGISTRY_ACCESS_TOKEN",
 ] as const;
 
 const ALLOWLIST_SET = new Set<string>(COMFYUI_SECRET_ENV_ALLOWLIST);
@@ -60,7 +66,15 @@ export function isAllowedComfyuiSecretKey(key: string): boolean {
 // the same allowlist discipline so a corrupt file can't set arbitrary env.
 //   OPENROUTER_API_KEY → the OpenRouter provider backend (OllamaBackend openai)
 //   COMFYUI_MCP_CUSTOM_API_KEY → the user-defined Custom endpoint provider
-export const AGENT_SECRET_ENV_ALLOWLIST = ["OPENROUTER_API_KEY", "COMFYUI_MCP_CUSTOM_API_KEY"] as const;
+export const AGENT_SECRET_ENV_ALLOWLIST = [
+  "OPENROUTER_API_KEY",
+  "COMFYUI_MCP_CUSTOM_API_KEY",
+  "GLM_API_KEY",
+  "ZHIPU_API_KEY",
+  "ZHIPUAI_API_KEY",
+  "ZAI_API_KEY",
+  "KIMI_API_KEY",
+] as const;
 const AGENT_ALLOWLIST_SET = new Set<string>(AGENT_SECRET_ENV_ALLOWLIST);
 
 /** Is `key` a permitted orchestrator agent-secret env var? */
@@ -238,4 +252,54 @@ export function setAgentSecret(key: string, value: string): void {
  */
 export function buildComfyuiMcpEnv(base: Record<string, string>): Record<string, string> {
   return { ...base, ...loadComfyuiSecretEnv() };
+}
+
+export interface CredentialSlot {
+  id: string;
+  label: string;
+  envKeys: string[];
+  store: "comfyui" | "agent";
+  help?: string;
+}
+
+/** UI credential slots. Each slot writes ALL its envKeys (alias fan-out) into its
+ *  store. `store` decides which allowlist/setter applies. */
+export const CREDENTIAL_SLOTS: CredentialSlot[] = [
+  { id: "openrouter", label: "OpenRouter", envKeys: ["OPENROUTER_API_KEY"], store: "agent", help: "Hosted models (MiMo, MiniMax, GPT, Claude…)" },
+  { id: "glm", label: "GLM / Zhipu", envKeys: ["GLM_API_KEY", "ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "ZAI_API_KEY"], store: "agent", help: "GLM provider" },
+  { id: "kimi", label: "Kimi (API)", envKeys: ["KIMI_API_KEY"], store: "agent", help: "Kimi via API key (vs its OAuth)" },
+  { id: "civitai", label: "Civitai", envKeys: ["CIVITAI_API_TOKEN"], store: "comfyui", help: "Model downloads" },
+  { id: "huggingface", label: "HuggingFace", envKeys: ["HF_TOKEN", "HUGGINGFACE_TOKEN"], store: "comfyui", help: "Model downloads" },
+  { id: "google", label: "Google / Gemini", envKeys: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"], store: "comfyui", help: "Nano Banana concept images" },
+  { id: "xai", label: "xAI", envKeys: ["XAI_API_KEY"], store: "comfyui", help: "Grok Imagine concept images" },
+  { id: "runcomfy", label: "RunComfy", envKeys: ["RUNCOMFY_API_KEY"], store: "comfyui", help: "Cloud pods / training" },
+  { id: "registry", label: "Comfy Registry", envKeys: ["REGISTRY_ACCESS_TOKEN"], store: "comfyui", help: "Publishing custom nodes" },
+];
+
+const SLOT_BY_ID = new Map(CREDENTIAL_SLOTS.map((s) => [s.id, s]));
+
+/** Mask a secret for display: first 4 + ellipsis + last 3. Short values fully masked. */
+export function maskSecret(v: string): string {
+  if (v.length <= 8) return "•".repeat(v.length);
+  return `${v.slice(0, 4)}…${v.slice(-3)}`;
+}
+
+/** Set every env key of a slot (alias fan-out) into its store. Throws on unknown slot. */
+export function setPanelSecret(slotId: string, value: string): void {
+  const slot = SLOT_BY_ID.get(slotId);
+  if (!slot) throw new Error(`unknown credential slot "${slotId}"`);
+  const set = slot.store === "agent" ? setAgentSecret : setComfyuiSecret;
+  for (const key of slot.envKeys) set(key, value);
+}
+
+/** Masked per-slot state: set = the slot's PRIMARY (first) env key has a stored value. */
+export function listPanelSecretsMasked(): { id: string; label: string; set: boolean; masked: string | null }[] {
+  const comfyui = loadComfyuiSecretEnv();
+  const agent = loadAgentSecretEnv();
+  return CREDENTIAL_SLOTS.map((slot) => {
+    const store = slot.store === "agent" ? agent : comfyui;
+    const primary = slot.envKeys[0];
+    const val = store[primary];
+    return { id: slot.id, label: slot.label, set: !!val, masked: val ? maskSecret(val) : null };
+  });
 }

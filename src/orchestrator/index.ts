@@ -153,6 +153,23 @@ const injectedCrashes = new Set<string>();
  *  a fresh backlog) produces a new key and warns again. Process-scoped. */
 const injectedQueueNotes = new Set<string>();
 
+/** HEADLESS clients (the mobile / remote pseudo-panel) connect with NO ComfyUI
+ *  browser panel. Two consequences: the live-canvas panel_* tools can't run, AND
+ *  — critically — nothing observes a render finishing to auto-deliver its output
+ *  back to the agent (that path is browser-driven; see the `agent_event` handler).
+ *  generate_image / enqueue_workflow return a prompt_id immediately, so a headless
+ *  agent that "ends its turn and waits" never surfaces the image. This directive,
+ *  prepended to each headless-tab turn like the crash/queue notes, tells it to run
+ *  headless and deliver the result ITSELF, in-turn. */
+const HEADLESS_DIRECTIVE =
+  "[HEADLESS SESSION — no ComfyUI panel/canvas is connected] The panel_* live-canvas tools " +
+  "(panel_run, panel_get_graph, panel_set_widget, panel_add_node, …) are UNAVAILABLE here and will fail — " +
+  "do everything through the comfyui MCP tools (generate_image, or create_workflow + enqueue_workflow). " +
+  "There is NO panel to auto-deliver a finished render, so you MUST deliver the result YOURSELF IN THIS SAME TURN: " +
+  "enqueuing returns a prompt_id immediately, so wait for it with get_job_status(prompt_id) — poll it briefly until " +
+  "it reports completion (this is the ONE case where polling IS correct) — then fetch the output with get_history and " +
+  "show it with panel_show_media. Do NOT end your turn expecting an automatic notification; none will arrive.";
+
 /** Live stall threshold (seconds) pushed from the panel setting via a `set_config`
  *  frame — applies WITHOUT a reconnect. null = not set, fall back to env then the
  *  built-in default. Process-global: one ComfyUI per orchestrator. */
@@ -947,6 +964,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   const defaultBackend = KNOWN_BACKENDS.has(backendId) ? backendId : "claude";
   const AGENT_KEY_SEP = "::";
   const tabBackends = new Map<string, string>(); // panel tabId -> selected backend
+  const headlessTabs = new Set<string>(); // tabs with no ComfyUI canvas (mobile/remote) — deliver renders in-turn
   const backendForTab = (panelTabId: string): string =>
     tabBackends.get(panelTabId) ?? defaultBackend;
   const agentKeyFor = (panelTabId: string): string =>
@@ -1565,6 +1583,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         manager.reset(panelTab + AGENT_KEY_SEP + prev);
       }
       tabBackends.set(panelTab, backend);
+      // A headless client (mobile/remote pseudo-panel, no browser canvas) advertises
+      // itself in the hello frame so its agent gets the in-turn-delivery directive.
+      if ((event as { headless?: unknown }).headless === true) headlessTabs.add(panelTab);
+      else headlessTabs.delete(panelTab);
       const key = panelTab + AGENT_KEY_SEP + backend;
 
       // Reload restore: the panel re-sends the last session id it saw. Honored
@@ -2025,6 +2047,14 @@ export async function runPanelOrchestrator(): Promise<void> {
       logger.debug(
         `[panel-orchestrator] queue-note check failed (ignored): ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    // HEADLESS delivery: a mobile/remote tab has no browser panel to auto-deliver a
+    // finished render, so remind its agent — every turn, since it must hold for the
+    // whole session — to run headless and show the output itself in-turn. The note is
+    // short and always-correct, so (unlike the once-per-episode crash/queue notes) it
+    // is injected on every headless turn.
+    if (headlessTabs.has(event.tab_id)) {
+      outText = `${HEADLESS_DIRECTIVE}\n\n${outText}`;
     }
     // Transcript replay (single-port provider switch): the panel sends the prior
     // conversation as `context` on the FIRST message to a freshly-switched

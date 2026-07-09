@@ -494,6 +494,15 @@ export class OllamaBackend implements AgentBackend {
                 // 65k, which both invites runaways and 402s on low prepaid
                 // balances (the request reserves credits for max_tokens).
                 max_tokens: Number(process.env.COMFYUI_MCP_OLLAMA_MAX_TOKENS) || 8192,
+                // Pin temperature for tool precision — the project's recipe
+                // everywhere else (arena, GGUF validation, the Ollama tags'
+                // Modelfiles all run temp 0). Endpoints with no server-side
+                // default (LM Studio serving a raw GGUF) otherwise sample at
+                // ~0.8, where small models nondeterministically emit an EMPTY
+                // final message after tool results (found live on e2b).
+                temperature: process.env.COMFYUI_MCP_OLLAMA_TEMPERATURE
+                  ? Number(process.env.COMFYUI_MCP_OLLAMA_TEMPERATURE)
+                  : 0,
               }),
               signal,
             })

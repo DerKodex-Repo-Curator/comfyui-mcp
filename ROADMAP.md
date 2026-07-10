@@ -154,6 +154,30 @@ hardening first; this is the "shape it with users before building" track.
 > Scope: **v1 = local GPU only.** Reference client internals: `~/code/slutter` (CivitAI Video
 > Scroller, Flutter — decoded CivitAI API, OAuth login, account management).
 
+## Theme H — 3D previz → motion-controlled video (Blender MCP + Mixamo + Meshy)
+The most reliable way to direct an AI video shot is a pre-animated 3D scene: block it in Blender
+(agent-driven via the **official Blender MCP**, 5.1+), populate with **Mixamo** motion clips and
+**Meshy 6** / local img2mesh assets, render a rough viewport reference, then restyle it with
+**Wan 2.2 Animate** (free, local) or **Seedance 2.0 Reference-to-Video** (paid API node) — motion,
+timing and camera survive; appearance comes from reference images. Full vision:
+[`design/previz-to-video.md`](./design/previz-to-video.md). comfyui-mcp does **not** wrap Blender —
+the agent holds both MCPs and a skill teaches the choreography.
+
+- **H0 — Manual spike.** Run the recipe once end-to-end on this rig (asset → Mixamo → blocking →
+  viewport render → Wan Animate AND Seedance R2V); capture every snag.
+- **H1 — `previz-director` skill.** The whole recipe as knowledge (blocking conventions, retarget
+  procedure, render settings, handoff commands, R2V prompt templates). Zero code; works today from
+  Claude Desktop/Code with both MCPs configured.
+- **H2 — `wan-animate` pack.** The free path installable via `apply_manifest` (Wan 2.2 Animate 14B
+  fp8 + DWPose + SAM2 + wired template).
+- **H3 — Companion MCP servers in the orchestrator.** Config + session-spawn plumbing so the *panel*
+  agent can reach Blender MCP (generic mechanism, Blender is just the first customer).
+- **H4 — Director × previz.** Shot lists drive previz scenes; multi-shot cast/set continuity; style
+  sweeps (one previz, N looks) as a first-class op.
+
+> Paid pieces (Meshy, Seedance) stay behind the existing `check_workflow_runtime` /
+> ask-before-spending convention; every paid step has a named free alternative.
+
 ## Theme G — Safety gates / enterprise hardening (deferred until needed)
 Declarative per-category safety gates (workflow-writes, model-deletes, process-control, git-writes,
 …) enforced at a single registration-time choke point, `COMFYUI_MCP_SAFE_MODE` lockdown for
@@ -177,6 +201,7 @@ purely to keep the design findable if that reality ever changes. Until then, iso
 | **2 — productionize** | Full agent panel + discovery + I/O | B5, B6, D1, E8, E9, E10, E12 |
 | **Hardening — continuous** | Reliability + I/O from comfyui-api | E1, E2, E3, E4, E7, E11 |
 | **3 — mobile / remote (teased)** | Agent-driven phone client on your own rig | F1, F2, F3, F4, F5, F6, F7 (F8 later) |
+| **4 — previz (drafting)** | 3D-blocked reference scenes → motion-controlled video | H0, H1, H2 first (no code); H3, H4 after |
 
 Phase 0 ships value immediately (skills + node tooling) and de-risks the panel (tunnel + streaming)
 before any frontend work. Phase 1 needs the v2 package closer to publish for the panel UI.

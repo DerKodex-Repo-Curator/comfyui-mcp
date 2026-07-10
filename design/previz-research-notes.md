@@ -309,6 +309,50 @@ disconnect `background_video`+`mask`.
   gap/opportunity). [ReCamMaster](https://jianhongbai.github.io/ReCamMaster/)
   re-renders an existing video along a *new* camera path.
 
+## 6.6 Community counter-proposal (Discord, seanmcmagic — agent-drafted, taken with salt)
+
+A session-tested argument + alternative architecture, preserved faithfully:
+
+- **The "why", sharpened**: the panel's real value is that Claude acts on
+  **live, current state** instead of frozen training data — live model cards
+  corrected guessed CFG/negative/resolution settings all session; the
+  Hub catalog changes daily and can't be baked into weights; the agent had no
+  idea how the panel's own consent gate worked until it read live source. A
+  Blender integration gives the same superpower on the 3D side: the agent
+  sees *your actual rig, scene, and pose* instead of hallucinating plausible
+  bpy calls. And posed skeleton/depth export **solves multi-character
+  composition by construction** (who's touching whom, camera angle) — which
+  text prompting never reliably did.
+- **Proposed architecture** (differs from the RFC's): fork an existing bpy
+  socket bridge (ahujasid/blender-mcp), mirror the comfyui-mcp two-package
+  split — `blender-agent-panel` (thin Blender add-on, UI only) +
+  `blender-mcp-orchestrator` (npx-launched tool host, loopback WS, different
+  port) — and expose **~15 curated named tools instead of raw Python**
+  (`blender_get_scene_outline`, `blender_render_viewport`,
+  `blender_add_object`, `blender_set_transform`, `blender_list_bones`,
+  `blender_set_bone_rotation`, `blender_apply_pose_preset`,
+  `blender_export_pose_map`, `blender_export_camera_keyframes`,
+  `blender_bake_depth_pass`, `blender_bake_normal_pass`,
+  `blender_get_camera_params`, …). Reuse the existing consent file
+  (`~/.comfyui-mcp/panel-settings.json`). Build order: read-only bridge →
+  **pose + camera tools together** (not camera-first) → ComfyUI round trip
+  (both API and local paths) → mobile app card.
+- **Model-agnostic exports**: pose/camera leave Blender as generic artifacts
+  (skeleton image/video, depth map, keyframe JSON), and the *downstream* node
+  decides the backend — Seedance for paid cinematic work (server-side content
+  filtering), Wan Animate/ControlNet for local unrestricted work.
+- **Prior art flagged**: [alexisrolland/ComfyUI-Blender](https://github.com/alexisrolland/ComfyUI-Blender)
+  (175+ stars, on the Comfy Registry) — Blender triggers ComfyUI workflows,
+  but one-directional with no pose/scene export; UI-pattern reference only.
+
+RFC disposition (see the vision doc's architecture section): adopt the
+live-state framing, model-agnostic exports, pose+camera-together ordering,
+and the prior-art pointer; hold the fork-and-own-two-packages architecture as
+an open question against the official-MCP-via-companion-servers approach —
+the curated-tools concern is real (small local models struggle with raw bpy;
+same lesson as compact tool mode #97/#113) but may be answerable with skill
+recipes over the official server before owning a whole Blender add-on.
+
 ## 7. Numeric anchors for the H1 skill (cheat sheet)
 
 | Thing | Number |

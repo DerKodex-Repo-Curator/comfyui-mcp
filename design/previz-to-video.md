@@ -49,6 +49,16 @@ the character shop, Mixamo auto-rigs what it produces, and Claude — with full
 visibility into the Blender scene — directs the performance from the user's
 natural language.
 
+Why this is the panel's home turf (community articulation, from a live
+session): the panel's whole value is that the agent acts on **live, current
+state instead of frozen training data** — live model cards correct guessed
+settings, the daily-changing workflow catalog can't live in weights, and the
+agent doesn't know how anything on disk works until it reads it. A Blender
+stage extends that same superpower to 3D: the agent sees *your actual rig,
+scene, and pose* rather than hallucinating plausible bpy calls. And a posed
+scene **solves multi-character composition by construction** — who's touching
+whom, from what angle — which text prompting has never done reliably.
+
 ## Evidence this works today
 
 - [ComfyUI (official): style-swapping one Blender animation](https://www.youtube.com/watch?v=3r6qzGGNK8s)
@@ -144,12 +154,34 @@ Auto-rigging is per-character but follows the same stage → guide → pick-up
 pattern. Text-to-animation add-ons (Kinetix-style) and markerless mocap slot
 into the same folder convention later.
 
-**Orchestrator gap (the one real feature ask)**: the panel agent currently
+**Model-agnostic exports (adopted from community feedback)**: everything that
+leaves Blender is a **generic control artifact** — clay/skeleton video, depth
+pass, camera-keyframe JSON — never tied to one backend. The downstream node
+decides: Seedance/Kling for hosted cinematic work, Wan Animate / VACE /
+ControlNet for local work. Same Blender tooling either way. Corollary from the
+same feedback: hosted backends filter content server-side, so the local leg
+isn't just the free leg — it's the only leg for content the APIs won't render.
+One more scope rule adopted: **pose export and camera export ship together**
+(H0/H1), not camera-first — multi-character shots need pose matching from day
+one, camera motion alone doesn't hold characters consistent.
+
+**Orchestrator gap + the architecture question**: the panel agent currently
 speaks only to comfyui-mcp. Claude Desktop / Claude Code users can add the
 Blender MCP alongside today, but the *panel* needs **companion MCP server
 support** — a config that passes extra MCP servers into the spawned agent
-session. That's the only code change in this roadmap that isn't a skill, pack,
-or doc.
+session (H3). A community counter-proposal (research notes §6.6) goes
+further: fork a bpy socket bridge and ship our own two-package Blender panel
+(`blender-agent-panel` add-on + `blender-mcp-orchestrator`) exposing **~15
+curated named tools instead of raw `execute_python`** — reusing the panel's
+consent file. The concern behind it is real: raw bpy is hostile to small
+local models (the exact lesson compact tool mode taught us on the ComfyUI
+side) and hard to consent-gate. Current lean: **don't own a Blender add-on
+yet** — official MCP underneath, curated *recipes* in the H1 skill on top,
+and revisit a thin curated tool layer (possibly proxying the official
+add-on's socket rather than forking) if H0/H1 show local models can't drive
+recipes reliably. Prior art either way:
+[alexisrolland/ComfyUI-Blender](https://github.com/alexisrolland/ComfyUI-Blender)
+(Blender→ComfyUI trigger, one-directional, UI-pattern reference).
 
 ## Deliverables
 
@@ -231,6 +263,15 @@ graph mutations being undoable.
   Claude Desktop/Code and prove the recipe before we touch the orchestrator.
   Current lean: keep H3 third, but spec it in parallel with H1 so panel parity
   lands fast once the skill is validated.
+- **Curated Blender tools vs raw bpy over the official MCP?** The community
+  proposal (notes §6.6) wants ~15 named tools (`blender_export_pose_map`,
+  `blender_set_bone_rotation`, …) instead of `execute_python`. Real tension:
+  named tools are what small local backends can actually drive, and what a
+  consent gate can reason about — but 15 tools can't cover retargeting,
+  physics, and the long tail that makes Blender worth having. H0/H1 decide:
+  if skill recipes over the official MCP work for Claude but fail for
+  qwen/gemma-class backends, a thin curated layer (proxying the official
+  add-on's socket, not forking a new one) becomes an H3-adjacent item.
 - **Bundle a tiny CC0 previz kit?** A mannequin character + 3–5 CC0 motion
   clips shipped in the pack would make H0-style demos work without the Mixamo
   shopping trip (and without leaning on Adobe's ToS). Leaning yes — and

@@ -177,7 +177,10 @@ shop, Mixamo auto-rigs its output, Blender is the stage Claude can fully see and
   GLB, `design/previz-assets/master-3d-model-maker.community.json`); plus `kind: "model"`
   (GLB/FBX/OBJ) in the output listing so import-to-Blender / stage-for-Mixamo resolve exact paths.
 - **H3 — Companion MCP servers in the orchestrator.** Config + session-spawn plumbing so the *panel*
-  agent can reach Blender MCP (generic mechanism, Blender is just the first customer).
+  agent can reach Blender MCP (generic mechanism, Blender is just the first customer). Open question
+  tracked in the RFC: whether small local backends additionally need a thin curated tool layer
+  (`blender_export_pose_map`-style named tools) over the official MCP's raw `execute_python` —
+  community proposal, decided by H0/H1 evidence.
 - **H4 — Director × previz.** Shot lists drive previz scenes; multi-shot cast/set continuity; style
   sweeps (one previz, N looks) as a first-class op.
 

@@ -167,6 +167,52 @@ describe("UiBridge (on-demand pairing listener — addListener)", () => {
   });
 });
 
+describe("UiBridge (mailbox — offline render delivery)", () => {
+  it("buffers show_media for an offline tab and flushes it on reconnect", async () => {
+    // No tab connected. A finished-render delivery to a specific (offline) tab is
+    // buffered, not failed.
+    const res = await bridge.send(
+      { cmd: "show_media", items: [{ filename: "a.png" }] },
+      { tabId: "phone-stable-1" },
+    );
+    expect(res).toMatchObject({ ok: true, mailboxed: true });
+
+    // An INTERACTIVE command to an offline tab still rejects (not mailboxable).
+    await expect(
+      bridge.send({ cmd: "graph_outline" }, { tabId: "phone-stable-1" }),
+    ).rejects.toThrow();
+
+    // The phone reconnects (same stable tab id) → it gets the buffered show_media
+    // (flagged mailbox:true) plus a mailbox_flush summary.
+    const got: Array<Record<string, unknown>> = [];
+    const phone = await connectPanel(); // open socket, no hello yet
+    phone.on("message", (buf) => got.push(JSON.parse(buf.toString())));
+    phone.send(JSON.stringify({ type: "hello", tab_id: "phone-stable-1", title: "mobile" }));
+
+    await vi.waitFor(() => {
+      const media = got.find((m) => m.cmd === "show_media");
+      const flush = got.find((m) => m.type === "mailbox_flush");
+      expect(media).toMatchObject({ mailbox: true });
+      expect(flush).toMatchObject({ count: 1 });
+    });
+    phone.close();
+  });
+
+  it("does not mailbox interactive commands (only show_media)", async () => {
+    await expect(
+      bridge.send({ cmd: "graph_get_state" }, { tabId: "nobody" }),
+    ).rejects.toThrow();
+    // Reconnecting that tab flushes nothing.
+    const got: Array<Record<string, unknown>> = [];
+    const phone = await connectPanel();
+    phone.on("message", (buf) => got.push(JSON.parse(buf.toString())));
+    phone.send(JSON.stringify({ type: "hello", tab_id: "nobody", title: "x" }));
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "nobody")).toBe(true));
+    expect(got.find((m) => m.type === "mailbox_flush")).toBeUndefined();
+    phone.close();
+  });
+});
+
 describe("UiBridge (multi-tab)", () => {
   it("routes to the single connected tab without tab_id", async () => {
     const a = await connectPanel("tab-aaaa-1111");

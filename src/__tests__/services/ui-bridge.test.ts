@@ -125,6 +125,48 @@ describe("UiBridge (LAN bind — panel #54)", () => {
   });
 });
 
+describe("UiBridge (on-demand pairing listener — addListener)", () => {
+  it("adds a token-gated second listener sharing tab routing; primary loopback stays token-less", async () => {
+    // The beforeEach bridge is loopback + token-less (the local panel case).
+    const pairPort = 20000 + Math.floor(Math.random() * 20000);
+    await bridge.addListener("127.0.0.1", pairPort, "pair-token");
+
+    // Pairing port WITHOUT a token → rejected.
+    await expect(
+      new Promise((resolve, reject) => {
+        const s = new WebSocket(`ws://127.0.0.1:${pairPort}`);
+        s.on("open", () => reject(new Error("opened pairing port without a token")));
+        s.on("error", () => resolve("rejected"));
+      }),
+    ).resolves.toBe("rejected");
+
+    // Wrong token → rejected.
+    await expect(
+      new Promise((resolve, reject) => {
+        const s = new WebSocket(`ws://127.0.0.1:${pairPort}/?token=nope`);
+        s.on("open", () => reject(new Error("opened pairing port with a wrong token")));
+        s.on("error", () => resolve("rejected"));
+      }),
+    ).resolves.toBe("rejected");
+
+    // Correct token → opens and registers a tab on the SAME bridge.
+    const phone = await new Promise<WebSocket>((resolve, reject) => {
+      const s = new WebSocket(`ws://127.0.0.1:${pairPort}/?token=pair-token`);
+      s.on("open", () => resolve(s));
+      s.on("error", reject);
+    });
+    phone.send(JSON.stringify({ type: "hello", tab_id: "phone-1", title: "mobile" }));
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "phone-1")).toBe(true));
+
+    // The primary loopback listener is STILL token-less (local panel unaffected).
+    const local = await connectPanel("local-1");
+    await vi.waitFor(() => expect(bridge.tabs().some((t) => t.tab_id === "local-1")).toBe(true));
+
+    phone.close();
+    local.close();
+  });
+});
+
 describe("UiBridge (multi-tab)", () => {
   it("routes to the single connected tab without tab_id", async () => {
     const a = await connectPanel("tab-aaaa-1111");

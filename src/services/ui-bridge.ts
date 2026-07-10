@@ -91,6 +91,11 @@ export class UiBridge {
   private static readonly MAX_MISSED_PONGS = 2;
 
   private wss: WebSocketServer | null = null;
+  /** Extra always-token-gated listeners — the on-demand phone-pairing bind (LAN
+   *  and/or a loopback port a cloudflared tunnel fronts). Their connections route
+   *  through the same tab/rid logic as the primary bridge; the primary loopback
+   *  listener stays token-less so the local browser panel is unaffected. */
+  private readonly extraServers: WebSocketServer[] = [];
   private conns = new Map<string, Conn>(); // tabId -> connection
   private pending = new Map<string, Pending>();
   private portInUse = false;
@@ -161,23 +166,28 @@ export class UiBridge {
   private startHeartbeat(): void {
     if (this.heartbeatTimer) return;
     this.heartbeatTimer = setInterval(() => {
-      const wss = this.wss;
-      if (!wss) return;
-      for (const sock of wss.clients) {
-        const missed = this.missedPongs.get(sock) ?? 0;
-        if (missed >= UiBridge.MAX_MISSED_PONGS) {
-          try {
-            sock.terminate();
-          } catch {
-            // already gone
+      // Ping the primary listener AND any pairing listeners — a phone on a LAN or
+      // tunnel bind needs the same idle-keepalive the browser panel gets.
+      const servers = [this.wss, ...this.extraServers].filter(
+        (s): s is WebSocketServer => s !== null,
+      );
+      for (const server of servers) {
+        for (const sock of server.clients) {
+          const missed = this.missedPongs.get(sock) ?? 0;
+          if (missed >= UiBridge.MAX_MISSED_PONGS) {
+            try {
+              sock.terminate();
+            } catch {
+              // already gone
+            }
+            continue;
           }
-          continue;
-        }
-        this.missedPongs.set(sock, missed + 1);
-        try {
-          sock.ping();
-        } catch {
-          // socket mid-close — the next tick's terminate/close handler cleans up
+          this.missedPongs.set(sock, missed + 1);
+          try {
+            sock.ping();
+          } catch {
+            // socket mid-close — the next tick's terminate/close handler cleans up
+          }
         }
       }
     }, UiBridge.HEARTBEAT_MS);
@@ -299,6 +309,63 @@ export class UiBridge {
    */
   attachRelayConnection(sock: BridgeSocket): void {
     this.handleConnection(sock);
+  }
+
+  /**
+   * Open a SECOND, ALWAYS token-gated listener on `host:port` and route its
+   * connections through the same tab/rid logic as the primary bridge. Used by the
+   * on-demand "pair a phone" flow: a `0.0.0.0` bind so a phone can reach it over
+   * the LAN, and/or a loopback port a cloudflared quick-tunnel fronts. The primary
+   * loopback listener stays token-less, so the local browser panel is untouched.
+   * Resolves once bound; rejects if the port can't be bound. Idempotent-ish: the
+   * caller is responsible for not re-binding the same port.
+   */
+  addListener(host: string, port: number, token: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const wss = new WebSocketServer({
+        port,
+        host,
+        verifyClient: (info, cb) => {
+          let provided = "";
+          try {
+            provided =
+              new URL(info.req.url ?? "/", "http://127.0.0.1").searchParams.get("token") ?? "";
+          } catch {
+            provided = "";
+          }
+          const a = Buffer.from(provided);
+          const b = Buffer.from(token);
+          if (a.length === b.length && timingSafeEqual(a, b)) return cb(true);
+          logger.warn("[ui-bridge] pairing listener rejected a connection with a missing/invalid token");
+          cb(false, 401, "Unauthorized");
+        },
+      });
+      wss.on("connection", (sock) => {
+        this.missedPongs.set(sock, 0);
+        sock.on("pong", () => this.missedPongs.set(sock, 0));
+        this.handleConnection(sock);
+      });
+      wss.on("listening", () => {
+        settled = true;
+        this.extraServers.push(wss);
+        logger.info(`[ui-bridge] pairing listener on ws://${host}:${port} (token-gated)`);
+        resolve();
+      });
+      wss.on("error", (err: NodeJS.ErrnoException) => {
+        if (!settled) {
+          settled = true;
+          try {
+            wss.close();
+          } catch {
+            // nothing bound
+          }
+          reject(err);
+        } else {
+          logger.warn(`[ui-bridge] pairing listener error: ${err.message}`);
+        }
+      });
+    });
   }
 
   private handleConnection(sock: BridgeSocket): void {
@@ -542,6 +609,13 @@ export class UiBridge {
       }
     }
     this.conns.clear();
+    for (const s of this.extraServers.splice(0)) {
+      try {
+        s.close();
+      } catch {
+        // already gone
+      }
+    }
     await new Promise<void>((resolve) => {
       if (!this.wss) return resolve();
       this.wss.close(() => resolve());

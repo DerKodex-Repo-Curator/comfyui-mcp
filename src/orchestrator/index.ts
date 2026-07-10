@@ -18,6 +18,7 @@ import { randomBytes } from "node:crypto";
 import readline from "node:readline";
 import { startUiBridge, isLoopbackBindHost, type UiBridge } from "../services/ui-bridge.js";
 import { setupSecureBridge, type SecureBridge } from "../services/secure-bridge.js";
+import { startQuickTunnel } from "../services/tunnel.js";
 import { detectInstallMode } from "../services/self-update.js";
 import { SessionStore } from "./session-store.js";
 import { logger } from "../utils/logger.js";
@@ -656,6 +657,24 @@ export async function runPanelOrchestrator(): Promise<void> {
   const lockPort = Number(process.env.COMFYUI_MCP_BRIDGE_PORT) || 9180;
   const lockPath = orchLockPath(lockPort);
   const bridge = startUiBridge(lockPort, bridgeToken, bridgeHost);
+
+  // On-demand phone pairing (the panel "Remote control" button). Off by default:
+  // the FIRST pair request lazily binds a SECOND, token-gated listener on all
+  // interfaces (so a phone can reach it), while the primary loopback bridge stays
+  // token-less. LAN mode returns a same-wifi ws:// URL; tunnel mode fronts the same
+  // token-gated listener with a cloudflared wss:// for anywhere access.
+  const pairPort = lockPort + 2; // avoid the panel_* HTTP-MCP port (lockPort + 1)
+  let pairToken: string | null = null;
+  let pairListenerStarted = false;
+  let pairTunnel: { url: string; stop: () => void } | null = null;
+  const ensurePairListener = async (): Promise<string> => {
+    if (!pairToken) pairToken = randomBytes(24).toString("hex");
+    if (!pairListenerStarted) {
+      await bridge.addListener("0.0.0.0", pairPort, pairToken);
+      pairListenerStarted = true;
+    }
+    return pairToken;
+  };
 
   if (lanBridge) {
     // Ready-to-paste connection info: the panel's Settings → Advanced →
@@ -2029,6 +2048,53 @@ export async function runPanelOrchestrator(): Promise<void> {
         event.tab_id,
       );
       if (!error) pushReadiness(event.tab_id);
+      return;
+    }
+
+    // Phone pairing: mint a phone-reachable bridge URL for the panel's QR modal.
+    // `lan` → ws://<lan-ip>:<pairPort>/?token= (same wifi); `tunnel` → a cloudflared
+    // wss://…/?token= (anywhere). Both hit the on-demand token-gated pairing
+    // listener; async (tunnel startup can fail), so reply via a typed frame.
+    if (event.type === "pair" && event.tab_id) {
+      const mode = (event as { mode?: unknown }).mode === "tunnel" ? "tunnel" : "lan";
+      const tabId = event.tab_id;
+      void (async () => {
+        const token = await ensurePairListener();
+        let url: string;
+        if (mode === "tunnel") {
+          if (!pairTunnel) {
+            const t = await startQuickTunnel(pairPort, "127.0.0.1");
+            pairTunnel = { url: t.url, stop: t.stop };
+            process.once("exit", () => {
+              try {
+                pairTunnel?.stop();
+              } catch {
+                /* best-effort */
+              }
+            });
+          }
+          const u = new URL(pairTunnel.url);
+          u.protocol = "wss:";
+          u.search = "";
+          u.searchParams.set("token", token);
+          url = u.toString();
+        } else {
+          const ip = firstLanIPv4();
+          if (!ip) {
+            throw new Error(
+              "No LAN network found — connect this machine to wifi/ethernet, or use the Internet (tunnel) option.",
+            );
+          }
+          url = `ws://${ip}:${pairPort}/?token=${token}`;
+        }
+        logger.info(`[panel-orchestrator] pairing URL minted (${mode})`);
+        bridge.push({ type: "pair_url", mode, url }, tabId);
+      })().catch((err) => {
+        bridge.push(
+          { type: "pair_error", mode, error: err instanceof Error ? err.message : String(err) },
+          tabId,
+        );
+      });
       return;
     }
 

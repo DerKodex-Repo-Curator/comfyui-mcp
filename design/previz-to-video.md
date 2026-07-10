@@ -83,10 +83,14 @@ natural language.
 | Piece | What it gives us | Status / cost |
 | --- | --- | --- |
 | **Blender MCP (official)** | Scene assembly, import, retarget, camera keyframes, viewport render — via `execute_python` + scene-summary tools; add-on + TCP server (localhost:9876, auto-start), Blender 5.1+ | Free; separate MCP server ([projects.blender.org/lab/blender_mcp](https://projects.blender.org/lab/blender_mcp)) |
-| **Mixamo** | **Auto-rigging for ComfyUI-authored characters** (upload FBX/GLB → skeleton-bound FBX) + huge free library of humanoid clips | Free w/ Adobe account, **no API** — website hop is manual; curated local FBX library + Blender retarget add-ons |
+| **ComfyUI-UniRig** | **Local auto-rigging**: mesh → Mixamo-compatible rigged FBX (UniRig + Make-It-Animatable, sub-second skinning; handles non-humanoids) | Free, local, in-graph — agent-drivable today; [repo](https://github.com/PozzettiAndrea/ComfyUI-UniRig) |
+| **Mixamo** | Fallback auto-rigger + huge free library of humanoid clips | Free w/ Adobe account, **no API** — website hop is manual; curated local FBX library + Blender retarget add-ons |
+| **Yedp Action Director** | **Previz inside ComfyUI**: 3D viewport node, ≤16 Mixamo-rigged characters, cameras/HDRIs → bakes 7 control passes (pose/depth/canny/normal/shaded/alpha/textured) | Free custom node — the lighter first rung below the full Blender stage |
 | **Meshy 6 partner nodes** | text→3D / image→3D / multi-image→3D in ComfyUI core (Templates → 3D); GLB/FBX into `output/` | **Paid** (Comfy credits, ~211/$1) |
 | **Local 3D gen** | Trellis 2 / Hunyuan3D / TripoSplat custom nodes as the free asset path; community-proven character-shop graph (SDXL → Qwen-Edit multi-angle → Hunyuan3D v2 MV → GLB, see Evidence) | Free, local GPU |
-| **Wan 2.2 Animate** | Reference video + character image → animated character (DWPose-driven); move/animate & mix/replace modes; native Comfy template | Free, local (fp8 ~19GB on 24GB cards, GGUF Q4 on 16GB; 16 fps, 77-frame windows, res %16) |
+| **Wan 2.2 Animate** | Reference video + character image → animated character (DWPose-driven); move/animate & mix/replace modes; native Comfy template | Free, local (fp8 ~19GB on 24GB cards, GGUF Q4 on 16GB; 16 fps, 77-frame windows, res %16). Watch **SCAIL-2** — end-to-end successor, no pose maps, better multi-character, GGUF ~6GB; re-check at H2 build time |
+| **Kling 2.6 Motion Control** | Simplest API path: character image + motion video (3–30s) → identity-locked transfer, 4-node graph | **Paid** API node — third restyle leg alongside Seedance/Wan |
+| **Self-filmed video** | A phone clip of the user performing IS a previz for single-character shots (community default); filming rules: full body, locked tripod, no cuts, even light | Free — the skill should accept it as a first-class motion source |
 | **Seedance 2.0 R2V** | ≤3 reference videos (≤15.1s total) + ≤9 reference images + ≤3 audio, `@Video1`/`@Image1` role-tagged prompts; follows choreography + camera; 4–15s out (sweet spot 6–8s) | **Paid** API node (`ByteDance2ReferenceNode`, ~$0.66 / 5s @ 720p; Mini ~$0.32); Seedance 2.5 exists (30s native) but has no Comfy nodes yet |
 | **Already in this repo** | `director` skill (story→scenes→clips), packs system, `upload_video`/`stage_output_as_input` I/O, `list_api_nodes`/`generate_with_api_node`, `check_workflow_runtime` ask-before-spend | Shipped |
 
@@ -116,16 +120,20 @@ Handoff points (all already representable):
 5. **Reference stills**: character/environment look-images from any local
    image pack (Z-Image, Krea2, …) or provided by the user.
 
-**The character loop (Discord feedback)**: characters are **authored in
-ComfyUI first** — image model → img2mesh → FBX/GLB in `output/` — then
-**auto-rigged through Mixamo**, and only then animated and directed in
-Blender. The agent fully automates the Blender side; the Mixamo *website* hop
-is the one manual step (no API), so the skill runs it as a guided handoff:
-stage the exact file, tell the user precisely what to upload and click, then
-pick the rigged FBX back up from the download folder and continue without
-being re-prompted. Direction stays verifiable: the agent inspects the scene
-graph and screenshots the viewport, so it *sees* every scene it's directing —
-the same trust model as the canvas, where it reads the graph it mutates.
+**The character loop (Discord feedback, revised by round-3 research)**:
+characters are **authored in ComfyUI first** — image model → img2mesh →
+FBX/GLB in `output/` — then auto-rigged, and only then animated and directed
+in Blender. Rigging now has a fully-automatic local path: **ComfyUI-UniRig**
+(UniRig + Make-It-Animatable) turns a mesh into a **Mixamo-compatible rigged
+FBX** locally, free, inside the same ComfyUI the agent already drives — no
+website hop at all. Mixamo's site remains the fallback rigger and the clip
+library; when used, the skill runs it as a guided handoff: stage the exact
+file, tell the user what to upload and click, pick the rigged FBX back up
+from the download folder. (Cloud alternates with real APIs: Meshy rigging +
+600-clip retarget, Tripo one-shot rig+retarget.) Direction stays verifiable:
+the agent inspects the scene graph and screenshots the viewport, so it *sees*
+every scene it's directing — the same trust model as the canvas, where it
+reads the graph it mutates.
 
 **Mixamo reality check**: there is no official API and scraping is a ToS
 minefield, so the skill treats Mixamo's clip library as a **one-time shopping
@@ -168,8 +176,9 @@ or doc.
 - **`character-shop` pack (community seed)** — productize the shared
   Master 3D Model Maker graph (SDXL hero → Qwen-Edit 2511 multi-angle LoRA →
   Hunyuan3D v2 MV → GLB) as the free character-authoring pack, with credit to
-  its author. It's the ComfyUI half of the character loop, already
-  panel-built.
+  its author, **extended with a ComfyUI-UniRig stage** so the pack's output is
+  a rigged, animation-ready FBX — the full character loop with zero manual
+  hops. It's the ComfyUI half of the character loop, already panel-built.
 - **Meshy + Seedance guidance** — no pack needed (they're core API nodes);
   the skill documents the built-in templates and wraps both in the
   `check_workflow_runtime` / ask-before-spending convention. Free alternates
@@ -224,7 +233,16 @@ graph mutations being undoable.
   lands fast once the skill is validated.
 - **Bundle a tiny CC0 previz kit?** A mannequin character + 3–5 CC0 motion
   clips shipped in the pack would make H0-style demos work without the Mixamo
-  shopping trip (and without leaning on Adobe's ToS). Leaning yes.
+  shopping trip (and without leaning on Adobe's ToS). Leaning yes — and
+  round-3 research softens the need further: UniRig rigs locally, and
+  text-to-animation APIs (DeepMotion SayMotion, Text2Motion's Blender add-on,
+  Move AI phone mocap) can *generate* clips instead of shopping for them.
+  Mixamo becomes the curated-quality option, not the bottleneck.
+- **Yedp Action Director as the on-ramp?** A 3D previz viewport *inside*
+  ComfyUI (Mixamo rigs, cameras, 7 baked control passes) covers simple shots
+  with zero Blender setup, and the full Blender MCP stage takes over when
+  shots need real set dressing, physics, or multi-take direction. Should H1
+  teach both rungs, or does two previz stages confuse the story?
 - **Headless Blender?** The official MCP can execute in a background Blender
   process — a render-farm-ish mode for batch shots. Interactive-first feels
   right (the user watches the blocking happen, same as the canvas), headless

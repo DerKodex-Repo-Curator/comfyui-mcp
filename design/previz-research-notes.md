@@ -175,7 +175,141 @@ on this split is resolved — encode it as skill guidance.
   Direct-to-mp4: `file_format='FFMPEG'`, `ffmpeg.format='MPEG4'`,
   `ffmpeg.codec='H264'`, set `fps`/`frame_start`/`frame_end`/`filepath`.
 
-## 6. Numeric anchors for the H1 skill (cheat sheet)
+## 6. Round 3 — more creators, downloadable workflows, non-Blender sources
+
+### 6.1 Finds that change the plan
+
+- **ComfyUI-UniRig** ([PozzettiAndrea/ComfyUI-UniRig](https://github.com/PozzettiAndrea/ComfyUI-UniRig))
+  — wraps **UniRig** (VAST/Tripo, SIGGRAPH 2025, trained on 14k+ rigs incl.
+  quadrupeds) *and* **Make-It-Animatable** (CVPR 2025; skeleton/skin-weight
+  prediction "in under a second" — this is the "skin token" from the
+  PixelArtistry video). Mesh in → **Mixamo-compatible rigged FBX** out,
+  local, free, self-contained (bundles Blender). **The mixamo.com manual hop
+  is optional, not structural.** Cloud alternates with real APIs: Meshy
+  rigging/animation endpoints ([docs](https://docs.meshy.ai/en/api/rigging),
+  rig + 600-clip library retarget; zero-credit claim UNVERIFIED), Tripo
+  one-shot rig+retarget SDK, Anything World (best on non-humanoids).
+- **ComfyUI-Yedp-Action-Director** ([yedp123](https://github.com/yedp123/ComfyUI-Yedp-Action-Director))
+  — an interactive **3D viewport node inside ComfyUI**: up to 16
+  Mixamo-rigged characters, clip sequencing, webcam facial capture, cameras/
+  HDRIs, baking **7 synchronized passes** (OpenPose/Depth/Canny/Normal/
+  Shaded/Alpha/Textured) straight into ControlNet/VACE pipelines. "Previz
+  without opening Blender" — a natural first rung below the full Blender leg.
+- **SCAIL / SCAIL-2** (zai-org, on Wan 2.1 14B) — early-2026 content is
+  migrating motion transfer from Wan Animate to SCAIL-2: end-to-end (no
+  skeleton/pose maps), better multi-character, GGUF builds down to **~6GB**
+  ([tutorial](https://www.stablediffusiontutorials.com/2026/06/wan2.1-scail2.html),
+  [RunComfy graph](https://www.runcomfy.com/comfyui-workflows/scail-2-motion-transfer-in-comfyui-reference-image-to-video)).
+  The H2 pack choice (Animate vs SCAIL-2 vs both) should be re-checked at
+  build time.
+- **Kling 2.6 Motion Control** — third API path, simplest possible graph
+  (LoadVideo + LoadImage → `KlingMotionControl`): motion+expression transfer
+  with identity lock; reference 3–30s ([template](https://comfy.org/workflows/api_kling_motion_control-8f381a482443/)).
+- **Self-filmed phone video is the community default previz** for
+  single-character work (MDMZ, Max Novak, Benji, Intellectz all assume a
+  performer video). Filming consensus: full body/mid-shot with hands visible,
+  locked tripod, no cuts, even lighting, big readable motion, minimal frame
+  traversal. The 3D path stays necessary for camera choreography,
+  multi-character blocking, and non-human proportions.
+
+### 6.2 Creators (beyond rounds 1–2)
+
+- **Purz** ([comfy.org author](https://www.comfy.org/workflows/purz/)) —
+  official templates: Wan 2.2 Animate auto character-replace / full-scene
+  (**Nano Banana 2 auto-derives the swap reference from the video's first
+  frame** — unattended swaps), 4K Seedance R2V, SAM3 text-prompt video
+  masking; [blender-ai-keyframes](https://github.com/purzbeats/blender-ai-keyframes)
+  converts audio to Blender f-curves → exported as AI-param schedules.
+- **toyxyz** ([Gumroad rig](https://toyxyz.gumroad.com/l/ciojz)) — "character
+  bones that look like OpenPose": retarget any character/mocap onto it and
+  Blender renders **all ControlNet passes simultaneously** (OpenPose incl.
+  wan-scale, depth, canny, face landmark, fingers); the foundational Blender
+  control-pass rig everyone else builds on.
+- **ggvfx** ([production workflows](https://github.com/ggvfx/comfyui-workflows))
+  — real VFX production: camera-track a live plate → rebuild the move on
+  **Unreal grey-box geometry** → grey-box render as driving video → depth
+  ControlNets for Wan VACE *or* straight into Seedance R2V → comp in Nuke.
+  Also SCAIL for pose+camera match. Proves greybox-as-driving-plate at
+  production quality, 24GB VRAM.
+- **Benji (Future Thinker)** ([Patreon](https://www.patreon.com/aifuturetech))
+  — iClone 8 + AI Render → ComfyUI v2v; long-video "All-In-Looping": Animate
+  + VACE Fun + PUSA LoRA with **overlap-frame stitching** to kill reversed
+  motion and color shift.
+- **Sebastian Kamph** ([workflow](https://www.patreon.com/posts/restyle-with-wan-127437500))
+  — restyle-one-frame pattern: extract frame 1 (`frame_load_cap=1`), restyle
+  that single image anywhere, VACE 14B propagates it across the clip.
+  Cheapest look-dev iteration loop.
+- **MDMZ** ([RunComfy collab](https://www.runcomfy.com/comfyui-workflows/wan-2-2-animate-swap-characters-lip-sync-workflow-comfyui))
+  — character swap + lip-sync: original audio muxed back via
+  VHS_VideoCombine; filming guidance for self-filmed drivers.
+- **Max Novak** ([tutorial](https://www.youtube.com/watch?v=0trUwzli5G0)) —
+  masking-free pure pose-drive variant; long takes via un-bypassing WanVideo
+  **context options** with frame-window = context-frame count.
+- **Intellectz** ([free workflow](https://www.patreon.com/posts/wan-animate-for-141999455))
+  — QA gate: workflow **pauses at the Points Editor with an audio chime** so
+  masks are verified before GPU time burns.
+- **Esha Sharma / AIStudyNow** ([FusionX VACE](https://aistudynow.com/how-to-use-wan-2-1-fusionx-vace-in-comfyui-workflow-included/))
+  — dual ControlNet (Canny + DWPose) motion capture, 125 frames @ 1024×576;
+  documented drop-one-ControlNet VRAM fallback.
+- **Reallusion AI Render** (iClone/CC, [open beta](https://magazine.reallusion.com/2025/07/28/ai-render-for-iclone-character-creator-enters-open-beta-with-comfyui-workflow/))
+  — the productized competitor: iClone ships **3D-derived Depth / 3D OpenPose
+  / Normal / geometry Canny** into ComfyUI with 22 presets; their stated
+  finding matches ours — 3D-sourced passes beat 2D estimation for temporal
+  stability.
+- **Vladimir Chopine, Nerdy Rodent, enigmatic_e, GET GOING FAST** — v2v
+  restyle / Wan-Animate variants (depth-guided stylization; VACE Fun
+  character consistency; mask-region infill to repair hands/faces; FP8+GGUF
+  twin workflows + Triton/SageAttention ~50% speedups).
+- Negative findings: **Curious Refuge** (paywalled coursework, no public
+  pipeline), **Dave Clark/Promise** (advocacy, no reproducible workflow),
+  **JSFilmz** (previz education, no AI-restyle leg), **Latent Vision /
+  Olivio / Aitrepreneur / AI Search** (no 3D-previz pipeline published).
+
+### 6.3 Downloadable workflow shortlist (H2 pack candidates / references)
+
+| Workflow | Why it matters |
+| --- | --- |
+| [Wan2.1 VACE control video (official)](https://comfy.org/workflows/video_wan_vace_14B_v2v-2652985596d8/) | The graph our previz depth/pose render plugs into directly |
+| [shanef3d "Video Restyle"](https://comfy.org/workflows/templates_shane_video_restyle-5931e9bdf9db/) | First-frame styling + Canny/Depth switch, VACE propagation |
+| [Purz Wan2.2 Animate auto full-scene](https://comfy.org/workflows/templates_purz_wan22_animate_auto_full_scene-840b6e4c3983/) | Fully automatic replace (YOLO+ViTPose+SAM2, no point-picking) |
+| [The_frizzy1 GGUF unlimited-length loop](https://civitai.com/models/2046477) | Loop-node extension; 12GB @ Q8, down to 4GB @ Q4 |
+| [Coyote_98 low-VRAM Animate](https://civitai.com/models/1980698) | 12GB/32GB: 113 frames @ 640p in ~10 min |
+| [SCAIL-2 motion transfer](https://www.runcomfy.com/comfyui-workflows/scail-2-motion-transfer-in-comfyui-reference-image-to-video) | The multi-character / no-pose-map successor |
+| [Kling 2.6 Motion Control (API)](https://comfy.org/workflows/api_kling_motion_control-8f381a482443/) | 4-node API path; ref 3–30s |
+| [Minta Seedance Multiframe Stitch](https://www.comfy.org/workflows/araminta-k/) | Keyframe beat-boards → one continuous clip |
+| [Storyboard To Video (Seedance)](https://comfy.org/workflows/f4e29143100c-f4e29143100c/) | Scene text → 8-panel storyboard → animated — previz-to-final in one graph |
+| [LTX 2.3 Cameraman IC-LoRA](https://comfy.org/workflows/460daa6b205d-460daa6b205d/) | Camera-move transfer from reference clip onto a styled still |
+| [Video→OpenPose utility](https://comfy.org/workflows/utility-openpose-video-dc73712c1842/) | Standard front-end when the reference is live footage |
+
+### 6.4 Wan 2.2 Animate concrete settings (for the H1 skill)
+
+From [stablediffusiontutorials.com](https://www.stablediffusiontutorials.com/2025/09/wan2.2-animate.html):
+start at **640px** (author OOM'd at 1120, succeeded at 960); **KSampler 6
+steps** (1–2 test / 7–10 quality), **CFG 1.0**, Euler/simple, denoise 1.0;
+Relight + lightx2v rank64 LoRAs; ≤5s input recommended; Points Editor: 5–10
+green dots on character, red on background; Mix vs Pose mode = connect vs
+disconnect `background_video`+`mask`.
+
+### 6.5 Motion/mocap tools with agent-drivable APIs (Mixamo-library alternates)
+
+- **Move AI** ([developers.move.ai](https://developers.move.ai/docs/api-reference/)) —
+  phone video → FBX/BVH/GLB/**.blend** via GraphQL API; best-in-class agent fit.
+- **DeepMotion SayMotion** ([REST API](https://github.com/DeepMotion/SayMotion-REST-API)) —
+  **text prompt → animation** (FBX/GLB/BVH); free 25 credits/mo, $15/mo tier.
+- **Text2Motion** ([Blender add-on](https://github.com/text2motion/blender-integration)) —
+  text → animation applied directly to an in-scene armature via REST API; the
+  most agent-friendly text-to-animation path into Blender.
+- **Kinetix** — video→anim freeware + Text2Emotes API; its models are licensed
+  *into* Mixamo. **Cascadeur** ($12/mo Indie for FBX export) is human-in-the-loop
+  polish, poor headless fit. **Rokoko Vision** free tier is single-cam FBX only.
+- Camera-only: Seedance accepts **"@Video1 for camera movement only"**;
+  [CinePack](https://superhivemarket.com/products/cinepack-pre-animated-camera-moves)
+  ships 120+ pre-animated Blender camera moves — render them over greybox to
+  mass-produce camera reference clips (no published pre-rendered pack exists;
+  gap/opportunity). [ReCamMaster](https://jianhongbai.github.io/ReCamMaster/)
+  re-renders an existing video along a *new* camera path.
+
+## 7. Numeric anchors for the H1 skill (cheat sheet)
 
 | Thing | Number |
 | --- | --- |

@@ -1,6 +1,13 @@
 # Previz-to-video — 3D-blocked reference scenes for motion-controlled AI video (vision doc)
 
-**Status:** draft (RFC PR #187) · **Implementation branch:** `spec/previz-to-video`
+**Status:** draft (RFC PR #187) · **Implementation branch:** `spec/previz-to-video` · **Field research:** [`previz-research-notes.md`](./previz-research-notes.md)
+
+> Prior art: [Doug Hogan's Seedance Playblast2Render](https://comfy.org/workflows/ef543bd4a773-ef543bd4a773/)
+> (playblast → `ByteDance2ReferenceNode`, fps read from the playblast itself),
+> [Mickmumpitz's AI Renderer 2.0](https://mickmumpitz.ai/guides/ai-powered-3d-animation-rendering)
+> (local control-pass school: depth/outline/color-ID passes → Wan VACE), and the
+> [Awesome Blender + Seedance use-case collection](https://github.com/Evolink-AI/Awesome-Blender-Seedance-Workflow-Usecases)
+> (28 cases, several agent-built via Blender MCP).
 
 > Living doc. Casual "run it by a smart friend" framing at the top; concrete
 > architecture + phases below. Draft — shaping it before building.
@@ -79,8 +86,8 @@ natural language.
 | **Mixamo** | **Auto-rigging for ComfyUI-authored characters** (upload FBX/GLB → skeleton-bound FBX) + huge free library of humanoid clips | Free w/ Adobe account, **no API** — website hop is manual; curated local FBX library + Blender retarget add-ons |
 | **Meshy 6 partner nodes** | text→3D / image→3D / multi-image→3D in ComfyUI core (Templates → 3D); GLB/FBX into `output/` | **Paid** (Comfy credits, ~211/$1) |
 | **Local 3D gen** | Trellis 2 / Hunyuan3D / TripoSplat custom nodes as the free asset path; community-proven character-shop graph (SDXL → Qwen-Edit multi-angle → Hunyuan3D v2 MV → GLB, see Evidence) | Free, local GPU |
-| **Wan 2.2 Animate** | Reference video + character image → animated character (DWPose-driven); animate & replace modes; native Comfy template | Free, local (14B fp8; width/height multiples of 16) |
-| **Seedance 2.0 R2V** | Up to 3 reference videos + 6 reference images, `@Video1`/`@Image1` prompt refs; follows choreography + camera | **Paid** API node (ByteDance partner); later Seedance versions as they land in Comfy |
+| **Wan 2.2 Animate** | Reference video + character image → animated character (DWPose-driven); move/animate & mix/replace modes; native Comfy template | Free, local (fp8 ~19GB on 24GB cards, GGUF Q4 on 16GB; 16 fps, 77-frame windows, res %16) |
+| **Seedance 2.0 R2V** | ≤3 reference videos (≤15.1s total) + ≤9 reference images + ≤3 audio, `@Video1`/`@Image1` role-tagged prompts; follows choreography + camera; 4–15s out (sweet spot 6–8s) | **Paid** API node (`ByteDance2ReferenceNode`, ~$0.66 / 5s @ 720p; Mini ~$0.32); Seedance 2.5 exists (30s native) but has no Comfy nodes yet |
 | **Already in this repo** | `director` skill (story→scenes→clips), packs system, `upload_video`/`stage_output_as_input` I/O, `list_api_nodes`/`generate_with_api_node`, `check_workflow_runtime` ask-before-spend | Shipped |
 
 ## Architecture — who talks to whom
@@ -139,14 +146,21 @@ or doc.
 ## Deliverables
 
 - **`previz-director` skill** (`plugin/skills/previz-director/SKILL.md`) — the
-  whole recipe as knowledge: Blender MCP setup + port sanity check; scene
-  blocking conventions (real-world scale, 30 fps, camera rig patterns:
+  whole recipe as knowledge, with the field-research numbers baked in
+  ([research notes](./previz-research-notes.md)): Blender MCP setup + port
+  sanity check; scene blocking conventions (real-world scale — Seedance needs
+  character *proportions* to match, not just height; camera rig patterns:
   dolly/orbit/crane as reusable bpy snippets); Mixamo library convention +
-  retarget procedure; viewport render settings (workbench solid, flat lighting,
-  silhouette-readable for DWPose); the handoff commands; prompt templates for
-  Seedance R2V ("follow the exact same body movement, timing, camera motion
-  and pacing from @Video1 …") and Wan Animate mode selection (animate vs
-  replace); style-sweep pattern (one previz, N reference-image sets).
+  auto-rig handoff + retarget procedure (free Retarget extension / ARP);
+  viewport render recipe (`bpy.ops.render.opengl`, Workbench MatCap/solid,
+  outlines on, **fps read from the playblast and held identical through the
+  workflow**, silhouette-readable for DWPose); the **routing rule** — camera
+  language and staging go to Seedance R2V, character-performance transfer with
+  a calm camera goes to Wan Animate; role-tagged prompt templates ("Keep the
+  motion of @Video1 … replace subject with @Image1", "Follow the camera path
+  from @Video1"), shot length guidance (6–8s per shot, stitch longer);
+  known-weak-spots watchlist (foot contact, cloth, multi-cut references);
+  style-sweep pattern (one previz, N reference-image sets).
 - **`wan-animate` pack** (`packs/wan-animate/`) — the free path, installable:
   Wan 2.2 Animate 14B fp8 + controlnet_aux (DWPose) + SAM2 nodes, template
   workflow wired for reference-video input. Follows the existing manifest
@@ -179,7 +193,7 @@ or doc.
 
 | Phase | Goal | Contents |
 | --- | --- | --- |
-| **H0 — spike (manual)** | Prove the recipe on this rig, end-to-end, once | Meshy (or Trellis) asset → Mixamo character + clip → Blender blocking + camera → viewport render → Wan Animate local AND Seedance R2V; write down every snag |
+| **H0 — spike (manual)** | Prove the recipe on this rig, end-to-end, once | Meshy (or Trellis) asset → Mixamo character + clip → Blender blocking + camera → viewport render → Wan Animate local AND Seedance R2V; write down every snag. Must answer: does DWPose track a flat-grey mannequin, or does the previz need MatCap/toon shading + a visible face? |
 | **H1 — skill** | `previz-director` SKILL.md from H0's notes | Knowledge only, zero code; usable immediately from Claude Desktop/Code with both MCPs configured |
 | **H2 — pack + glue** | `wan-animate` pack; 3D-asset file awareness | Free path installable via `apply_manifest`; `kind: "model"` in output listing; H1 skill references both |
 | **H3 — panel parity** | Companion MCP servers in the orchestrator | Panel agent gets Blender MCP; pairing-level UX ("Connect Blender" hint in panel) |
@@ -215,13 +229,24 @@ graph mutations being undoable.
   process — a render-farm-ish mode for batch shots. Interactive-first feels
   right (the user watches the blocking happen, same as the canvas), headless
   later.
-- **DWPose readability as a skill rule** — Wan Animate needs human silhouettes
-  it can pose-track; stylized/non-humanoid previz should route to Seedance
-  (which follows raw motion, not skeletons). Is that split stable enough to
-  encode as guidance?
+- ~~DWPose readability as a skill rule~~ — **resolved by field research**: the
+  split is real and stable. Camera moves + staging → Seedance (follows the
+  reference video's trajectory faithfully); character performance with a calm
+  camera → Wan Animate (DWPose needs a readable humanoid; aggressive camera
+  moves mutate identity). One open sub-question for H0: does DWPose track a
+  *flat-grey mannequin* reliably, or does the previz need a MatCap/toon-shaded
+  humanoid with a visible face?
+- **A third leg worth a later pack?** The Mickmumpitz school renders explicit
+  control passes (depth via compositor Map Range, Freestyle/Workbench
+  outlines, per-object color-ID masks for regional prompting) into a local
+  Wan-VACE restyle. More setup, more control, fully free — and color-ID masks
+  are the best multi-character answer anyone has. Candidate `previz-restyle`
+  pack after H2, not in scope now.
 - **Where does the clip library live** — `~/.comfyui-mcp/previz/` vs the
   ComfyUI workspace vs a pack `templates/` dir. Orchestrator config already
   has a home dir; leaning `~/.comfyui-mcp/previz/`.
-- **Seedance "5.0"** — versions beyond 2.0 will land as new partner nodes;
-  the skill should name capabilities ("reference-to-video with @Video refs"),
-  not pin node class names, so it survives version bumps.
+- ~~Seedance "5.0"~~ — **resolved**: it doesn't exist ("Seedream 5.0" is the
+  *image* model). The current video line is 2.0 / 2.0 Fast / 2.0 Mini in
+  ComfyUI, with **Seedance 2.5** (native 30s, ≤50 refs) released but not yet
+  in ComfyUI partner nodes. The skill names capabilities, not node class
+  names, so 2.5 slots in when it lands.

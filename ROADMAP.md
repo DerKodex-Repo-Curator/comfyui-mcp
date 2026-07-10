@@ -161,15 +161,21 @@ The most reliable way to direct an AI video shot is a pre-animated 3D scene: blo
 **Wan 2.2 Animate** (free, local) or **Seedance 2.0 Reference-to-Video** (paid API node) — motion,
 timing and camera survive; appearance comes from reference images. Full vision:
 [`design/previz-to-video.md`](./design/previz-to-video.md). comfyui-mcp does **not** wrap Blender —
-the agent holds both MCPs and a skill teaches the choreography.
+the agent holds both MCPs and a skill teaches the choreography. Headline (community feedback): the
+panel directs **natural motion between characters authored in ComfyUI** — ComfyUI is the character
+shop, Mixamo auto-rigs its output, Blender is the stage Claude can fully see and direct.
 
-- **H0 — Manual spike.** Run the recipe once end-to-end on this rig (asset → Mixamo → blocking →
-  viewport render → Wan Animate AND Seedance R2V); capture every snag.
-- **H1 — `previz-director` skill.** The whole recipe as knowledge (blocking conventions, retarget
-  procedure, render settings, handoff commands, R2V prompt templates). Zero code; works today from
-  Claude Desktop/Code with both MCPs configured.
-- **H2 — `wan-animate` pack.** The free path installable via `apply_manifest` (Wan 2.2 Animate 14B
-  fp8 + DWPose + SAM2 + wired template).
+- **H0 — Manual spike.** Run the recipe once end-to-end on this rig (asset → Mixamo auto-rig →
+  blocking → viewport render → Wan Animate AND Seedance R2V); capture every snag.
+- **H1 — `previz-director` skill.** The whole recipe as knowledge (blocking conventions, character
+  loop incl. the guided Mixamo auto-rig handoff, retarget procedure, render settings, handoff
+  commands, R2V prompt templates). Zero code; works today from Claude Desktop/Code with both MCPs
+  configured.
+- **H2 — `wan-animate` + `character-shop` packs + 3D-asset file awareness.** The free video path
+  installable via `apply_manifest` (Wan 2.2 Animate 14B fp8 + DWPose + SAM2 + wired template); the
+  community-seeded character-shop pack (SDXL hero → Qwen-Edit 2511 multi-angle → Hunyuan3D v2 MV →
+  GLB, `design/previz-assets/master-3d-model-maker.community.json`); plus `kind: "model"`
+  (GLB/FBX/OBJ) in the output listing so import-to-Blender / stage-for-Mixamo resolve exact paths.
 - **H3 — Companion MCP servers in the orchestrator.** Config + session-spawn plumbing so the *panel*
   agent can reach Blender MCP (generic mechanism, Blender is just the first customer).
 - **H4 — Director × previz.** Shot lists drive previz scenes; multi-shot cast/set continuity; style

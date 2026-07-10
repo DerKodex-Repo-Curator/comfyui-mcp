@@ -154,7 +154,7 @@ hardening first; this is the "shape it with users before building" track.
 > Scope: **v1 = local GPU only.** Reference client internals: `~/code/slutter` (CivitAI Video
 > Scroller, Flutter — decoded CivitAI API, OAuth login, account management).
 
-## Theme H — 3D previz → motion-controlled video (Blender MCP + Mixamo + Meshy)
+## Theme H — 3D previz → motion-controlled video (Blender MCP + Mixamo + Meshy) (#187)
 The most reliable way to direct an AI video shot is a pre-animated 3D scene: block it in Blender
 (agent-driven via the **official Blender MCP**, 5.1+), populate with **Mixamo** motion clips and
 **Meshy 6** / local img2mesh assets, render a rough viewport reference, then restyle it with

@@ -1,5 +1,7 @@
 # Previz-to-video — 3D-blocked reference scenes for motion-controlled AI video (vision doc)
 
+**Status:** draft (RFC PR #187) · **Implementation branch:** `spec/previz-to-video`
+
 > Living doc. Casual "run it by a smart friend" framing at the top; concrete
 > architecture + phases below. Draft — shaping it before building.
 

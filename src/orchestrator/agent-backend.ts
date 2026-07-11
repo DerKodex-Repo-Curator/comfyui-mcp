@@ -18,7 +18,8 @@ export type BackendId =
   | "glm"
   | "kimi"
   | "ollama"
-  | "openrouter";
+  | "openrouter"
+  | "copilot";
 
 /**
  * A user turn in PROVIDER-NEUTRAL form. PanelAgent owns the queue/turn-gate and
@@ -286,5 +287,13 @@ export const GLM_CAPABILITIES: AgentCapabilities = {
 
 /** Kimi Code subscription OAuth or KIMI_API_KEY — OpenAI-compatible coding API. */
 export const KIMI_CAPABILITIES: AgentCapabilities = {
+  ...OLLAMA_CAPABILITIES,
+};
+
+/** GitHub Copilot chat via in-panel device-code OAuth — EXPERIMENTAL (ToS risk,
+ *  see OAUTH_PROVIDERS.copilot). OpenAI-compatible chat/completions + the same
+ *  6-tool router as Ollama/GLM/Kimi. The exact contract (endpoints, headers) is
+ *  UNVERIFIED offline — see copilot-backend.ts's module doc. */
+export const COPILOT_CAPABILITIES: AgentCapabilities = {
   ...OLLAMA_CAPABILITIES,
 };

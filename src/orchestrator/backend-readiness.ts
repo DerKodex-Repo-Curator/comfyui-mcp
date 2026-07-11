@@ -23,6 +23,11 @@ export type BackendReadiness = {
   auth: boolean | null;
   /** cli && auth-not-false. */
   ready: boolean;
+  /** True only for providers the panel must label/gate as experimental (ToS
+   *  risk, unverified contract) — currently just copilot. Omitted (not merely
+   *  false) for every other backend so this frame stays a pure ADDITION for
+   *  existing consumers/tests. */
+  experimental?: boolean;
 };
 
 // CLI binary names per provider (Windows resolves .cmd/.exe via PATHEXT, but we
@@ -199,8 +204,11 @@ export function backendReadiness(
     // No external CLI/native-file concept for Copilot — the in-panel device-
     // code OAuth (experimental, gated behind allow_experimental in
     // oauth-bridge.ts) is the ONLY sign-in path, so it's the only signal here.
+    // `experimental: true` lets the panel (Task 7) label/gate this row even
+    // once signed in — this backend is opt-in ToS-risk territory, never a
+    // default or auto-pick.
     const auth = hasValidPanelOAuth("copilot", panelOAuthRecords(opts), nowMs);
-    return { backend: "copilot", cli: true, auth, ready: auth };
+    return { backend: "copilot", cli: true, auth, ready: auth, experimental: true };
   }
   if (b === "ollama") {
     // No login concept — a local daemon. Binary presence is the readiness

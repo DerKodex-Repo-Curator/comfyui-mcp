@@ -56,6 +56,7 @@ import { OllamaBackend } from "./ollama-backend.js";
 import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
 import { GlmBackend, GLM_DEFAULT_MODEL } from "./glm-backend.js";
 import { KimiBackend, KIMI_DEFAULT_MODEL } from "./kimi-backend.js";
+import { CopilotBackend, COPILOT_DEFAULT_MODEL } from "./copilot-backend.js";
 import { allBackendReadiness } from "./backend-readiness.js";
 import { handleOAuthBegin, handleOAuthStatus, handleOAuthSignout } from "./oauth-bridge.js";
 import { OAUTH_PROVIDERS } from "../services/oauth-flow.js";
@@ -987,6 +988,10 @@ export async function runPanelOrchestrator(): Promise<void> {
   const chatgptModel = process.env.COMFYUI_MCP_CHATGPT_MODEL ?? CHATGPT_DEFAULT_MODEL;
   const glmModel = process.env.COMFYUI_MCP_GLM_MODEL ?? GLM_DEFAULT_MODEL;
   const kimiModel = process.env.COMFYUI_MCP_KIMI_MODEL ?? KIMI_DEFAULT_MODEL;
+  // EXPERIMENTAL (ToS risk) — off by default, only reachable once the user has
+  // signed in via the panel's experimental row (oauth-bridge.ts's
+  // allow_experimental gate); never the defaultBackend/auto-pick.
+  const copilotModel = process.env.COMFYUI_MCP_COPILOT_MODEL ?? COPILOT_DEFAULT_MODEL;
   // The same backend also speaks any OpenAI-compatible endpoint (OpenRouter,
   // DeepSeek, vLLM, LM Studio): COMFYUI_MCP_OLLAMA_API=openai +
   // COMFYUI_MCP_OLLAMA_BASE_URL (incl. /v1) + COMFYUI_MCP_OLLAMA_API_KEY
@@ -1087,6 +1092,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     "lmstudio",
     "llamacpp",
     "custom",
+    "copilot", // EXPERIMENTAL — see copilotModel's comment above
   ]);
   const defaultBackend = KNOWN_BACKENDS.has(backendId) ? backendId : "claude";
   const AGENT_KEY_SEP = "::";
@@ -1341,6 +1347,19 @@ export async function runPanelOrchestrator(): Promise<void> {
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
     }
+    if (backend === "copilot") {
+      // EXPERIMENTAL (ToS risk) — prepare() throws a clear re-sign-in error if
+      // no ~/.comfyui-mcp/copilot-auth.json exists yet (resolveCopilotOAuth),
+      // so simply being selectable here does not make it USABLE without the
+      // panel's experimental opt-in sign-in flow having already run.
+      return new CopilotBackend({
+        cwd: comfyuiPath ?? process.cwd(),
+        model: copilotModel,
+        systemAppend: panelSystemAppend,
+        comfyuiUrl,
+        mcpServers: makeHttpBackendMcpServers(panelTabId),
+      });
+    }
     return undefined; // claude → built-in ClaudeBackend
   };
   logger.info(
@@ -1378,7 +1397,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                     ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: llamacppModel, ...llamacppDeps() })
                     : backend === "custom"
                       ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: customModel, ...customDeps() })
-                      : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
+                      : backend === "copilot"
+                        ? new CopilotBackend({ cwd: comfyuiPath ?? process.cwd(), model: copilotModel })
+                        : new GeminiBackend({ cwd: comfyuiPath ?? process.cwd(), model: geminiModel });
       probeBackends.set(backend, pb);
     }
     return pb;
@@ -1725,6 +1746,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "chatgpt") return chatgptModel;
     if (backend === "glm") return glmModel;
     if (backend === "kimi") return kimiModel;
+    if (backend === "copilot") return copilotModel;
     return model;
   }
   function pushModels(panelTabId: string): void {
@@ -1879,6 +1901,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isLs = backend === "lmstudio";
       const isLc = backend === "llamacpp";
       const isCu = backend === "custom";
+      const isCp = backend === "copilot";
       // TRUTHFUL "connected": only claim ready after PROVING the SELECTED backend
       // can run, by probing its model list. If the probe fails — the "connected
       // but dead" wedge — send a degraded ack so the panel shows the real state.
@@ -1944,7 +1967,9 @@ export async function runPanelOrchestrator(): Promise<void> {
                         ? (customModel || ((models[0] as { value?: string }).value ?? "Custom endpoint"))
                         : isOr
                       ? (openrouterModel ?? (models[0] as { value?: string }).value ?? "OpenRouter")
-                      : model;
+                      : isCp
+                        ? (copilotModel ?? (models[0] as { value?: string }).value ?? "Copilot")
+                        : model;
             // llama.cpp launch gotchas (issue #161): a reachable server can still
             // be useless for us — tool calling needs --jinja (rejected requests),
             // and a launch-time -c under ~16K silently truncates the tool payload.
@@ -2002,6 +2027,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                           ? `🟢 comfyui-mcp agent ready — ${agentLabel} via your custom endpoint (${customBaseUrl}). Ask away.`
                           : isOr
                       ? `🟢 comfyui-mcp agent ready — ${agentLabel} via OpenRouter (hosted API, your OPENROUTER_API_KEY). Ask away.`
+                      : isCp
+                        ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your GitHub Copilot subscription (⚠️ experimental, ToS risk — you opted in). Ask away.`
                       : `🟢 comfyui-mcp agent ready — ${agentLabel} on your Claude subscription. Ask away.`;
               bridge.push({ type: "say", text: readyText }, panelTab);
             }
@@ -2028,6 +2055,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                       ? `⚠️ The background agent isn't responding — llama-server isn't reachable at ${LLAMACPP_BASE_URL}. Start it with \`llama-server -m <model>.gguf -c 16384\` (our gemma4-comfyui-mcp GGUFs work great; add --jinja on older builds — required there for tool calling), or set COMFYUI_MCP_LLAMACPP_HOST — then Disconnect → Connect to retry.`
                       : isCu
                         ? `⚠️ The background agent isn't responding — your custom endpoint isn't answering at ${customBaseUrl}. Check the base URL in Settings → Custom endpoint (it must be OpenAI-compatible and include the /v1) and the API key if the server requires one — then Connect to retry.`
+                        : isCp
+                          ? "⚠️ The background agent isn't responding — GitHub Copilot (experimental) couldn't start. Sign in from the panel's experimental row, then Disconnect → Connect to retry."
                         : "⚠️ The background agent isn't responding — the Claude Agent SDK couldn't start. Make sure you're signed in (run `claude` once), then Disconnect → Connect to retry.";
             bridge.push({ type: "say", text: degradedText }, panelTab);
             bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);

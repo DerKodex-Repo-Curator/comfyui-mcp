@@ -76,6 +76,14 @@ export interface GrokOAuthCredentials {
   accessToken: string;
 }
 
+export interface CopilotOAuthCredentials {
+  /** The long-lived `ghu_` device-code token from ~/.comfyui-mcp/copilot-auth.json.
+   *  This is NOT usable against api.githubcopilot.com directly — the caller
+   *  (copilot-backend.ts) exchanges it for a short-lived Copilot bearer via
+   *  GET https://api.github.com/copilot_internal/v2/token. */
+  ghuToken: string;
+}
+
 function codexAuthPath(home = homedir()): string {
   const root = process.env.CODEX_HOME || join(home, ".codex");
   return join(root, "auth.json");
@@ -392,6 +400,38 @@ export async function resolveGrokOAuth(
     throw new ValidationError("Grok OAuth access_token is missing after refresh.");
   }
   return { accessToken };
+}
+
+/**
+ * Resolve the GitHub Copilot `ghu_` device-code token from
+ * ~/.comfyui-mcp/copilot-auth.json (written by the in-panel sign-in via
+ * `persistOAuthResult`). Mirrors `resolveGrokOAuth`'s file-resolution shape,
+ * but WITHOUT refresh — GitHub's device-code `ghu_` token has no refresh_token
+ * (see OAUTH_PROVIDERS.copilot's scopes/kind: device_code, read:user only); a
+ * revoked/expired ghu_ can only be fixed by re-running Copilot sign-in from the
+ * panel, never by a background refresh call. The short-lived Copilot API
+ * bearer this token exchanges for (copilot-backend.ts) is a SEPARATE, higher-
+ * frequency concern this function knows nothing about.
+ */
+export async function resolveCopilotOAuth(
+  deps: CodeProviderAuthDeps = {},
+): Promise<CopilotOAuthCredentials> {
+  const home = deps.home ?? homedir();
+  const path = copilotAuthPath(home);
+  if (!existsSync(path)) {
+    throw new ValidationError(
+      "GitHub Copilot OAuth requires signing in via the panel's Connections tab first (experimental — ToS risk; opt in from the experimental row).",
+    );
+  }
+
+  const raw = JSON.parse(await readFile(path, "utf8")) as { access_token?: string; token_type?: string };
+  const ghuToken = raw.access_token?.trim();
+  if (!ghuToken) {
+    throw new ValidationError(
+      "No GitHub Copilot token in ~/.comfyui-mcp/copilot-auth.json. Sign in again from the panel.",
+    );
+  }
+  return { ghuToken };
 }
 
 /** GLM Coding Plan API key (Z.AI). Env: ZAI_API_KEY, GLM_API_KEY, or ZHIPUAI_API_KEY. */

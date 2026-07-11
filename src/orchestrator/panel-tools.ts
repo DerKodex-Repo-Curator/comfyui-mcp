@@ -48,6 +48,7 @@ import { QueueMonitor } from "../services/queue-monitor.js";
 import { getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
 import { convertUiToApi, collectNodeTypes } from "../services/workflow-converter.js";
 import { sliceWorkflow } from "../services/workflow-slicer.js";
+import { validateA2UISpecServer } from "../services/a2ui-spec.js";
 import type { UiWorkflow } from "../comfyui/types.js";
 
 /** Treat these as an affirmative answer to the adult-content consent card. */
@@ -1662,6 +1663,33 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         }
 
         return ctx.call({ cmd: "show_media", items: resolved }, 60000);
+      },
+    ),
+    def(
+      "panel_ui_render",
+      "Render an INTERACTIVE UI CARD in the panel chat from an A2UI-subset JSON spec — choice buttons, forms (TextField/Select/Checkbox + a submit Button), node-wiring diagrams (comfy:graph), and bar/line charts (comfy:chart). Use a card whenever the user must pick between options, confirm a plan, fill in parameters, or would understand a wiring explanation better as a diagram. The card is non-blocking: this returns { card_id } immediately; when the user clicks a button (or submits a form) their choice arrives as a NORMAL chat message (the button's `reply` text; submit buttons append 'name: value' lines) — so after rendering a card that asks a question, END YOUR TURN and wait. Set surface:'wide' for diagram-heavy cards (the panel widens and restores automatically). Spec shape: { surface?, title?, root: '<id>', components: [ {id, type, ...} ] } with children referenced by id. Types: Text{text}, Heading{text,level?}, Button{label,reply?,submit?,style?:'primary'|'secondary'}, Row/Column/Card{children:[ids]}, Divider, Image{src:/view-URL,caption?}, TextField{label,name,value?,placeholder?}, Select{label,name,options:[{label,value?}],value?}, Checkbox{label,name,checked?}, 'comfy:graph'{nodes:[{id,label,color?}],edges:[{from,to,label?}],direction?:'lr'|'tb'}, 'comfy:chart'{kind:'bar'|'line',series:[{label,values:[num]}],x?:[labels]}. Caps: ≤64 components, ≤30 graph nodes, ≤8×256 chart points. On a validation error, FIX the spec and retry.",
+      {
+        spec: z
+          .record(z.string(), z.unknown())
+          .describe("The A2UI-subset card spec object (see tool description for the exact shape)."),
+      },
+      async (args: A, ctx) => {
+        const v = validateA2UISpecServer(args.spec);
+        if (!v.ok) return fail(`invalid a2ui spec: ${v.errors.join("; ")}`);
+        return ctx.call({ cmd: "ui_render", spec: v.spec }, 15000);
+      },
+    ),
+    def(
+      "panel_ui_update",
+      "Re-render a LIVE card previously created with panel_ui_render, in place (progress updates, revised options, reactive forms). Pass the card_id you received and a complete NEW spec (same shape/caps as panel_ui_render — this replaces the card's content, it does not merge). Fails once the user has already clicked/resolved or dismissed the card, or after the view was switched away — on 'no live card', just render a fresh card instead.",
+      {
+        card_id: z.string().describe("The card_id returned by panel_ui_render."),
+        spec: z.record(z.string(), z.unknown()).describe("The complete replacement spec."),
+      },
+      async (args: A, ctx) => {
+        const v = validateA2UISpecServer(args.spec);
+        if (!v.ok) return fail(`invalid a2ui spec: ${v.errors.join("; ")}`);
+        return ctx.call({ cmd: "ui_update", card_id: args.card_id, spec: v.spec }, 15000);
       },
     ),
   ];

@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { persistOAuthResult, readOAuthStatus, clearOAuth } from "./code-provider-auth.js";
@@ -31,6 +31,13 @@ it("copilot: writes its own store + status flagged experimental", async () => {
   expect(existsSync(join(home, ".comfyui-mcp", "copilot-auth.json"))).toBe(true);
   const c = readOAuthStatus().find((s) => s.provider === "copilot")!;
   expect(c.experimental).toBe(true);
+});
+
+it("writes native token files 0600 (POSIX)", async () => {
+  if (process.platform === "win32") return; // mode not enforced on Windows
+  await persistOAuthResult("grok", { access_token: "AT", refresh_token: "RT", expires_in: 3600, raw: {} }, { home });
+  const mode = statSync(join(home, ".grok", "auth.json")).mode & 0o777;
+  expect(mode).toBe(0o600);
 });
 
 it("clearOAuth removes the native file and the mirror entry", async () => {

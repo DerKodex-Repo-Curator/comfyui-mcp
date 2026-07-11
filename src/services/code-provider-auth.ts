@@ -147,9 +147,14 @@ async function atomicWriteJson(path: string, data: unknown): Promise<void> {
   // unlike the resolve* paths above, which only ever re-write an existing
   // file. Ensure the parent dir exists so this stays a drop-in atomic writer
   // for both "update in place" and "create for the first time" callers.
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
   const tmp = join(dir, `.auth-${randomBytes(8).toString("hex")}.tmp`);
-  await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  // 0600 on the TEMP file so it is never world-readable even briefly, and so
+  // `rename` carries that mode to the destination — this both creates new token
+  // files 0600 AND prevents an in-place refresh from downgrading a pre-existing
+  // 0600 file (e.g. ~/.codex/auth.json) to the umask default. This helper only
+  // ever writes credential/token files, so 0600 is universally correct here.
+  await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await rename(tmp, path);
 }
 

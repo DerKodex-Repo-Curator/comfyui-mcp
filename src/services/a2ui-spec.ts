@@ -32,8 +32,15 @@ export const A2UI_CAPS = {
   maxLabelLen: 200,
 } as const;
 
-const label = z.string().min(1).max(A2UI_CAPS.maxLabelLen);
-const long = z.string().min(1).max(A2UI_CAPS.maxTextLen);
+// LOCKSTEP: the panel's `capped()` check is MAX-ONLY — it accepts empty strings
+// for every field except component ids (which additionally require `!c.id` to be
+// false, i.e. non-empty). So the shared string primitives here must NOT enforce
+// non-empty, or a spec the panel wall accepts (caption:"", placeholder:"",
+// label:"", …) would bounce off the tool wall. Only `id` (component ids, graph
+// node ids, edge endpoints, and root) requires a non-empty string.
+const label = z.string().max(A2UI_CAPS.maxLabelLen);
+const long = z.string().max(A2UI_CAPS.maxTextLen);
+const id = z.string().min(1).max(A2UI_CAPS.maxLabelLen);
 const imageSrc = z
   .string()
   .refine((s) => /^\/(api\/)?view\?/.test(s) || /^blob:/.test(s) || /^data:image\//.test(s), {
@@ -47,28 +54,28 @@ const imageSrc = z
 const children = z.array(label).max(A2UI_CAPS.maxComponents);
 
 const component = z.discriminatedUnion("type", [
-  z.object({ id: label, type: z.literal("Text"), text: long }),
+  z.object({ id, type: z.literal("Text"), text: long }),
   z.object({
-    id: label,
+    id,
     type: z.literal("Heading"),
     text: label,
     level: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
   }),
   z.object({
-    id: label,
+    id,
     type: z.literal("Button"),
     label,
     reply: long.optional(),
     submit: z.boolean().optional(),
     style: z.enum(["primary", "secondary"]).optional(),
   }),
-  z.object({ id: label, type: z.literal("Row"), children }),
-  z.object({ id: label, type: z.literal("Column"), children }),
-  z.object({ id: label, type: z.literal("Card"), children }),
-  z.object({ id: label, type: z.literal("Divider") }),
-  z.object({ id: label, type: z.literal("Image"), src: imageSrc, caption: label.optional() }),
+  z.object({ id, type: z.literal("Row"), children }),
+  z.object({ id, type: z.literal("Column"), children }),
+  z.object({ id, type: z.literal("Card"), children }),
+  z.object({ id, type: z.literal("Divider") }),
+  z.object({ id, type: z.literal("Image"), src: imageSrc, caption: label.optional() }),
   z.object({
-    id: label,
+    id,
     type: z.literal("TextField"),
     label,
     name: label,
@@ -76,7 +83,7 @@ const component = z.discriminatedUnion("type", [
     placeholder: label.optional(),
   }),
   z.object({
-    id: label,
+    id,
     type: z.literal("Select"),
     label,
     name: label,
@@ -86,19 +93,19 @@ const component = z.discriminatedUnion("type", [
       .min(1)
       .max(A2UI_CAPS.maxSelectOptions),
   }),
-  z.object({ id: label, type: z.literal("Checkbox"), label, name: label, checked: z.boolean().optional() }),
+  z.object({ id, type: z.literal("Checkbox"), label, name: label, checked: z.boolean().optional() }),
   z.object({
-    id: label,
+    id,
     type: z.literal("comfy:graph"),
     nodes: z
-      .array(z.object({ id: label, label, color: z.string().regex(/^#[0-9a-fA-F]{3,8}$/).optional() }))
+      .array(z.object({ id, label, color: z.string().regex(/^#[0-9a-fA-F]{3,8}$/).optional() }))
       .min(1)
       .max(A2UI_CAPS.maxGraphNodes),
-    edges: z.array(z.object({ from: label, to: label, label: label.optional() })).max(A2UI_CAPS.maxGraphEdges).optional(),
+    edges: z.array(z.object({ from: id, to: id, label: label.optional() })).max(A2UI_CAPS.maxGraphEdges).optional(),
     direction: z.enum(["lr", "tb"]).optional(),
   }),
   z.object({
-    id: label,
+    id,
     type: z.literal("comfy:chart"),
     kind: z.enum(["bar", "line"]),
     series: z
@@ -113,7 +120,7 @@ const component = z.discriminatedUnion("type", [
 export const a2uiSpecSchema = z.object({
   surface: z.enum(["inline", "wide"]).default("inline"),
   title: label.optional(),
-  root: label,
+  root: id,
   components: z.array(component).min(1).max(A2UI_CAPS.maxComponents),
 });
 

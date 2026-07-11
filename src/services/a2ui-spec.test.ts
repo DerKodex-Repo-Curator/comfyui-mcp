@@ -150,6 +150,41 @@ describe("validateA2UISpecServer", () => {
     expect(r.ok).toBe(false);
   });
 
+  // --- lockstep parity: panel's capped() is MAX-ONLY — empty strings pass ---
+  // everywhere except component ids (panel additionally checks `!c.id`). The
+  // server wall must accept the exact same specs the panel wall accepts.
+  it("accepts empty strings where the panel does (label/reply/caption/name/placeholder/value)", () => {
+    expect(
+      validateA2UISpecServer({
+        root: "b",
+        components: [{ id: "b", type: "Button", label: "", reply: "" }],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateA2UISpecServer({
+        root: "i",
+        components: [{ id: "i", type: "Image", src: "/view?filename=x.png", caption: "" }],
+      }).ok,
+    ).toBe(true);
+
+    expect(
+      validateA2UISpecServer({
+        root: "f",
+        components: [{ id: "f", type: "TextField", label: "", name: "", placeholder: "", value: "" }],
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("still rejects an empty component id (panel's !c.id check)", () => {
+    expect(
+      validateA2UISpecServer({
+        root: "",
+        components: [{ id: "", type: "Text", text: "hi" }],
+      }).ok,
+    ).toBe(false);
+  });
+
   it("accepts a comfy:chart x array at exactly maxChartPoints", () => {
     const ok = {
       root: "c",

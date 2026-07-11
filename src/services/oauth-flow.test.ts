@@ -66,6 +66,28 @@ describe("runLoopbackPKCE", () => {
     expect(capturedAuthorizeUrl).toContain("code_challenge_method=S256");
   });
 
+  it("redacts token-shaped material from a failed-exchange error message", async () => {
+    const openBrowser = vi.fn(async (url: string) => {
+      const u = new URL(url);
+      const state = u.searchParams.get("state")!;
+      const redirect = u.searchParams.get("redirect_uri")!;
+      await fetch(`${redirect}?code=THECODE&state=${state}`);
+    });
+    const fetchFn = vi.fn(async (url: string, init?: any) => {
+      if (String(url) === cfg.tokenUrl) {
+        return new Response(JSON.stringify({ error: "bad", access_token: "LEAKED123" }), { status: 400 });
+      }
+      return (globalThis as any).__realFetch(url, init);
+    });
+    (globalThis as any).__realFetch = (globalThis as any).__realFetch ?? fetch;
+    const err = await runLoopbackPKCE(cfg, { fetch: fetchFn as any, openBrowser }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    const message = (err as Error).message;
+    expect(message).toContain("bad");
+    expect(message).not.toContain("LEAKED123");
+    expect(message).toContain("<redacted>");
+  });
+
   it("rejects a callback whose state does not match", async () => {
     const openBrowser = vi.fn(async (url: string) => {
       const redirect = new URL(url).searchParams.get("redirect_uri")!;

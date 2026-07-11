@@ -44,6 +44,14 @@ export interface OAuthDeps {
 
 const b64url = (buf: Buffer): string => buf.toString("base64url");
 
+/** Strip token-shaped material from provider error text before it can reach a log/UI. */
+function redactTokens(s: string): string {
+  return s
+    .replace(/("?(?:access_token|refresh_token|id_token|code|code_verifier|client_secret)"?\s*[:=]\s*"?)[^"'\s,&}]+/gi, "$1<redacted>")
+    .replace(/\b(ghu_|gho_|ya29\.|sk-)[A-Za-z0-9._-]+/g, "$1<redacted>")
+    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer <redacted>");
+}
+
 /** S256 PKCE pair. verifier: 43-128 chars unreserved; challenge = base64url(sha256(verifier)). */
 export function pkcePair(): { verifier: string; challenge: string } {
   const verifier = b64url(randomBytes(32)); // 43 base64url chars, all in the unreserved set
@@ -122,7 +130,7 @@ export function runLoopbackPKCE(cfg: OAuthProviderConfig, deps: OAuthDeps = {}):
           return;
         }
         res.writeHead(200, { "Content-Type": "text/html" }).end(
-          "<html><body style='font:14px system-ui;padding:2rem'>Signed in — you can close this tab and return to ComfyUI.</body></html>",
+          "<html><body style='font:14px system-ui;padding:2rem'>Finishing sign-in — you can close this tab and return to ComfyUI.</body></html>",
         );
         // Exchange the code.
         assertAllowedTokenHost(cfg.tokenUrl, cfg.apiHostAllowlist);
@@ -141,7 +149,7 @@ export function runLoopbackPKCE(cfg: OAuthProviderConfig, deps: OAuthDeps = {}):
         });
         const text = await tokRes.text();
         if (!tokRes.ok) {
-          done(() => reject(new ValidationError(`OAuth token exchange failed (${tokRes.status}): ${text.slice(0, 300)}`)));
+          done(() => reject(new ValidationError(`OAuth token exchange failed (${tokRes.status}): ${redactTokens(text).slice(0, 300)}`)));
           return;
         }
         const raw = JSON.parse(text) as Record<string, unknown>;

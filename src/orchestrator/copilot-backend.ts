@@ -181,7 +181,24 @@ async function exchangeCopilotToken(
     typeof payload.expires_at === "number" && Number.isFinite(payload.expires_at)
       ? payload.expires_at * 1000
       : Date.now() + 20 * 60_000; // conservative fallback if the field is absent/renamed
-  const apiBase = payload.endpoints?.api?.trim().replace(/\/+$/, "") || COPILOT_API_BASE;
+  // The exchange response's endpoints.api can route to a per-account host, but a
+  // server-supplied host is UNTRUSTED — if it isn't allowlisted, DROP it and
+  // fall back to the default base rather than dialing an off-allowlist host with
+  // the live bearer. (The default base itself is re-checked in
+  // ensureFreshCopilotToken before setOpenAiAuth, so a bad env override there is
+  // rejected outright — see below.)
+  const advertised = payload.endpoints?.api?.trim().replace(/\/+$/, "");
+  let apiBase = COPILOT_API_BASE;
+  if (advertised) {
+    try {
+      assertAllowedTokenHost(advertised, copilotApiHostAllowlist());
+      apiBase = advertised;
+    } catch {
+      logger.warn(
+        `[copilot-backend] token exchange advertised a non-allowlisted api host — ignoring it and using the default base.`,
+      );
+    }
+  }
   return { token, expiresAtMs, apiBase };
 }
 
@@ -253,6 +270,13 @@ export class CopilotBackend extends OllamaBackend {
       this.ghuToken = creds.ghuToken;
     }
     const { token, expiresAtMs, apiBase } = await exchangeCopilotToken(this.ghuToken, this.fetchFn);
+    // FINAL GATE before the live bearer is ever attached to a host: apiBase is
+    // either the allowlist-checked exchange endpoint or COPILOT_API_BASE (which
+    // may be a COMFYUI_MCP_COPILOT_API_BASE env override). An off-allowlist
+    // override must be REJECTED here — never silently dialed — so the inherited
+    // ollama-backend prepare()/chatStream()/listModels() (which attach the
+    // bearer to this.host) can only ever hit an allowlisted host.
+    assertAllowedTokenHost(apiBase, copilotApiHostAllowlist());
     this.copilotBearer = token;
     this.copilotBearerExpiresAtMs = expiresAtMs;
     this.setOpenAiAuth(apiBase, token);

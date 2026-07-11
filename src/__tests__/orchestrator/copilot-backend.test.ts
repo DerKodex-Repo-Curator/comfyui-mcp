@@ -8,7 +8,7 @@
 // ~/.comfyui-mcp/copilot-auth.json) and drive the backend through its public
 // AgentBackend surface, mirroring grok-backend-oauth.test.ts's style.
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import type { AgentEvent, NeutralTurn } from "../../orchestrator/agent-backend.js";
 import {
   CopilotBackend,
@@ -262,6 +262,117 @@ describe("CopilotBackend — host allowlist", () => {
     expect(() =>
       assertAllowedTokenHost("http://api.githubcopilot.com/chat/completions", ["githubcopilot.com"]),
     ).toThrow(/non-https/i);
+  });
+});
+
+// The bare-function tests above prove assertAllowedTokenHost's logic; these
+// drive it through a REAL CopilotBackend so a regression that forgets to call
+// it on the chat/models base (the exact reviewer finding) is caught. Both use a
+// fresh module import so the env-driven COPILOT_API_BASE const reflects the
+// stubbed override.
+describe("CopilotBackend — host allowlist on the chat/models base (not just the exchange)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("rejects an off-host COMFYUI_MCP_COPILOT_API_BASE before any bearer-bearing request", async () => {
+    vi.stubEnv("COMFYUI_MCP_COPILOT_API_BASE", "https://evil.example.com");
+    vi.resetModules();
+    const { CopilotBackend: FreshCopilotBackend, COPILOT_TOKEN_EXCHANGE_URL: EX_URL } = await import(
+      "../../orchestrator/copilot-backend.js"
+    );
+
+    // A fetch mock that succeeds the exchange but records EVERY call, so we can
+    // assert the bearer never reached evil.example.com.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === EX_URL) {
+        return new Response(JSON.stringify(EXCHANGE_RESPONSE), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const backend = new FreshCopilotBackend({
+      resolveCopilotOAuth: async () => ({ ghuToken: "ghu_abc123" }),
+      fetch: fetchMock,
+    });
+
+    await expect(backend.prepare()).rejects.toThrow(/not in allowlist/i);
+
+    // The bearer was NEVER attached to an evil.example.com request — the only
+    // call that fired was the (allowlisted) github.com exchange.
+    const offHostCalls = fetchMock.mock.calls.filter(([u]) => String(u).includes("evil.example.com"));
+    expect(offHostCalls).toHaveLength(0);
+
+    await backend.close();
+  });
+
+  it("accepts the default api.githubcopilot.com base (no override)", async () => {
+    vi.resetModules();
+    const {
+      CopilotBackend: FreshCopilotBackend,
+      COPILOT_TOKEN_EXCHANGE_URL: EX_URL,
+      COPILOT_API_BASE: API_BASE,
+    } = await import("../../orchestrator/copilot-backend.js");
+    expect(API_BASE).toBe("https://api.githubcopilot.com");
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === EX_URL) return new Response(JSON.stringify(EXCHANGE_RESPONSE), { status: 200 });
+      if (url === `${API_BASE}/models`) return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const backend = new FreshCopilotBackend({
+      resolveCopilotOAuth: async () => ({ ghuToken: "ghu_abc123" }),
+      fetch: fetchMock,
+    });
+
+    await expect(backend.prepare()).resolves.toBeUndefined();
+    await backend.close();
+  });
+
+  it("ignores a non-allowlisted endpoints.api from the exchange and falls back to the default base", async () => {
+    vi.resetModules();
+    const {
+      CopilotBackend: FreshCopilotBackend,
+      COPILOT_TOKEN_EXCHANGE_URL: EX_URL,
+      COPILOT_API_BASE: API_BASE,
+    } = await import("../../orchestrator/copilot-backend.js");
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === EX_URL) {
+        // The server advertises an off-allowlist api host — it must be dropped.
+        return new Response(
+          JSON.stringify({ ...EXCHANGE_RESPONSE, endpoints: { api: "https://evil.example.com" } }),
+          { status: 200 },
+        );
+      }
+      if (url === `${API_BASE}/models`) return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const backend = new FreshCopilotBackend({
+      resolveCopilotOAuth: async () => ({ ghuToken: "ghu_abc123" }),
+      fetch: fetchMock,
+    });
+
+    // prepare() succeeds (fell back to the default base) and NO request ever
+    // went to the advertised evil host.
+    await expect(backend.prepare()).resolves.toBeUndefined();
+    const offHostCalls = fetchMock.mock.calls.filter(([u]) => String(u).includes("evil.example.com"));
+    expect(offHostCalls).toHaveLength(0);
+    // The reachability check DID hit the default githubcopilot.com base.
+    const modelsCalls = fetchMock.mock.calls.filter(([u]) => String(u) === `${API_BASE}/models`);
+    expect(modelsCalls).toHaveLength(1);
+
+    await backend.close();
   });
 });
 

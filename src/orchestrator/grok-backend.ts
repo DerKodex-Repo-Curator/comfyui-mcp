@@ -61,9 +61,11 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { logger } from "../utils/logger.js";
 import {
   type AgentBackend,
+  type AgentCapabilities,
   type AgentEvent,
   type BackendStartOptions,
   type ModelChoice,
@@ -76,9 +78,8 @@ import {
   type CodeProviderAuthDeps,
   type GrokOAuthCredentials,
 } from "../services/code-provider-auth.js";
-import { OAUTH_PROVIDERS, assertAllowedTokenHost } from "../services/oauth-flow.js";
+import { OAUTH_PROVIDERS, assertAllowedTokenHost, grokTokenFile } from "../services/oauth-flow.js";
 import { OllamaBackend } from "./ollama-backend.js";
-import { resolvePrompt } from "../services/prompt-overrides.js";
 
 function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -510,12 +511,15 @@ export interface GrokBackendDeps {
  */
 export class GrokBackend implements AgentBackend {
   readonly id = "grok" as const;
-  readonly capabilities = GROK_CAPABILITIES;
   private deps: GrokBackendDeps;
   /** Memoized mode decision: resolves to a live GrokDirectBackend when a usable
    *  OAuth token was found, or `null` to mean "use this class's own ACP body".
    *  Decided at most once per instance (see the class doc above). */
   private modePromise: Promise<GrokDirectBackend | null> | null = null;
+  /** Synchronous mirror of the resolved mode for the `capabilities` getter:
+   *  `undefined` = not yet decided, a backend = direct mode, `null` = ACP mode.
+   *  Set by resolveMode() the instant its probe settles. */
+  private resolvedDirect: GrokDirectBackend | null | undefined = undefined;
   private client: AcpClient | null = null;
   /** The client an in-flight prepare() is spinning up, tracked so a concurrent
    *  close() can tear it down before it's published (P0-A). */
@@ -546,6 +550,30 @@ export class GrokBackend implements AgentBackend {
   }
 
   /**
+   * Capabilities MUST reflect the mode that will actually serve turns — never
+   * advertise one this backend won't honor (over-reporting `vision` would make a
+   * caller send images the direct 6-tool-router path silently drops = data loss).
+   * `capabilities` is a synchronous `readonly` on the AgentBackend port, but the
+   * mode is resolved lazily/async — so:
+   *   - once the mode is KNOWN → report the real descriptor (direct = vision:false,
+   *     ACP = the full GROK_CAPABILITIES incl. vision:true).
+   *   - while UNKNOWN but the direct path is REACHABLE (a `~/.grok/auth.json`
+   *     exists, or a resolveGrokOAuth seam is injected) → report conservatively
+   *     with `vision:false`. Under-reporting is safe (the panel just won't offer
+   *     images); over-reporting is not.
+   *   - while UNKNOWN and the direct path is NOT reachable (no token file) → the
+   *     ACP path is the only possibility, so report its full capabilities.
+   * The xAI vision contract is unverified (Task 8), so the direct path never
+   * claims vision until that's confirmed. */
+  get capabilities(): AgentCapabilities {
+    if (this.resolvedDirect !== undefined) {
+      return this.resolvedDirect ? this.resolvedDirect.capabilities : GROK_CAPABILITIES;
+    }
+    const directReachable = !!this.deps.resolveGrokOAuth || existsSync(grokTokenFile);
+    return directReachable ? { ...GROK_CAPABILITIES, vision: false } : GROK_CAPABILITIES;
+  }
+
+  /**
    * Decide ONCE (memoized) whether a direct OAuth token is usable: probes
    * `resolveGrokOAuth` (or the injected test seam) and, on success, builds the
    * `GrokDirectBackend` that every AgentBackend method below will delegate to.
@@ -560,18 +588,26 @@ export class GrokBackend implements AgentBackend {
     if (!this.modePromise) {
       const resolveOAuth = this.deps.resolveGrokOAuth ?? resolveGrokOAuth;
       this.modePromise = resolveOAuth()
-        .then(
-          () =>
-            new GrokDirectBackend({
-              cwd: this.deps.cwd,
-              model: this.deps.model,
-              comfyuiUrl: this.deps.comfyuiUrl,
-              mcpServers: this.deps.mcpServers,
-              systemAppend: this.deps.systemAppend,
-              resolveGrokOAuth: this.deps.resolveGrokOAuth,
-            }),
-        )
-        .catch(() => null);
+        .then((creds) => {
+          // Thread the ALREADY-resolved credentials into the direct backend so its
+          // prepare() reuses them instead of probing resolveGrokOAuth a second time
+          // (single-probe on the success path — the task's explicit requirement).
+          const direct = new GrokDirectBackend({
+            cwd: this.deps.cwd,
+            model: this.deps.model,
+            comfyuiUrl: this.deps.comfyuiUrl,
+            mcpServers: this.deps.mcpServers,
+            systemAppend: this.deps.systemAppend,
+            resolveGrokOAuth: this.deps.resolveGrokOAuth,
+            initialCredentials: creds,
+          });
+          this.resolvedDirect = direct;
+          return direct;
+        })
+        .catch(() => {
+          this.resolvedDirect = null;
+          return null;
+        });
     }
     return this.modePromise;
   }
@@ -1166,7 +1202,12 @@ export class GrokBackend implements AgentBackend {
 // ---------------------------------------------------------------------------
 
 export const GROK_XAI_API_BASE = "https://api.x.ai/v1";
-const GROK_XAI_RESPONSES_URL = `${GROK_XAI_API_BASE}/responses`;
+// The exact Responses sub-path is UNVERIFIED against the live xAI API (Task 8's
+// smoke test confirms it). Made overridable via COMFYUI_MCP_GROK_XAI_RESPONSES_URL
+// so if the real path differs it's a config flip, not a code change — whatever URL
+// is used still passes assertAllowedTokenHost (x.ai/*.x.ai) before any bearer.
+export const GROK_XAI_RESPONSES_URL =
+  process.env.COMFYUI_MCP_GROK_XAI_RESPONSES_URL?.trim() || `${GROK_XAI_API_BASE}/responses`;
 const GROK_XAI_MODELS_URL = `${GROK_XAI_API_BASE}/models`;
 const GROK_MAX_TOOL_ROUNDS = 32;
 
@@ -1295,10 +1336,17 @@ export class GrokDirectBackend extends OllamaBackend {
   private grokTurnHistory: GrokTurnMessage[] = [];
   private grokSessionId: string | null = null;
   private resolveOAuth: (deps?: CodeProviderAuthDeps) => Promise<GrokOAuthCredentials>;
+  /** Credentials `GrokBackend.resolveMode()` ALREADY resolved to pick the mode,
+   *  handed straight to prepare() so the initial preflight does NOT re-probe
+   *  `resolveGrokOAuth` (single-probe on the success path). Consumed once, then
+   *  cleared; `resolveOAuth` remains for any future mid-session re-resolve. */
+  private initialCredentials: GrokOAuthCredentials | undefined;
 
   constructor(
     deps: Pick<GrokBackendDeps, "cwd" | "model" | "comfyuiUrl" | "mcpServers" | "systemAppend"> & {
       resolveGrokOAuth?: (deps?: CodeProviderAuthDeps) => Promise<GrokOAuthCredentials>;
+      /** The credentials the facade already resolved when deciding the mode. */
+      initialCredentials?: GrokOAuthCredentials;
     } = {},
   ) {
     super({
@@ -1313,12 +1361,18 @@ export class GrokDirectBackend extends OllamaBackend {
     });
     this.model = deps.model ?? GROK_XAI_DEFAULT_MODEL;
     this.resolveOAuth = deps.resolveGrokOAuth ?? resolveGrokOAuth;
+    this.initialCredentials = deps.initialCredentials;
   }
 
   override async prepare(): Promise<void> {
     if (this.disposed) throw new Error("grok backend is closed.");
     if (this.prepared) return;
-    const creds = await this.resolveOAuth();
+    // Prefer the credentials the facade already resolved to pick this mode — the
+    // initial preflight must NOT re-probe resolveGrokOAuth (single-probe on the
+    // success path). Only re-resolve if none were threaded in (e.g. a direct
+    // instantiation in a test or a future caller).
+    const creds = this.initialCredentials ?? (await this.resolveOAuth());
+    this.initialCredentials = undefined; // consumed
     this.accessToken = creds.accessToken;
     await this.connectTools();
     this.prepared = true;
@@ -1466,7 +1520,10 @@ export class GrokDirectBackend extends OllamaBackend {
     if (fresh) this.grokTurnHistory = [];
     yield { type: "session", sessionId: this.grokSessionId, model: this.model };
 
-    const instructions = [resolvePrompt("backend.grok", GROK_XAI_SYSTEM_PROMPT), this.deps.systemAppend]
+    // NOTE: upstream (MichaelDanCurtis fork) routes this through the editable
+    // prompt registry (services/prompt-overrides). That registry is not ported
+    // here, so the built-in prompt is used directly.
+    const instructions = [GROK_XAI_SYSTEM_PROMPT, this.deps.systemAppend]
       .filter(Boolean)
       .join("\n\n");
 

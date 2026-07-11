@@ -207,9 +207,15 @@ describe("GrokBackend — direct-token vs ACP/CLI selection", () => {
     channel.close();
     await run;
 
-    // The OAuth resolver was consulted, and NO grok CLI process was ever spawned.
-    expect(resolveGrokOAuthMock).toHaveBeenCalled();
+    // The OAuth resolver was probed EXACTLY ONCE on the success path (the mode
+    // decision resolves the creds and threads them into the direct backend's
+    // prepare(), which must NOT re-resolve), and NO grok CLI process was spawned.
+    expect(resolveGrokOAuthMock).toHaveBeenCalledTimes(1);
     expect(hoisted.spawnCalls).toHaveLength(0);
+
+    // Direct mode must NOT advertise vision:true — the xAI vision contract is
+    // unverified and the 6-tool-router path would silently drop images.
+    expect(backend.capabilities.vision).toBe(false);
 
     // The direct path hit the xAI Responses endpoint with a Bearer token — and
     // the token never leaked into a header/body a naive log line would echo.
@@ -263,6 +269,10 @@ describe("GrokBackend — direct-token vs ACP/CLI selection", () => {
     const results = events.filter((e) => e.type === "result");
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({ ok: true, subtype: "end_turn" });
+
+    // Once ACP mode is resolved, the facade reports the full ACP capabilities —
+    // vision:true is honest here (the ACP path DOES forward inline image blocks).
+    expect(backend.capabilities.vision).toBe(true);
 
     await backend.close();
     vi.unstubAllGlobals();

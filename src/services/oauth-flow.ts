@@ -44,12 +44,36 @@ export interface OAuthDeps {
 
 const b64url = (buf: Buffer): string => buf.toString("base64url");
 
-/** Strip token-shaped material from provider error text before it can reach a log/UI. */
-function redactTokens(s: string): string {
+/**
+ * Strip token-shaped material from provider error text before it can reach a
+ * log/UI. SINGLE SOURCE OF TRUTH — grok-backend.ts and copilot-backend.ts
+ * used to carry their own local copies (`redactGrokTokens`/
+ * `redactCopilotTokens`); those were folded into this exported superset (no
+ * coverage lost) and the call sites now import this function directly. Any
+ * new provider error path (refresh, exchange, device-poll, data-API call)
+ * MUST run its raw response body through this before it can reach a thrown
+ * Error message or a log line.
+ *
+ * Covers, across all three prior variants:
+ *  - key:value / key=value pairs for access_token, refresh_token, id_token,
+ *    code, code_verifier, client_secret, and bare token (the Copilot copy's
+ *    addition, for `{token: "..."}` exchange-response shapes).
+ *  - raw prefixed tokens: ghu_/gho_ (GitHub device-code), ghp_ (Copilot's
+ *    addition, GitHub PAT), ya29. (Google), sk- (OpenAI-style), xai- (xAI API
+ *    keys — the Grok copy was missing this one).
+ *  - `Bearer <token>` headers/strings.
+ *  - bare `token <value>` (the Copilot copy's addition, for GitHub's
+ *    `Authorization: token ghu_...` scheme appearing in echoed text).
+ */
+export function redactTokens(s: string): string {
   return s
-    .replace(/("?(?:access_token|refresh_token|id_token|code|code_verifier|client_secret)"?\s*[:=]\s*"?)[^"'\s,&}]+/gi, "$1<redacted>")
-    .replace(/\b(ghu_|gho_|ya29\.|sk-)[A-Za-z0-9._-]+/g, "$1<redacted>")
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer <redacted>");
+    .replace(
+      /("?(?:access_token|refresh_token|id_token|code|code_verifier|client_secret|token)"?\s*[:=]\s*"?)[^"'\s,&}]+/gi,
+      "$1<redacted>",
+    )
+    .replace(/\b(ghu_|gho_|ghp_|ya29\.|sk-|xai-)[A-Za-z0-9._-]+/g, "$1<redacted>")
+    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer <redacted>")
+    .replace(/\btoken\s+[A-Za-z0-9._-]+/gi, "token <redacted>");
 }
 
 /** S256 PKCE pair. verifier: 43-128 chars unreserved; challenge = base64url(sha256(verifier)). */

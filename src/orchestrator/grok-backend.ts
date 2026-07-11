@@ -78,7 +78,7 @@ import {
   type CodeProviderAuthDeps,
   type GrokOAuthCredentials,
 } from "../services/code-provider-auth.js";
-import { OAUTH_PROVIDERS, assertAllowedTokenHost, grokTokenFile } from "../services/oauth-flow.js";
+import { OAUTH_PROVIDERS, assertAllowedTokenHost, grokTokenFile, redactTokens } from "../services/oauth-flow.js";
 import { OllamaBackend } from "./ollama-backend.js";
 
 function msgOf(err: unknown): string {
@@ -1189,8 +1189,9 @@ export class GrokBackend implements AgentBackend {
 //   - Every outbound request is host-allowlist-checked (assertAllowedTokenHost
 //     against OAUTH_PROVIDERS.grok.apiHostAllowlist, i.e. `x.ai`/`*.x.ai`)
 //     before the bearer is attached, and any error response body is REDACTED
-//     (redactGrokTokens) before it can reach a thrown message or a log line —
-//     the access token itself is never logged anywhere in this path.
+//     (redactTokens, from oauth-flow.ts — the single shared redactor) before
+//     it can reach a thrown message or a log line — the access token itself
+//     is never logged anywhere in this path.
 //   - Model slug + exact endpoint sub-path are UNVERIFIED against the live xAI
 //     API (no network access at authoring time, and no Task-1 research
 //     artifact survived for this session to consult). GROK_XAI_DEFAULT_MODEL
@@ -1234,19 +1235,6 @@ export const GROK_XAI_SYSTEM_PROMPT = [
   "",
   "Describe a tool before its first call. Finish tasks by running tools, not inventing results.",
 ].join("\n");
-
-/** Mirrors oauth-flow.ts's private `redactTokens` (kept local so this task's
- *  only edit surface is grok-backend.ts) — strips token-shaped material from
- *  provider error text before it can reach a thrown message or a log line. */
-function redactGrokTokens(s: string): string {
-  return s
-    .replace(
-      /("?(?:access_token|refresh_token|id_token|code|code_verifier|client_secret)"?\s*[:=]\s*"?)[^"'\s,&}]+/gi,
-      "$1<redacted>",
-    )
-    .replace(/\b(ghu_|gho_|ya29\.|sk-)[A-Za-z0-9._-]+/g, "$1<redacted>")
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer <redacted>");
-}
 
 type GrokTurnMessage = {
   role: "user" | "assistant" | "tool";
@@ -1422,7 +1410,7 @@ export class GrokDirectBackend extends OllamaBackend {
     }
     if (!res.ok || !res.body) {
       const bodyText = await res.text().catch(() => "");
-      throw new Error(`xAI Responses http ${res.status}: ${redactGrokTokens(bodyText).slice(0, 400)}`);
+      throw new Error(`xAI Responses http ${res.status}: ${redactTokens(bodyText).slice(0, 400)}`);
     }
 
     let content = "";

@@ -53,7 +53,7 @@ import {
   type CodeProviderAuthDeps,
   type CopilotOAuthCredentials,
 } from "../services/code-provider-auth.js";
-import { assertAllowedTokenHost, OAUTH_PROVIDERS } from "../services/oauth-flow.js";
+import { assertAllowedTokenHost, OAUTH_PROVIDERS, redactTokens } from "../services/oauth-flow.js";
 
 function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -96,21 +96,12 @@ const EDITOR_IDENTITY_HEADERS: Record<string, string> = {
   "Copilot-Integration-Id": "vscode-chat",
 };
 
-/** Mirrors oauth-flow.ts's private `redactTokens` (kept local so this task's
- *  only edit surface outside this file is code-provider-auth.ts/index.ts) —
- *  strips token-shaped material from provider error text before it can reach
- *  a thrown message or a log line. Never logs/throws the raw ghu_ or the
- *  exchanged short-lived bearer. */
-function redactCopilotTokens(s: string): string {
-  return s
-    .replace(
-      /("?(?:access_token|refresh_token|token)"?\s*[:=]\s*"?)[^"'\s,&}]+/gi,
-      "$1<redacted>",
-    )
-    .replace(/\b(ghu_|gho_|ghp_)[A-Za-z0-9._-]+/g, "$1<redacted>")
-    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer <redacted>")
-    .replace(/\btoken\s+[A-Za-z0-9._-]+/gi, "token <redacted>");
-}
+// Uses the shared `redactTokens` from oauth-flow.ts (single source of truth —
+// this file used to carry a local `redactCopilotTokens` copy; its extra
+// ghp_/`token\s+` rules were folded into the exported superset, no coverage
+// lost) to strip token-shaped material from provider error text before it
+// can reach a thrown message or a log line. Never logs/throws the raw ghu_ or
+// the exchanged short-lived bearer.
 
 /** `github.com` / `githubcopilot.com` — the same allowlist the OAuth engine
  *  already enforces for Copilot's device-code flow (oauth-flow.ts), reused
@@ -164,7 +155,7 @@ async function exchangeCopilotToken(
         ? " Re-run Copilot sign-in from the panel (this also happens if the signed-in account has no active Copilot subscription)."
         : "";
     throw new ValidationError(
-      `GitHub Copilot token exchange failed (${res.status}): ${redactCopilotTokens(text).slice(0, 300)}.${hint}`,
+      `GitHub Copilot token exchange failed (${res.status}): ${redactTokens(text).slice(0, 300)}.${hint}`,
     );
   }
   let payload: { token?: string; expires_at?: number; endpoints?: { api?: string } };

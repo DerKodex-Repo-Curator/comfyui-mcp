@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ValidationError } from "../utils/errors.js";
-import { assertAllowedTokenHost, OAUTH_PROVIDERS, type OAuthTokens } from "./oauth-flow.js";
+import { assertAllowedTokenHost, OAUTH_PROVIDERS, redactTokens, type OAuthTokens } from "./oauth-flow.js";
 import {
   setOAuthStatus,
   listOAuthStatus,
@@ -194,10 +194,18 @@ async function refreshOpenAICodexTokens(
   if (!res.ok) {
     const hint = res.status === 401 || res.status === 400 ? " Run `codex login` to re-authenticate." : "";
     throw new ValidationError(
-      `OpenAI Codex OAuth refresh failed (${res.status}): ${text.slice(0, 300)}.${hint}`,
+      `OpenAI Codex OAuth refresh failed (${res.status}): ${redactTokens(text).slice(0, 300)}.${hint}`,
     );
   }
-  const payload = JSON.parse(text) as { access_token?: string; refresh_token?: string };
+  let payload: { access_token?: string; refresh_token?: string };
+  try {
+    payload = JSON.parse(text) as { access_token?: string; refresh_token?: string };
+  } catch {
+    // A 2xx-but-malformed body must never reach the caller raw — JSON.parse's
+    // SyntaxError can embed a snippet of the offending text (which may carry
+    // refresh_token material echoed back by the IdP) in its own message.
+    throw new ValidationError("OpenAI Codex OAuth refresh returned a malformed (non-JSON) response.");
+  }
   const access = payload.access_token?.trim();
   if (!access) {
     throw new ValidationError("OpenAI Codex OAuth refresh response missing access_token.");
@@ -228,10 +236,17 @@ async function refreshKimiCodeTokens(
   if (!res.ok) {
     const hint = res.status === 401 || res.status === 400 ? " Re-run `kimi` / Kimi Code login." : "";
     throw new ValidationError(
-      `Kimi Code OAuth refresh failed (${res.status}): ${text.slice(0, 300)}.${hint}`,
+      `Kimi Code OAuth refresh failed (${res.status}): ${redactTokens(text).slice(0, 300)}.${hint}`,
     );
   }
-  const payload = JSON.parse(text) as KimiCodeAuthFile;
+  let payload: KimiCodeAuthFile;
+  try {
+    payload = JSON.parse(text) as KimiCodeAuthFile;
+  } catch {
+    // See refreshOpenAICodexTokens's matching catch: a 2xx-but-malformed body
+    // must never reach the caller raw via JSON.parse's own SyntaxError.
+    throw new ValidationError("Kimi Code OAuth refresh returned a malformed (non-JSON) response.");
+  }
   const access = payload.access_token?.trim();
   if (!access) {
     throw new ValidationError("Kimi Code OAuth refresh response missing access_token.");
@@ -279,10 +294,17 @@ async function refreshGrokTokens(
   if (!res.ok) {
     const hint = res.status === 401 || res.status === 400 ? " Re-run Grok sign-in from the panel." : "";
     throw new ValidationError(
-      `Grok OAuth refresh failed (${res.status}): ${text.slice(0, 300)}.${hint}`,
+      `Grok OAuth refresh failed (${res.status}): ${redactTokens(text).slice(0, 300)}.${hint}`,
     );
   }
-  const payload = JSON.parse(text) as { access_token?: string; refresh_token?: string; expires_in?: number };
+  let payload: { access_token?: string; refresh_token?: string; expires_in?: number };
+  try {
+    payload = JSON.parse(text) as { access_token?: string; refresh_token?: string; expires_in?: number };
+  } catch {
+    // See refreshOpenAICodexTokens's matching catch: a 2xx-but-malformed body
+    // must never reach the caller raw via JSON.parse's own SyntaxError.
+    throw new ValidationError("Grok OAuth refresh returned a malformed (non-JSON) response.");
+  }
   const access = payload.access_token?.trim();
   if (!access) {
     throw new ValidationError("Grok OAuth refresh response missing access_token.");

@@ -30,6 +30,23 @@ interface PanelSecrets {
    *  from comfyuiEnv (different allowlist) so a provider key is never injected
    *  into the tool subprocess and a tool token never reaches the LLM backend. */
   agentEnv?: Record<string, string>;
+  /** STATUS-ONLY mirror of in-panel OAuth sign-ins (Codex/Grok/Copilot), keyed by
+   *  provider id. Holds NO secrets — the native token files (~/.codex/auth.json,
+   *  ~/.grok/auth.json, ~/.comfyui-mcp/copilot-auth.json) are the source of truth
+   *  for token material. This is deliberately NOT under either allowlist above:
+   *  it is read by the panel UI to show "signed in as …" without ever touching a
+   *  credential. `setOAuthStatus` sanitizes on write so a hand-edited/corrupt file
+   *  can never smuggle anything beyond the five known status fields. */
+  oauthStatus?: Record<string, OAuthStatusRecord>;
+}
+
+/** Status-only record for an in-panel OAuth sign-in. NEVER put token material here. */
+export interface OAuthStatusRecord {
+  provider: string;
+  account_label: string;
+  obtained_at: number;
+  expires_at?: number;
+  experimental?: boolean;
 }
 
 // STRICT ALLOWLIST of env keys a panel-collected secret may set on the comfyui
@@ -127,6 +144,59 @@ function write(secrets: PanelSecrets): void {
   } catch {
     /* chmod is a no-op on Windows; ignore */
   }
+}
+
+// SANITIZE on every write: copy only the five known status fields and coerce
+// their types. Even a hand-edited or corrupt panel-secrets.json therefore can
+// never inject anything beyond this shape into the mirror — critically, it
+// can never smuggle in token material via an unexpected key.
+function sanitizeOAuthStatus(rec: OAuthStatusRecord): OAuthStatusRecord {
+  const out: OAuthStatusRecord = {
+    provider: String(rec?.provider ?? "").trim(),
+    account_label: String(rec?.account_label ?? "").trim(),
+    obtained_at:
+      typeof rec?.obtained_at === "number" && Number.isFinite(rec.obtained_at)
+        ? rec.obtained_at
+        : Date.now(),
+  };
+  if (typeof rec?.expires_at === "number" && Number.isFinite(rec.expires_at)) {
+    out.expires_at = rec.expires_at;
+  }
+  if (typeof rec?.experimental === "boolean") {
+    out.experimental = rec.experimental;
+  }
+  return out;
+}
+
+/** Upsert the status-only OAuth mirror entry for `rec.provider`. Sanitizes the
+ *  record first (see `sanitizeOAuthStatus`) — callers pass status fields only,
+ *  never token material. */
+export function setOAuthStatus(rec: OAuthStatusRecord): void {
+  const sanitized = sanitizeOAuthStatus(rec);
+  if (!sanitized.provider) throw new Error("setOAuthStatus: record is missing a provider id.");
+  const secrets = read();
+  const status =
+    secrets.oauthStatus && typeof secrets.oauthStatus === "object" ? secrets.oauthStatus : {};
+  status[sanitized.provider] = sanitized;
+  secrets.oauthStatus = status;
+  write(secrets);
+}
+
+/** All stored OAuth status records (re-sanitized on read, defense in depth). */
+export function listOAuthStatus(): OAuthStatusRecord[] {
+  const status = read().oauthStatus;
+  if (!status || typeof status !== "object") return [];
+  return Object.values(status).map(sanitizeOAuthStatus);
+}
+
+/** Remove a provider's status mirror entry. No-op if absent. */
+export function clearOAuthStatus(provider: string): void {
+  const secrets = read();
+  const status = secrets.oauthStatus;
+  if (!status || typeof status !== "object" || !(provider in status)) return;
+  delete status[provider];
+  secrets.oauthStatus = status;
+  write(secrets);
 }
 
 /** The persisted env vars to inject into the comfyui MCP server. Never logged.

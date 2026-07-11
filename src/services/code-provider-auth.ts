@@ -1,9 +1,16 @@
-import { readFile, writeFile, rename } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { ValidationError } from "../utils/errors.js";
+import { assertAllowedTokenHost, OAUTH_PROVIDERS, type OAuthTokens } from "./oauth-flow.js";
+import {
+  setOAuthStatus,
+  listOAuthStatus,
+  clearOAuthStatus,
+  type OAuthStatusRecord,
+} from "./panel-secrets.js";
 
 const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
@@ -58,6 +65,17 @@ interface KimiCodeAuthFile {
   token_type?: string;
 }
 
+interface GrokAuthFile {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  expires_at?: number;
+}
+
+export interface GrokOAuthCredentials {
+  accessToken: string;
+}
+
 function codexAuthPath(home = homedir()): string {
   const root = process.env.CODEX_HOME || join(home, ".codex");
   return join(root, "auth.json");
@@ -66,6 +84,14 @@ function codexAuthPath(home = homedir()): string {
 function kimiCodeAuthPath(home = homedir()): string {
   const share = process.env.KIMI_SHARE_DIR || join(home, ".kimi");
   return join(share, "credentials", "kimi-code.json");
+}
+
+function grokAuthPath(home = homedir()): string {
+  return join(home, ".grok", "auth.json");
+}
+
+function copilotAuthPath(home = homedir()): string {
+  return join(home, ".comfyui-mcp", "copilot-auth.json");
 }
 
 function jwtExpMs(token: string): number | null {
@@ -83,22 +109,45 @@ function jwtExpMs(token: string): number | null {
   }
 }
 
-function jwtChatgptAccountId(idToken: string | undefined): string | null {
-  if (!idToken?.trim()) return null;
-  const parts = idToken.split(".");
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
   if (parts.length < 2) return null;
   try {
-    const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as {
-      "https://api.openai.com/auth"?: { chatgpt_account_id?: string };
-    };
-    return payload["https://api.openai.com/auth"]?.chatgpt_account_id?.trim() || null;
+    return JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as Record<string, unknown>;
   } catch {
     return null;
   }
 }
 
+function jwtChatgptAccountId(idToken: string | undefined): string | null {
+  if (!idToken?.trim()) return null;
+  const payload = decodeJwtPayload(idToken) as {
+    "https://api.openai.com/auth"?: { chatgpt_account_id?: string };
+    chatgpt_account_id?: string;
+  } | null;
+  if (!payload) return null;
+  return (
+    payload["https://api.openai.com/auth"]?.chatgpt_account_id?.trim() ||
+    payload.chatgpt_account_id?.trim() ||
+    null
+  );
+}
+
+/** Best-effort email claim from an id_token, for a human-readable account label. */
+function jwtEmailClaim(idToken: string | undefined): string | null {
+  if (!idToken?.trim()) return null;
+  const payload = decodeJwtPayload(idToken) as { email?: string } | null;
+  return payload?.email?.trim() || null;
+}
+
 async function atomicWriteJson(path: string, data: unknown): Promise<void> {
   const dir = dirname(path);
+  // Landing a fresh OAuth sign-in may be the FIRST write to this provider's
+  // credential directory (e.g. ~/.grok didn't exist before Grok sign-in) —
+  // unlike the resolve* paths above, which only ever re-write an existing
+  // file. Ensure the parent dir exists so this stays a drop-in atomic writer
+  // for both "update in place" and "create for the first time" callers.
+  await mkdir(dir, { recursive: true });
   const tmp = join(dir, `.auth-${randomBytes(8).toString("hex")}.tmp`);
   await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   await rename(tmp, path);
@@ -189,6 +238,49 @@ async function refreshKimiCodeTokens(
   };
 }
 
+/** Grok (xAI) OAuth refresh — mirrors `refreshOpenAICodexTokens`. Host-allowlist-checked
+ *  against the provider config in oauth-flow.ts before any network call. */
+async function refreshGrokTokens(
+  refreshToken: string,
+  deps: CodeProviderAuthDeps,
+): Promise<{ access_token: string; refresh_token?: string; expires_in?: number }> {
+  const cfg = OAUTH_PROVIDERS.grok;
+  if (!cfg) throw new ValidationError("Grok OAuth is not configured.");
+  assertAllowedTokenHost(cfg.tokenUrl, cfg.apiHostAllowlist);
+  const fetchFn = deps.fetch ?? fetch;
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: cfg.clientId,
+  });
+  const res = await fetchFn(cfg.tokenUrl, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    const hint = res.status === 401 || res.status === 400 ? " Re-run Grok sign-in from the panel." : "";
+    throw new ValidationError(
+      `Grok OAuth refresh failed (${res.status}): ${text.slice(0, 300)}.${hint}`,
+    );
+  }
+  const payload = JSON.parse(text) as { access_token?: string; refresh_token?: string; expires_in?: number };
+  const access = payload.access_token?.trim();
+  if (!access) {
+    throw new ValidationError("Grok OAuth refresh response missing access_token.");
+  }
+  return {
+    access_token: access,
+    refresh_token: payload.refresh_token?.trim(),
+    expires_in: typeof payload.expires_in === "number" ? payload.expires_in : undefined,
+  };
+}
+
 /**
  * Resolve ChatGPT/Codex subscription OAuth from ~/.codex/auth.json (written by `codex login`).
  * Refreshes expired access tokens in place. Use with the Codex Responses backend — not api.openai.com.
@@ -246,6 +338,55 @@ export async function resolveOpenAICodexOAuth(
     accountId,
     authMode: raw.auth_mode,
   };
+}
+
+/**
+ * Resolve Grok (xAI) OAuth from ~/.grok/auth.json (written by the in-panel sign-in
+ * via `persistOAuthResult`). Refreshes expired access tokens in place — mirrors
+ * `resolveOpenAICodexOAuth`.
+ */
+export async function resolveGrokOAuth(
+  deps: CodeProviderAuthDeps = {},
+): Promise<GrokOAuthCredentials> {
+  const home = deps.home ?? homedir();
+  const path = grokAuthPath(home);
+  if (!existsSync(path)) {
+    throw new ValidationError(
+      "Grok OAuth requires signing in via the panel's Connections tab first.",
+    );
+  }
+
+  let creds = JSON.parse(await readFile(path, "utf8")) as GrokAuthFile;
+  if (!creds.access_token?.trim() && !creds.refresh_token?.trim()) {
+    throw new ValidationError("No Grok OAuth tokens in ~/.grok/auth.json. Sign in again from the panel.");
+  }
+
+  const nowMs = deps.now?.() ?? Date.now();
+  const expMs = typeof creds.expires_at === "number" ? creds.expires_at * 1000 : null;
+  const needsRefresh = !creds.access_token?.trim() || tokenExpiring(expMs, nowMs);
+
+  if (needsRefresh) {
+    const refreshToken = creds.refresh_token?.trim();
+    if (!refreshToken) {
+      throw new ValidationError("Grok access token expired and refresh_token is missing. Sign in again from the panel.");
+    }
+    const refreshed = await refreshGrokTokens(refreshToken, deps);
+    const nowSec = Math.floor(nowMs / 1000);
+    creds = {
+      access_token: refreshed.access_token,
+      refresh_token: refreshed.refresh_token ?? refreshToken,
+      expires_in: refreshed.expires_in,
+      expires_at:
+        typeof refreshed.expires_in === "number" ? nowSec + refreshed.expires_in : undefined,
+    };
+    await atomicWriteJson(path, creds);
+  }
+
+  const accessToken = creds.access_token?.trim();
+  if (!accessToken) {
+    throw new ValidationError("Grok OAuth access_token is missing after refresh.");
+  }
+  return { accessToken };
 }
 
 /** GLM Coding Plan API key (Z.AI). Env: ZAI_API_KEY, GLM_API_KEY, or ZHIPUAI_API_KEY. */
@@ -319,6 +460,115 @@ export async function resolveKimiCodeOAuth(
   return { accessToken, baseUrl };
 }
 
+/** Best-effort delete of a provider's native token file. Never throws — a
+ *  missing file, missing directory, or permission wobble is not fatal to
+ *  clearing the (separate) status mirror. */
+function deleteNativeTokenFile(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+function nativeTokenFilePath(providerId: string, home: string): string | null {
+  if (providerId === "codex") return codexAuthPath(home);
+  if (providerId === "grok") return grokAuthPath(home);
+  if (providerId === "copilot") return copilotAuthPath(home);
+  return null;
+}
+
+/**
+ * Persist the tokens an OAuth flow (`runLoopbackPKCE` / `pollDeviceToken` in
+ * oauth-flow.ts) returned: writes the NATIVE token file in the shape that
+ * provider's resolver reads (codex → `resolveOpenAICodexOAuth`, grok →
+ * `resolveGrokOAuth`, copilot → the raw `{access_token, token_type}` GitHub
+ * Copilot expects), derives a human-readable account label, and records a
+ * STATUS-ONLY mirror entry via `setOAuthStatus` for the panel UI.
+ *
+ * SECURITY: only `account_label` (plus timestamps/flags) reaches the mirror —
+ * never `access_token`/`refresh_token`/`id_token`. See panel-secrets.ts.
+ */
+export async function persistOAuthResult(
+  providerId: string,
+  tokens: OAuthTokens,
+  deps: CodeProviderAuthDeps = {},
+): Promise<{ account_label: string }> {
+  const home = deps.home ?? homedir();
+  const nowMs = deps.now?.() ?? Date.now();
+  const experimental = providerId === "copilot";
+
+  let accountLabel: string;
+  let expiresAt: number | undefined;
+
+  if (providerId === "codex") {
+    const accountId = jwtChatgptAccountId(tokens.id_token) || "";
+    const email = jwtEmailClaim(tokens.id_token);
+    accountLabel = email || accountId || "ChatGPT account";
+    const auth: CodexAuthFile = {
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        account_id: accountId || undefined,
+        id_token: tokens.id_token,
+      },
+      last_refresh: new Date(nowMs).toISOString(),
+    };
+    await atomicWriteJson(codexAuthPath(home), auth);
+    const expMs = jwtExpMs(tokens.access_token);
+    expiresAt = expMs != null ? Math.floor(expMs / 1000) : undefined;
+  } else if (providerId === "grok") {
+    const email = jwtEmailClaim(tokens.id_token);
+    accountLabel = email || "xAI account";
+    const expiresIn = tokens.expires_in;
+    const expAt =
+      typeof expiresIn === "number" ? Math.floor(nowMs / 1000) + expiresIn : undefined;
+    const auth: GrokAuthFile = {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_in: expiresIn,
+      expires_at: expAt,
+    };
+    await atomicWriteJson(grokAuthPath(home), auth);
+    expiresAt = expAt;
+  } else if (providerId === "copilot") {
+    accountLabel = "GitHub Copilot";
+    const tokenType =
+      typeof tokens.raw?.token_type === "string" ? (tokens.raw.token_type as string) : "bearer";
+    await atomicWriteJson(copilotAuthPath(home), {
+      access_token: tokens.access_token,
+      token_type: tokenType,
+    });
+  } else {
+    throw new ValidationError(`persistOAuthResult: unknown OAuth provider "${providerId}".`);
+  }
+
+  setOAuthStatus({
+    provider: providerId,
+    account_label: accountLabel,
+    obtained_at: nowMs,
+    expires_at: expiresAt,
+    experimental,
+  });
+
+  return { account_label: accountLabel };
+}
+
+/** All in-panel OAuth sign-ins' status (for the UI) — status only, never tokens. */
+export function readOAuthStatus(): OAuthStatusRecord[] {
+  return listOAuthStatus();
+}
+
+/** Sign a provider out: deletes its native token file (best-effort) and the
+ *  status mirror entry. */
+export function clearOAuth(providerId: string, deps: CodeProviderAuthDeps = {}): void {
+  const home = deps.home ?? homedir();
+  const path = nativeTokenFilePath(providerId, home);
+  if (path) deleteNativeTokenFile(path);
+  clearOAuthStatus(providerId);
+}
+
 export const __testing = {
   OPENAI_CODEX_CLIENT_ID,
   KIMI_CODE_CLIENT_ID,
@@ -326,8 +576,12 @@ export const __testing = {
   KIMI_CODE_DEFAULT_BASE,
   codexAuthPath,
   kimiCodeAuthPath,
+  grokAuthPath,
+  copilotAuthPath,
   jwtExpMs,
   jwtChatgptAccountId,
+  jwtEmailClaim,
   refreshOpenAICodexTokens,
   refreshKimiCodeTokens,
+  refreshGrokTokens,
 };

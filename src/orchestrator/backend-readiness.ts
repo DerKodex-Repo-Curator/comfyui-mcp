@@ -12,6 +12,8 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readOAuthStatus } from "../services/code-provider-auth.js";
+import type { OAuthStatusRecord } from "../services/panel-secrets.js";
 
 export type BackendReadiness = {
   backend: string;
@@ -94,6 +96,31 @@ function fileExists(...parts: string[]): boolean {
   }
 }
 
+/** The panel's in-panel-OAuth status records — injectable for tests (so a test
+ *  never has to touch the real ~/.comfyui-mcp/panel-secrets.json), defaulting
+ *  to the real store. Never throws — a corrupt/missing store just means "no
+ *  panel sign-ins known", not a readiness crash. */
+function panelOAuthRecords(opts?: { oauthStatus?: OAuthStatusRecord[] }): OAuthStatusRecord[] {
+  if (opts?.oauthStatus) return opts.oauthStatus;
+  try {
+    return readOAuthStatus();
+  } catch {
+    return [];
+  }
+}
+
+/** True if `providerId` has an in-panel OAuth status entry that isn't expired.
+ *  A record with no `expires_at` (copilot's device-code tokens, e.g.) is
+ *  treated as "no known expiry" — mirrors the resolvers' own tokenExpiring()
+ *  semantics in code-provider-auth.ts, which likewise never expires a token
+ *  it has no expiry info for. */
+function hasValidPanelOAuth(providerId: string, records: OAuthStatusRecord[], nowMs: number): boolean {
+  const rec = records.find((r) => r.provider === providerId);
+  if (!rec) return false;
+  if (typeof rec.expires_at !== "number") return true;
+  return rec.expires_at * 1000 > nowMs;
+}
+
 /**
  * Readiness for one backend, evaluated locally.
  *
@@ -105,16 +132,29 @@ function fileExists(...parts: string[]): boolean {
  */
 export function backendReadiness(
   backend: string,
-  opts?: { home?: string; customEndpointConfigured?: boolean },
+  opts?: {
+    home?: string;
+    customEndpointConfigured?: boolean;
+    oauthStatus?: OAuthStatusRecord[];
+    now?: number;
+  },
 ): BackendReadiness {
   const b = (backend || "").toLowerCase();
   const home = opts?.home ?? homedir();
+  const nowMs = opts?.now ?? Date.now();
   if (b === "claude") {
     return { backend: "claude", cli: true, auth: true, ready: true };
   }
   if (b === "codex") {
     const cli = onPath(CLI_NAMES.codex);
-    const auth = fileExists(home, ".codex", "auth.json");
+    // The panel's in-panel OAuth for codex writes the SAME ~/.codex/auth.json
+    // an external `codex login` would (see persistOAuthResult), so the native
+    // file check below already picks it up in practice — the OAuth-status
+    // check is kept as an explicit, independent signal (belt-and-suspenders,
+    // and the only signal at all for a provider with no dedicated file check).
+    const auth =
+      fileExists(home, ".codex", "auth.json") ||
+      hasValidPanelOAuth("codex", panelOAuthRecords(opts), nowMs);
     return { backend: "codex", cli, auth, ready: cli && auth };
   }
   if (b === "chatgpt") {
@@ -148,8 +188,19 @@ export function backendReadiness(
   }
   if (b === "grok") {
     const cli = onPath(CLI_NAMES.grok);
-    const auth = fileExists(home, ".grok", "auth.json");
+    // Same reasoning as codex above: the panel's in-panel OAuth writes the
+    // same ~/.grok/auth.json an external `grok` login would.
+    const auth =
+      fileExists(home, ".grok", "auth.json") ||
+      hasValidPanelOAuth("grok", panelOAuthRecords(opts), nowMs);
     return { backend: "grok", cli, auth, ready: cli && auth };
+  }
+  if (b === "copilot") {
+    // No external CLI/native-file concept for Copilot — the in-panel device-
+    // code OAuth (experimental, gated behind allow_experimental in
+    // oauth-bridge.ts) is the ONLY sign-in path, so it's the only signal here.
+    const auth = hasValidPanelOAuth("copilot", panelOAuthRecords(opts), nowMs);
+    return { backend: "copilot", cli: true, auth, ready: auth };
   }
   if (b === "ollama") {
     // No login concept — a local daemon. Binary presence is the readiness
@@ -198,7 +249,12 @@ export function backendReadiness(
 /** Readiness for every known backend, plus a rolled-up any_ready. */
 export function allBackendReadiness(
   backends: Iterable<string>,
-  opts?: { home?: string; customEndpointConfigured?: boolean },
+  opts?: {
+    home?: string;
+    customEndpointConfigured?: boolean;
+    oauthStatus?: OAuthStatusRecord[];
+    now?: number;
+  },
 ): {
   backends: BackendReadiness[];
   any_ready: boolean;

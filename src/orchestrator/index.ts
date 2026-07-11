@@ -57,6 +57,8 @@ import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-back
 import { GlmBackend, GLM_DEFAULT_MODEL } from "./glm-backend.js";
 import { KimiBackend, KIMI_DEFAULT_MODEL } from "./kimi-backend.js";
 import { allBackendReadiness } from "./backend-readiness.js";
+import { handleOAuthBegin, handleOAuthStatus, handleOAuthSignout } from "./oauth-bridge.js";
+import { OAUTH_PROVIDERS } from "../services/oauth-flow.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "./panel-console-http.js";
 import type { AgentBackend } from "./agent-backend.js";
@@ -2305,6 +2307,73 @@ export async function runPanelOrchestrator(): Promise<void> {
           tabId,
         );
       });
+      return;
+    }
+
+    // In-panel OAuth sign-in: kick a loopback (codex/grok) or device-code
+    // (copilot, experimental) flow. Reply comes back FAST (loopback: just
+    // "browser opened"; device: the user_code to show) — the actual sign-in
+    // completes in the background and pushes a refreshed `{type:"backends"}`
+    // frame via pushReadiness when it lands. STATUS ONLY ever crosses the
+    // bridge here — no token material (see oauth-bridge.ts).
+    if (event.type === "oauth_begin" && event.tab_id) {
+      const tabId = event.tab_id;
+      const provider = typeof (event as { provider?: unknown }).provider === "string"
+        ? (event as { provider?: string }).provider
+        : undefined;
+      const allowExperimental = (event as { allow_experimental?: unknown }).allow_experimental === true;
+      handleOAuthBegin(
+        { provider, allow_experimental: allowExperimental },
+        {
+          onAuthChanged: () => pushReadiness(tabId),
+          onBackgroundError: (providerId, message) => {
+            const label = OAUTH_PROVIDERS[providerId]?.label ?? providerId;
+            bridge.push({ type: "say", text: `⚠️ ${label} sign-in failed: ${message}` }, tabId);
+          },
+        },
+      )
+        .then((result) => {
+          bridge.push({ type: "ack", ok: true, kind: "oauth_begin", ...result }, tabId);
+          logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} oauth_begin ${provider} → ${result.mode}`);
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          bridge.push({ type: "ack", ok: false, kind: "oauth_begin", message }, tabId);
+          logger.warn(`[panel-orchestrator] tab ${tabId.slice(0, 8)} oauth_begin ${provider ?? "?"} refused: ${message}`);
+        });
+      return;
+    }
+
+    // In-panel OAuth status: the panel's Connections tab polls this to show
+    // "signed in as …" per provider. Status-only mirror — never tokens.
+    if (event.type === "oauth_status" && event.tab_id) {
+      const tabId = event.tab_id;
+      try {
+        const result = handleOAuthStatus({});
+        bridge.push({ type: "ack", ok: true, kind: "oauth_status", ...result }, tabId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        bridge.push({ type: "ack", ok: false, kind: "oauth_status", message }, tabId);
+      }
+      return;
+    }
+
+    // In-panel OAuth sign-out: clears the native token file + status mirror,
+    // then pushes refreshed readiness so the provider picker reflects it live.
+    if (event.type === "oauth_signout" && event.tab_id) {
+      const tabId = event.tab_id;
+      const provider = typeof (event as { provider?: unknown }).provider === "string"
+        ? (event as { provider?: string }).provider
+        : undefined;
+      try {
+        const result = handleOAuthSignout({ provider });
+        pushReadiness(tabId);
+        bridge.push({ type: "ack", kind: "oauth_signout", ...result }, tabId);
+        logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} oauth_signout ${provider}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        bridge.push({ type: "ack", ok: false, kind: "oauth_signout", message }, tabId);
+      }
       return;
     }
 

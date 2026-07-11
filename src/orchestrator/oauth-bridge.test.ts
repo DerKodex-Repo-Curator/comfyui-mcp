@@ -77,6 +77,7 @@ describe("handleOAuthBegin", () => {
     );
 
     expect(result).toEqual({
+      provider: "copilot",
       mode: "device",
       user_code: "ABCD-1234",
       verification_url: "https://github.com/login/device",
@@ -103,7 +104,7 @@ describe("handleOAuthBegin", () => {
       { providers: PROVIDERS, runLoopbackPKCE, persistOAuthResult, onAuthChanged },
     );
 
-    expect(result).toEqual({ mode: "loopback", opened: true });
+    expect(result).toEqual({ provider: "codex", mode: "loopback", opened: true });
     expect(onAuthChanged).not.toHaveBeenCalled(); // flow hasn't completed yet
 
     resolveFlow(FAKE_TOKENS);
@@ -123,7 +124,7 @@ describe("handleOAuthBegin", () => {
       { provider: "codex" },
       { providers: PROVIDERS, runLoopbackPKCE, onBackgroundError },
     );
-    expect(result).toEqual({ mode: "loopback", opened: true });
+    expect(result).toEqual({ provider: "codex", mode: "loopback", opened: true });
 
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
@@ -159,9 +160,18 @@ describe("handleOAuthSignout", () => {
       { provider: "codex" },
       { providers: PROVIDERS, clearOAuth, onAuthChanged },
     );
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, provider: "codex" });
     expect(clearOAuth).toHaveBeenCalledWith("codex", {});
     expect(onAuthChanged).toHaveBeenCalledWith("codex");
+  });
+
+  it("echoes the provider so the panel can correlate the ack to the right row", () => {
+    // Two providers cleared in succession must each return their OWN id — this
+    // is what lets the panel route overlapping acks correctly (Fix 1a).
+    const codexResult = handleOAuthSignout({ provider: "codex" }, { providers: PROVIDERS, clearOAuth: vi.fn() });
+    const copilotResult = handleOAuthSignout({ provider: "copilot" }, { providers: PROVIDERS, clearOAuth: vi.fn() });
+    expect(codexResult.provider).toBe("codex");
+    expect(copilotResult.provider).toBe("copilot");
   });
 });
 

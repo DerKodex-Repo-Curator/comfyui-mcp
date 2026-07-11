@@ -67,6 +67,10 @@ function resolveProvider(providerId: unknown, deps: OAuthBridgeDeps): OAuthProvi
 }
 
 export interface OAuthBeginResult {
+  /** Echoed back so the panel can correlate this reply with the row that
+   *  requested it — two overlapping sign-ins would otherwise be misrouted
+   *  (the panel can't tell which begin-ack belongs to which provider). */
+  provider: string;
   mode: "loopback" | "device";
   opened?: boolean;
   user_code?: string;
@@ -119,7 +123,7 @@ export async function handleOAuthBegin(
       .then((tokens) => doPersist(cfg.id, tokens, authDeps))
       .then(() => deps.onAuthChanged?.(cfg.id))
       .catch(onFlowError);
-    return { mode: "loopback", opened: true };
+    return { provider: cfg.id, mode: "loopback", opened: true };
   }
 
   // device_code
@@ -128,7 +132,7 @@ export async function handleOAuthBegin(
     .then((tokens) => doPersist(cfg.id, tokens, authDeps))
     .then(() => deps.onAuthChanged?.(cfg.id))
     .catch(onFlowError);
-  return { mode: "device", user_code, verification_url };
+  return { provider: cfg.id, mode: "device", user_code, verification_url };
 }
 
 /** `oauth_status {}` — the status-only mirror (provider/account_label/timestamps)
@@ -146,10 +150,12 @@ export function handleOAuthStatus(
 export function handleOAuthSignout(
   args: { provider?: unknown },
   deps: OAuthBridgeDeps = {},
-): { ok: true } {
+): { ok: true; provider: string } {
   const cfg = resolveProvider(args.provider, deps);
   const doClear = deps.clearOAuth ?? clearOAuth;
   doClear(cfg.id, deps.codeProviderAuthDeps ?? {});
   deps.onAuthChanged?.(cfg.id);
-  return { ok: true };
+  // `provider` is echoed so the panel routes this ack to the right row (see
+  // OAuthBeginResult.provider) — a signout can overlap a begin on another row.
+  return { ok: true, provider: cfg.id };
 }

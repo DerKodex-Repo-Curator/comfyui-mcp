@@ -2367,7 +2367,11 @@ export async function runPanelOrchestrator(): Promise<void> {
         })
         .catch((err) => {
           const message = err instanceof Error ? err.message : String(err);
-          bridge.push({ type: "ack", ok: false, kind: "oauth_begin", message }, tabId);
+          // Echo the requested provider on the failure ack too, so the panel
+          // routes the error to the row that asked (correlation) rather than
+          // guessing "last-clicked". provider may be undefined for a malformed
+          // request; the panel falls back to single-pending in that case.
+          bridge.push({ type: "ack", ok: false, kind: "oauth_begin", ...(provider ? { provider } : {}), message }, tabId);
           logger.warn(`[panel-orchestrator] tab ${tabId.slice(0, 8)} oauth_begin ${provider ?? "?"} refused: ${message}`);
         });
       return;
@@ -2401,7 +2405,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         logger.info(`[panel-orchestrator] tab ${tabId.slice(0, 8)} oauth_signout ${provider}`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        bridge.push({ type: "ack", ok: false, kind: "oauth_signout", message }, tabId);
+        // Echo provider on failure too (correlation) — see oauth_begin above.
+        bridge.push({ type: "ack", ok: false, kind: "oauth_signout", ...(provider ? { provider } : {}), message }, tabId);
       }
       return;
     }

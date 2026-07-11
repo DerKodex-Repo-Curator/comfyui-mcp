@@ -148,6 +148,42 @@ describe("device-code", () => {
     expect(calls).toBe(2);
   });
 
+  it("honors slow_down (grows interval) then succeeds", async () => {
+    let calls = 0;
+    const fetchFn = vi.fn(async () => {
+      calls++;
+      if (calls < 2) return new Response(JSON.stringify({ error: "slow_down" }), { status: 200 });
+      return new Response(JSON.stringify({ access_token: "ghu_X", token_type: "bearer" }), { status: 200 });
+    });
+    const tokens = await pollDeviceToken(dcfg, "DC", { fetch: fetchFn as any, now: () => 0 });
+    expect(tokens.access_token).toBe("ghu_X");
+    expect(calls).toBe(2);
+  });
+
+  it("throws on expiry instead of looping to the cap", async () => {
+    let calls = 0;
+    // now() reads 0 first (deadline = 15min), then jumps past it — so the loop
+    // terminates via the expiry guard after a couple of iterations, not at 1000.
+    let reads = 0;
+    const now = () => (reads++ === 0 ? 0 : 20 * 60_000);
+    const fetchFn = vi.fn(async () => {
+      calls++;
+      return new Response(JSON.stringify({ error: "authorization_pending" }), { status: 200 });
+    });
+    await expect(pollDeviceToken(dcfg, "DC", { fetch: fetchFn as any, now })).rejects.toThrow(/expired/i);
+    expect(calls).toBeLessThanOrEqual(3); // nowhere near the 1000 loop cap
+  });
+
+  it("stops on a terminal error on the first response (no retry)", async () => {
+    let calls = 0;
+    const fetchFn = vi.fn(async () => {
+      calls++;
+      return new Response(JSON.stringify({ error: "access_denied" }), { status: 200 });
+    });
+    await expect(pollDeviceToken(dcfg, "DC", { fetch: fetchFn as any, now: () => 0 })).rejects.toThrow(/access_denied/i);
+    expect(calls).toBe(1);
+  });
+
   it("copilot registry entry is experimental", async () => {
     const { OAUTH_PROVIDERS } = await import("./oauth-flow.js");
     expect(OAUTH_PROVIDERS.copilot.experimental).toBe(true);

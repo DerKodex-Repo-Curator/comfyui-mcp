@@ -265,6 +265,7 @@ export async function pollDeviceToken(
       }).toString(),
       signal: AbortSignal.timeout(30_000),
     });
+    if (!res.ok) throw new ValidationError(`${cfg.label} device poll failed (${res.status}): ${redactTokens(await res.text()).slice(0, 200)}`);
     const j = JSON.parse(await res.text()) as Record<string, unknown>;
     const access = String(j.access_token ?? "").trim();
     if (access) {

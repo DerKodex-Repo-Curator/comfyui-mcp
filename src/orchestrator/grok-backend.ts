@@ -60,6 +60,7 @@
 
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
+import { randomUUID } from "node:crypto";
 import { logger } from "../utils/logger.js";
 import {
   type AgentBackend,
@@ -70,6 +71,14 @@ import {
   GROK_CAPABILITIES,
 } from "./agent-backend.js";
 import type { ImageRef } from "./panel-agent.js";
+import {
+  resolveGrokOAuth,
+  type CodeProviderAuthDeps,
+  type GrokOAuthCredentials,
+} from "../services/code-provider-auth.js";
+import { OAUTH_PROVIDERS, assertAllowedTokenHost } from "../services/oauth-flow.js";
+import { OllamaBackend } from "./ollama-backend.js";
+import { resolvePrompt } from "../services/prompt-overrides.js";
 
 function msgOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -474,16 +483,39 @@ export interface GrokBackendDeps {
    * system/context preamble; later turns send plain text.
    */
   systemAppend?: string;
+  /**
+   * Test seam: override how the direct-token OAuth credentials are resolved
+   * (defaults to `resolveGrokOAuth` from code-provider-auth.ts). Threaded through
+   * to the internal `GrokDirectBackend` too, so the mode-decision probe and the
+   * live token refresh both go through the same injected resolver.
+   */
+  resolveGrokOAuth?: (deps?: CodeProviderAuthDeps) => Promise<GrokOAuthCredentials>;
 }
 
 /**
  * The Gemini CLI ACP adapter. One instance per PanelAgent; it holds the live ACP
  * client + current session id and re-opens on each `run()`.
+ *
+ * DIRECT-TOKEN SELECTION (Task 6): this class is also the public facade used
+ * everywhere (`new GrokBackend(deps)`, wired in orchestrator/index.ts). On the
+ * FIRST call to any AgentBackend method it decides — once, cached for the life of
+ * this instance — whether `~/.grok/auth.json` holds a usable OAuth token
+ * (`resolveGrokOAuth`, mirroring `resolveOpenAICodexOAuth`'s resolve+refresh). If
+ * so, EVERY call delegates to an internal `GrokDirectBackend` (a Responses-style
+ * HTTP adapter hitting `https://api.x.ai/v1`, reusing the same 6-tool router as
+ * Ollama/ChatGPT — see below). If the token file is absent, unreadable, or its
+ * refresh fails, the decision is "no" and this class's OWN ACP/CLI body below
+ * runs exactly as before — NO behavior change on that path. The Grok CLI thus
+ * becomes optional: only needed when no in-panel OAuth sign-in has happened.
  */
 export class GrokBackend implements AgentBackend {
   readonly id = "grok" as const;
   readonly capabilities = GROK_CAPABILITIES;
   private deps: GrokBackendDeps;
+  /** Memoized mode decision: resolves to a live GrokDirectBackend when a usable
+   *  OAuth token was found, or `null` to mean "use this class's own ACP body".
+   *  Decided at most once per instance (see the class doc above). */
+  private modePromise: Promise<GrokDirectBackend | null> | null = null;
   private client: AcpClient | null = null;
   /** The client an in-flight prepare() is spinning up, tracked so a concurrent
    *  close() can tear it down before it's published (P0-A). */
@@ -511,6 +543,37 @@ export class GrokBackend implements AgentBackend {
   constructor(deps: GrokBackendDeps = {}) {
     this.deps = deps;
     this.model = deps.model;
+  }
+
+  /**
+   * Decide ONCE (memoized) whether a direct OAuth token is usable: probes
+   * `resolveGrokOAuth` (or the injected test seam) and, on success, builds the
+   * `GrokDirectBackend` that every AgentBackend method below will delegate to.
+   * On ANY failure (no `~/.grok/auth.json`, unreadable, expired-with-no-refresh,
+   * refresh network error, wrong-shape file) it caches `null`, meaning "fall
+   * back to this class's own ACP/CLI body" — the probe itself does no spawning
+   * and no network call beyond the token endpoint, so a missing/foreign
+   * `~/.grok/auth.json` (e.g. the Grok CLI's OWN native login, a different JSON
+   * shape) is indistinguishable from "not signed in" and correctly falls back.
+   */
+  private resolveMode(): Promise<GrokDirectBackend | null> {
+    if (!this.modePromise) {
+      const resolveOAuth = this.deps.resolveGrokOAuth ?? resolveGrokOAuth;
+      this.modePromise = resolveOAuth()
+        .then(
+          () =>
+            new GrokDirectBackend({
+              cwd: this.deps.cwd,
+              model: this.deps.model,
+              comfyuiUrl: this.deps.comfyuiUrl,
+              mcpServers: this.deps.mcpServers,
+              systemAppend: this.deps.systemAppend,
+              resolveGrokOAuth: this.deps.resolveGrokOAuth,
+            }),
+        )
+        .catch(() => null);
+    }
+    return this.modePromise;
   }
 
   /**
@@ -568,6 +631,11 @@ export class GrokBackend implements AgentBackend {
    */
   async prepare(): Promise<void> {
     if (this.disposed) throw new Error("grok backend is closed.");
+    const direct = await this.resolveMode();
+    if (direct) {
+      await direct.prepare?.();
+      return;
+    }
     if (this.client) return;
     const { cmd, args, useShell } = this.resolveSpawn();
     const cwd = this.deps.cwd ?? process.cwd();
@@ -681,6 +749,11 @@ export class GrokBackend implements AgentBackend {
    * IS the turn-gate).
    */
   async *run(opts: BackendStartOptions): AsyncGenerator<AgentEvent> {
+    const direct = await this.resolveMode();
+    if (direct) {
+      yield* direct.run(opts);
+      return;
+    }
     // MODEL PRECEDENCE (P1): apply the panel-selected model BEFORE prepare() so the
     // FIRST spawn uses it (the model is spawn-pinned via `--model`; preparing first
     // would spawn the wrong model). PanelAgent.start() usually passes opts.model =
@@ -989,6 +1062,11 @@ export class GrokBackend implements AgentBackend {
    *  (notification). The in-flight session/prompt then resolves with
    *  stopReason:"cancelled", which the run-turn path turns into a terminal result. */
   async interrupt(): Promise<void> {
+    const direct = await this.resolveMode();
+    if (direct) {
+      await direct.interrupt();
+      return;
+    }
     const client = this.client;
     if (!client || !this.sessionId) return;
     try {
@@ -1006,18 +1084,26 @@ export class GrokBackend implements AgentBackend {
    *  If the backend hasn't spawned yet, the first prepare() simply uses the new
    *  model. Ignores non-Gemini ids (PanelAgent may pass the Claude panel model). */
   async setModel(model: string): Promise<void> {
+    const direct = await this.resolveMode();
+    if (direct) {
+      await direct.setModel?.(model);
+      return;
+    }
     if (!isGrokModel(model)) return;
     this.model = model;
     this.spawnSpec = null; // next spawn rebuilds argv with the new --model
   }
 
   /**
-   * Gemini model enumeration. ACP exposes no model catalog, so we surface a static
-   * set (the current Gemini family); the panel picker degrades gracefully on an
-   * empty list. No effort metadata (Gemini uses a thinking BUDGET, not a discrete
-   * effort scale) → the panel hides the effort dropdown.
+   * Model enumeration. In direct-token mode this delegates to GrokDirectBackend
+   * (a live GET /v1/models probe). In ACP mode, ACP exposes no model catalog, so
+   * we surface a static set (the current Grok CLI composer family); the panel
+   * picker degrades gracefully on an empty list. No effort metadata (Grok's ACP
+   * mode has no discrete effort scale) → the panel hides the effort dropdown.
    */
   async listModels(): Promise<ModelChoice[]> {
+    const direct = await this.resolveMode();
+    if (direct) return direct.listModels();
     return GROK_MODELS;
   }
 
@@ -1027,6 +1113,11 @@ export class GrokBackend implements AgentBackend {
    *  interrupt() is a no-op when idle, so without this the child is orphaned. */
   async close(): Promise<void> {
     this.disposed = true; // tripwire FIRST (an in-flight prepare() bails) (P0-A)
+    const direct = await this.resolveMode();
+    if (direct) {
+      await direct.close?.();
+      return;
+    }
     const client = this.client;
     const preparing = this.preparingClient;
     this.client = null;
@@ -1039,6 +1130,452 @@ export class GrokBackend implements AgentBackend {
     if (preparing && preparing !== client) {
       preparing.notificationHandler = null;
       await preparing.close().catch(() => {});
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Direct-token Grok (xAI) backend — Task 6 of the in-panel OAuth plan.
+//
+// Hits `https://api.x.ai/v1/responses` with the OAuth bearer resolved from
+// `~/.grok/auth.json` (resolveGrokOAuth), instead of driving the Grok CLI over
+// ACP. This reuses the SAME Responses-style SSE adapter SHAPE as
+// chatgpt-oauth-backend.ts's Codex adapter (prior research judged xAI's public
+// API to be codex_responses-adapter compatible) and the SAME 6-tool router as
+// Ollama/ChatGPT (OllamaBackend.dispatch/connectTools/buildModelTools) — a
+// small model-agnostic HTTP endpoint has no agent harness of its own, so this
+// backend owns the whole tool loop the way Ollama/ChatGPT already do.
+//
+// DIVERGENCES from the Codex adapter (xAI is NOT a re-skinned ChatGPT):
+//   - No `chatgpt-account-id` header — that's OpenAI/ChatGPT account-routing
+//     plumbing with no xAI equivalent; the bearer token alone identifies the
+//     account.
+//   - Every outbound request is host-allowlist-checked (assertAllowedTokenHost
+//     against OAUTH_PROVIDERS.grok.apiHostAllowlist, i.e. `x.ai`/`*.x.ai`)
+//     before the bearer is attached, and any error response body is REDACTED
+//     (redactGrokTokens) before it can reach a thrown message or a log line —
+//     the access token itself is never logged anywhere in this path.
+//   - Model slug + exact endpoint sub-path are UNVERIFIED against the live xAI
+//     API (no network access at authoring time, and no Task-1 research
+//     artifact survived for this session to consult). GROK_XAI_DEFAULT_MODEL
+//     reuses the ACP CLI's existing composer alias as a placeholder rather
+//     than inventing a new model string; listModels() prefers a live
+//     `GET /v1/models` probe over any hardcoded catalog. CONFIRM both against
+//     xAI's docs (or override via COMFYUI_MCP_GROK_XAI_MODEL) before relying
+//     on this path in production — see the task-6 report for the flagged risk.
+// ---------------------------------------------------------------------------
+
+export const GROK_XAI_API_BASE = "https://api.x.ai/v1";
+const GROK_XAI_RESPONSES_URL = `${GROK_XAI_API_BASE}/responses`;
+const GROK_XAI_MODELS_URL = `${GROK_XAI_API_BASE}/models`;
+const GROK_MAX_TOOL_ROUNDS = 32;
+
+/** `x.ai` / `*.x.ai` — the same allowlist the OAuth engine already enforces for
+ *  the Grok token endpoint (oauth-flow.ts), reused here for the DATA API calls. */
+function grokApiHostAllowlist(): string[] {
+  return OAUTH_PROVIDERS.grok?.apiHostAllowlist ?? ["x.ai"];
+}
+
+// UNVERIFIED against the live xAI model catalog (see the divergences note
+// above) — reuses the ACP CLI's default composer alias as a safe, non-invented
+// placeholder rather than guessing a raw-API model slug. Override with
+// COMFYUI_MCP_GROK_XAI_MODEL once confirmed, or rely on listModels()'s live
+// /v1/models probe to surface the account's real slugs.
+export const GROK_XAI_DEFAULT_MODEL =
+  process.env.COMFYUI_MCP_GROK_XAI_MODEL?.trim() || GROK_DEFAULT_MODEL;
+
+export const GROK_XAI_SYSTEM_PROMPT = [
+  "You are the ComfyUI agent in a sidebar panel. Answer in Markdown.",
+  "",
+  "You have exactly six tools:",
+  "- list_tools / describe_tool / call_tool — headless ComfyUI server.",
+  "- panel_list_tools / panel_describe_tool / panel_call_tool — live canvas.",
+  "",
+  "Describe a tool before its first call. Finish tasks by running tools, not inventing results.",
+].join("\n");
+
+/** Mirrors oauth-flow.ts's private `redactTokens` (kept local so this task's
+ *  only edit surface is grok-backend.ts) — strips token-shaped material from
+ *  provider error text before it can reach a thrown message or a log line. */
+function redactGrokTokens(s: string): string {
+  return s
+    .replace(
+      /("?(?:access_token|refresh_token|id_token|code|code_verifier|client_secret)"?\s*[:=]\s*"?)[^"'\s,&}]+/gi,
+      "$1<redacted>",
+    )
+    .replace(/\b(ghu_|gho_|ya29\.|sk-)[A-Za-z0-9._-]+/g, "$1<redacted>")
+    .replace(/\bBearer\s+[A-Za-z0-9._-]+/gi, "Bearer <redacted>");
+}
+
+type GrokTurnMessage = {
+  role: "user" | "assistant" | "tool";
+  content: string;
+  tool_calls?: Array<{ id: string; name: string; arguments: string }>;
+  tool_call_id?: string;
+};
+
+type GrokResponsesInputItem = Record<string, unknown>;
+
+/** OpenAI-tool-def → Responses `tools[]` shape (identical to Codex's toResponsesTools). */
+function grokToolsToResponses(tools: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return tools.map((t) => {
+    const fn = (t.function ?? t) as { name?: string; description?: string; parameters?: unknown };
+    return {
+      type: "function",
+      name: fn.name,
+      description: fn.description ?? "",
+      parameters: fn.parameters ?? { type: "object", properties: {} },
+    };
+  });
+}
+
+/** In-memory turn history → Responses `input[]` items (identical shaping to
+ *  Codex's historyToCodexInput — same Responses `input` schema). */
+function grokHistoryToResponsesInput(messages: GrokTurnMessage[]): GrokResponsesInputItem[] {
+  const items: GrokResponsesInputItem[] = [];
+  for (const m of messages) {
+    if (m.role === "user") {
+      items.push({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: m.content }],
+      });
+      continue;
+    }
+    if (m.role === "assistant") {
+      if (m.tool_calls?.length) {
+        for (const tc of m.tool_calls) {
+          items.push({
+            type: "function_call",
+            call_id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments || "{}",
+          });
+        }
+      }
+      if (m.content.trim()) {
+        items.push({
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: m.content }],
+        });
+      }
+      continue;
+    }
+    if (m.role === "tool" && m.tool_call_id) {
+      items.push({
+        type: "function_call_output",
+        call_id: m.tool_call_id,
+        output: m.content,
+      });
+    }
+  }
+  return items;
+}
+
+const GROK_DIRECT_CAPABILITIES = {
+  persistentChannel: true,
+  streamingDeltas: true,
+  interruptMidTurn: true,
+  forkAtAnchor: false,
+  inProcessMcp: false,
+  modelEnumeration: true, // live GET /v1/models probe
+  slashCommands: false,
+  hooks: false,
+  vision: false, // the 6-tool router is text-only (mirrors Ollama/ChatGPT); NeutralTurn.images unused here
+};
+
+/** Direct-token Grok (xAI) backend — see the module-level comment above for the
+ *  full rationale and the divergences from the Codex adapter it mirrors. */
+export class GrokDirectBackend extends OllamaBackend {
+  readonly id = "grok" as const;
+  readonly capabilities = GROK_DIRECT_CAPABILITIES;
+
+  private accessToken = "";
+  private grokTurnHistory: GrokTurnMessage[] = [];
+  private grokSessionId: string | null = null;
+  private resolveOAuth: (deps?: CodeProviderAuthDeps) => Promise<GrokOAuthCredentials>;
+
+  constructor(
+    deps: Pick<GrokBackendDeps, "cwd" | "model" | "comfyuiUrl" | "mcpServers" | "systemAppend"> & {
+      resolveGrokOAuth?: (deps?: CodeProviderAuthDeps) => Promise<GrokOAuthCredentials>;
+    } = {},
+  ) {
+    super({
+      cwd: deps.cwd,
+      comfyuiUrl: deps.comfyuiUrl,
+      mcpServers: deps.mcpServers,
+      systemAppend: deps.systemAppend,
+      backendId: "grok",
+      api: "openai",
+      host: "https://unused", // never dialed — every request goes straight to GROK_XAI_RESPONSES_URL
+      model: deps.model ?? GROK_XAI_DEFAULT_MODEL,
+    });
+    this.model = deps.model ?? GROK_XAI_DEFAULT_MODEL;
+    this.resolveOAuth = deps.resolveGrokOAuth ?? resolveGrokOAuth;
+  }
+
+  override async prepare(): Promise<void> {
+    if (this.disposed) throw new Error("grok backend is closed.");
+    if (this.prepared) return;
+    const creds = await this.resolveOAuth();
+    this.accessToken = creds.accessToken;
+    await this.connectTools();
+    this.prepared = true;
+    logger.info(
+      `[grok-backend] ready (direct xAI OAuth, model ${this.model}, ${this.comfyTools.length} comfyui meta-tools, ${this.panelTools.length} panel tools behind the router)`,
+    );
+  }
+
+  private async *xaiResponsesStream(
+    instructions: string,
+    input: GrokResponsesInputItem[],
+    tools: Array<Record<string, unknown>>,
+    signal: AbortSignal,
+    onActivity?: () => void,
+  ): AsyncGenerator<
+    AgentEvent,
+    {
+      content: string;
+      toolCalls: Array<{ id: string; name: string; arguments: string }>;
+      usage?: Record<string, number>;
+      streamId: string | null;
+    }
+  > {
+    assertAllowedTokenHost(GROK_XAI_RESPONSES_URL, grokApiHostAllowlist());
+    const keepalive = onActivity ? setInterval(onActivity, 5000) : null;
+    let res: Response;
+    try {
+      res = await fetch(GROK_XAI_RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          authorization: `Bearer ${this.accessToken}`,
+        },
+        body: JSON.stringify({
+          model: this.model,
+          instructions,
+          input,
+          tools: grokToolsToResponses(tools),
+          stream: true,
+          store: false,
+        }),
+        signal,
+      });
+    } finally {
+      if (keepalive) clearInterval(keepalive);
+    }
+    if (!res.ok || !res.body) {
+      const bodyText = await res.text().catch(() => "");
+      throw new Error(`xAI Responses http ${res.status}: ${redactGrokTokens(bodyText).slice(0, 400)}`);
+    }
+
+    let content = "";
+    const partial = new Map<string, { id: string; name: string; args: string }>();
+    let usage: Record<string, number> | undefined;
+    let streamOpen = false;
+    const streamId = randomUUID();
+    let buffer = "";
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      onActivity?.();
+      buffer += decoder.decode(value, { stream: true });
+      let sep: number;
+      while ((sep = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        let eventType = "";
+        let data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) eventType = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data || data === "[DONE]") continue;
+        let payload: Record<string, unknown>;
+        try {
+          payload = JSON.parse(data) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+
+        const type = eventType || String(payload.type ?? "");
+        if (type === "response.output_text.delta") {
+          const delta = String(payload.delta ?? "");
+          if (delta) {
+            if (!streamOpen) {
+              streamOpen = true;
+              yield { type: "stream_start", id: streamId };
+            }
+            content += delta;
+            yield { type: "assistant_delta", text: delta };
+          }
+        }
+
+        if (type === "response.function_call_arguments.delta") {
+          const itemId = String(payload.item_id ?? payload.call_id ?? "call");
+          const slot = partial.get(itemId) ?? { id: itemId, name: "", args: "" };
+          if (payload.name) slot.name = String(payload.name);
+          if (payload.arguments) slot.args += String(payload.arguments);
+          partial.set(itemId, slot);
+        }
+
+        if (type === "response.output_item.done") {
+          const item = (payload.item ?? payload) as Record<string, unknown>;
+          if (item.type === "function_call") {
+            const id = String(item.call_id ?? item.id ?? randomUUID());
+            partial.set(id, {
+              id,
+              name: String(item.name ?? ""),
+              args: String(item.arguments ?? "{}"),
+            });
+          }
+        }
+
+        if (type === "response.completed") {
+          const u =
+            (payload.response as { usage?: Record<string, number> } | undefined)?.usage ??
+            (payload.usage as Record<string, number> | undefined);
+          if (u) {
+            usage = {
+              input_tokens: Number(u.input_tokens ?? 0),
+              output_tokens: Number(u.output_tokens ?? 0),
+            };
+          }
+        }
+      }
+    }
+
+    if (streamOpen) yield { type: "stream_end" };
+    const toolCalls = [...partial.values()]
+      .filter((t) => t.name)
+      .map((t) => ({ id: t.id, name: t.name, arguments: t.args || "{}" }));
+    return { content, toolCalls, usage, streamId: streamOpen ? streamId : null };
+  }
+
+  override async *run(opts: BackendStartOptions): AsyncIterable<AgentEvent> {
+    await this.prepare();
+    if (opts.model && isGrokModel(opts.model)) this.model = opts.model;
+
+    const fresh = !this.grokSessionId || (opts.resume && opts.resume !== this.grokSessionId);
+    this.grokSessionId = opts.resume ?? this.grokSessionId ?? `grok-${randomUUID()}`;
+    if (fresh) this.grokTurnHistory = [];
+    yield { type: "session", sessionId: this.grokSessionId, model: this.model };
+
+    const instructions = [resolvePrompt("backend.grok", GROK_XAI_SYSTEM_PROMPT), this.deps.systemAppend]
+      .filter(Boolean)
+      .join("\n\n");
+
+    for await (const turn of opts.channel) {
+      yield* this.runGrokTurn(turn, instructions, opts);
+    }
+  }
+
+  private async *runGrokTurn(
+    turn: NeutralTurn,
+    instructions: string,
+    opts: BackendStartOptions,
+  ): AsyncIterable<AgentEvent> {
+    const abort = new AbortController();
+    this.turnAbort = abort;
+    const tools = this.buildModelTools();
+    this.grokTurnHistory.push({ role: "user", content: turn.text });
+
+    let resultEmitted = false;
+    try {
+      for (let round = 0; round < GROK_MAX_TOOL_ROUNDS; round++) {
+        const stream = this.xaiResponsesStream(
+          instructions,
+          grokHistoryToResponsesInput(this.grokTurnHistory),
+          tools,
+          abort.signal,
+          opts.onActivity,
+        );
+        let content = "";
+        let toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+        let usage: Record<string, number> | undefined;
+        let streamId: string | null = null;
+        for (;;) {
+          const r = await stream.next();
+          if (r.done) {
+            ({ content, toolCalls, usage, streamId } = r.value);
+            break;
+          }
+          yield r.value;
+        }
+
+        if (!toolCalls.length) {
+          this.grokTurnHistory.push({ role: "assistant", content });
+          yield { type: "assistant", text: content, id: streamId ?? undefined, usage };
+          yield { type: "result", ok: true, usage };
+          resultEmitted = true;
+          return;
+        }
+
+        this.grokTurnHistory.push({ role: "assistant", content, tool_calls: toolCalls });
+        for (const tc of toolCalls) {
+          if (abort.signal.aborted) throw new Error("interrupted");
+          yield { type: "tool_call", name: tc.name, phase: "start", detail: tc.arguments };
+          const { text, isError } = await this.dispatch(tc.name, tc.arguments);
+          opts.onActivity?.();
+          yield { type: "tool_call", name: tc.name, phase: "end", detail: { isError } };
+          this.grokTurnHistory.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: text.slice(0, 16000),
+          });
+        }
+      }
+      yield {
+        type: "assistant",
+        text: "(stopped: too many tool rounds in one turn — ask me to continue)",
+      };
+      yield { type: "result", ok: false, subtype: "max_tool_rounds" };
+      resultEmitted = true;
+    } catch (err) {
+      const interrupted = abort.signal.aborted;
+      if (!interrupted) {
+        logger.warn(`[grok-backend] direct-token turn failed: ${msgOf(err)}`);
+        yield { type: "error", message: `grok backend: ${msgOf(err)}` };
+        yield {
+          type: "assistant",
+          text: `⚠️ The model request failed: ${msgOf(err).slice(0, 400)}`,
+        };
+      }
+      if (!resultEmitted) {
+        yield { type: "result", ok: false, subtype: interrupted ? "interrupted" : "error" };
+      }
+    } finally {
+      if (this.turnAbort === abort) this.turnAbort = null;
+    }
+  }
+
+  override async setModel(model: string): Promise<void> {
+    if (isGrokModel(model)) this.model = model;
+  }
+
+  /** Prefer a live account probe over any hardcoded catalog (the exact xAI
+   *  model slugs are unverified — see the module-level comment). Falls back to
+   *  just the configured model id if the probe fails (offline, wrong scope, …). */
+  override async listModels(): Promise<ModelChoice[]> {
+    try {
+      assertAllowedTokenHost(GROK_XAI_MODELS_URL, grokApiHostAllowlist());
+      const res = await fetch(GROK_XAI_MODELS_URL, {
+        headers: { authorization: `Bearer ${this.accessToken}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return [{ id: this.model, label: this.model }];
+      const data = (await res.json()) as { data?: Array<{ id?: string }> };
+      const ids = (data.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
+      if (!ids.length) return [{ id: this.model, label: this.model }];
+      const rest = ids.filter((id) => id !== this.model).slice(0, 40);
+      return [this.model, ...rest].map((id) => ({ id, label: id }));
+    } catch {
+      return [{ id: this.model, label: this.model }];
     }
   }
 }

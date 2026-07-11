@@ -109,6 +109,15 @@ export class UiBridge {
   /** Tab ids that ever connected as a headless (mobile/remote) client — kept so
    *  `isHeadless` stays true across a disconnect (see isHeadless). */
   private readonly headlessSeen = new Set<string>();
+  private seenTabs = new Set<string>(); // tabIds ever announced — dedup connect logs across reconnect churn
+  /** Frames pushed at a tab with NO live connection, buffered for replay when that
+   *  tab re-hellos. Per-workflow sessions re-target ONE socket between workflow tab
+   *  ids, so a backgrounded workflow's agent output would otherwise be dropped on
+   *  the floor and its finished turn lost to the user. Complements the send()-path
+   *  `mailbox` (which buffers show_media command deliveries): this one buffers
+   *  push()-path frames (agent turn output). Bounded per tab. */
+  private missedFrames = new Map<string, Record<string, unknown>[]>();
+  private static readonly MAX_MISSED_FRAMES = 100;
   private pending = new Map<string, Pending>();
   private portInUse = false;
   private bindRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -396,6 +405,13 @@ export class UiBridge {
 
       // Hello: register (or refresh) this connection under its tab id.
       if (msg.type === "hello" && typeof msg.tab_id === "string") {
+        // A single socket may RE-HELLO under a new tab id when the user switches
+        // ComfyUI workflow tabs (per-workflow sessions). Drop this socket's PRIOR
+        // tab mapping so a background agent's push() to the old tab can't leak into
+        // the newly-targeted view (frames carry no tab_id — the socket is the tab).
+        if (tabId && tabId !== msg.tab_id && this.conns.get(tabId)?.sock === sock) {
+          this.conns.delete(tabId);
+        }
         tabId = msg.tab_id;
         const existing = this.conns.get(tabId);
         if (existing && existing.sock !== sock) {
@@ -414,9 +430,33 @@ export class UiBridge {
           headless: (msg as { headless?: unknown }).headless === true,
         });
         if ((msg as { headless?: unknown }).headless === true) this.headlessSeen.add(tabId);
-        logger.info(
-          `[ui-bridge] panel tab connected: ${tabId.slice(0, 8)} (“${this.conns.get(tabId)?.title}”) — ${this.conns.size} tab(s) total`,
-        );
+        // Log a real connect ONCE per tab id. A reconnect/ping-pong loop (a new
+        // socket every couple seconds — e.g. two browser contexts sharing one tab
+        // id) would otherwise spam this; dedup by tab id so churn stays at debug.
+        if (!this.seenTabs.has(tabId)) {
+          this.seenTabs.add(tabId);
+          logger.info(
+            `[ui-bridge] panel tab connected: ${tabId.slice(0, 8)} (“${this.conns.get(tabId)?.title}”) — ${this.conns.size} tab(s) total`,
+          );
+        } else {
+          logger.debug(`[ui-bridge] tab ${tabId.slice(0, 8)} (re)hello`);
+        }
+        // Replay anything this tab's agent produced while the tab had no live
+        // connection (its socket was re-helloed to another workflow). The panel
+        // swaps to this workflow's thread synchronously before these frames can be
+        // processed, so they render + record into the RIGHT conversation.
+        const missed = this.missedFrames.get(tabId);
+        if (missed?.length) {
+          this.missedFrames.delete(tabId);
+          for (const f of missed) {
+            try {
+              sock.send(JSON.stringify(f));
+            } catch {
+              break; // socket died mid-flush — frames stay lost, next turn recovers
+            }
+          }
+          logger.debug(`[ui-bridge] replayed ${missed.length} missed frame(s) to tab ${tabId.slice(0, 8)}`);
+        }
         // Deliver anything that finished while this tab was away.
         this.flushMailbox(tabId);
         this.onPanelMessage?.(msg as PanelEvent);
@@ -644,7 +684,14 @@ export class UiBridge {
       try {
         targets = [this.resolveTarget(tabId)];
       } catch {
-        return 0; // tab not connected — nothing to push to
+        // Tab not connected (e.g. the user switched to another workflow and the
+        // shared socket re-helloed under that workflow's id). Buffer for replay on
+        // this tab's next hello, so a backgrounded agent's turn isn't lost.
+        const q = this.missedFrames.get(tabId) ?? [];
+        q.push(frame);
+        if (q.length > UiBridge.MAX_MISSED_FRAMES) q.splice(0, q.length - UiBridge.MAX_MISSED_FRAMES);
+        this.missedFrames.set(tabId, q);
+        return 0;
       }
     } else {
       targets = Array.from(this.conns.values());

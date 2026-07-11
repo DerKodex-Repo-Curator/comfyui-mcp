@@ -439,6 +439,18 @@ describe("panel-tools: panel_graph_outline (compact text map)", () => {
   });
 });
 
+describe("panel-tools: panel_audit_prompt_director", () => {
+  it("is read-only, takes no args, and forwards the dedicated graph audit command", async () => {
+    const def = defByName("panel_audit_prompt_director");
+    expect(Object.keys(def.schema)).toEqual([]);
+    expect(def.description).toContain("READ-ONLY");
+
+    const { ctx, calls } = makeFakeCtx();
+    await def.handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "graph_prompt_director_audit" });
+  });
+});
+
 describe("panel-tools: panel_subgraph_group (wrap a group into a subgraph)", () => {
   it("is registered and takes a string|number group ref", () => {
     expect(buildPanelToolDefs().map((d) => d.name)).toContain("panel_subgraph_group");

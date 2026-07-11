@@ -26,6 +26,7 @@ import type {
 } from "./agent-backend.js";
 import { OLLAMA_CAPABILITIES } from "./agent-backend.js";
 import type { GeminiMcpServerSpec } from "./gemini-backend.js";
+import { resolvePrompt } from "../services/prompt-overrides.js";
 
 type McpToolInfo = { name: string; description?: string; inputSchema?: unknown };
 type McpCallResult = { isError?: boolean; content?: Array<{ type: string; text?: string }> };
@@ -133,7 +134,7 @@ const MAX_TOOL_ROUNDS = 32;
  * is short, router-shaped, and (deliberately, for local models) does NOT carry
  * the NSFW consent-gate flow — only the absolute hard limits.
  */
-const OLLAMA_SYSTEM_PROMPT = [
+export const OLLAMA_SYSTEM_PROMPT = [
   "You are the ComfyUI agent in a sidebar panel, driving the user's live ComfyUI graph and server. Answer in normal Markdown.",
   "",
   "You have exactly six tools:",
@@ -714,7 +715,7 @@ export class OllamaBackend implements AgentBackend {
     if (fresh) {
       // deps.systemAppend (the frontier panel prompt) is intentionally NOT
       // used — see OLLAMA_SYSTEM_PROMPT.
-      this.history = [{ role: "system", content: OLLAMA_SYSTEM_PROMPT }];
+      this.history = [{ role: "system", content: resolvePrompt("backend.ollama", OLLAMA_SYSTEM_PROMPT) }];
     }
     yield { type: "session", sessionId: this.sessionId, model: this.model };
 

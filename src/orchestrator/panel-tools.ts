@@ -379,6 +379,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (_args, ctx) => ctx.call({ cmd: "graph_outline" }),
     ),
     def(
+      "panel_audit_prompt_director",
+      "Audit Prompt Director on the LIVE canvas without changing it. Correlates Prompt Director/Producer/Auto/Context/Reference/Critic widget values and wiring with detected model-loader filenames, every LoRA loader's actual model/CLIP strengths, and Prompt Director's latest sanitized runtime edit plan, resolved Model Explorer metadata, warnings, exact final prompt, and critic verdict. Returns observations plus proposed panel_set_widget changes with requires_confirmation=true. Call this when Prompt Director nodes are present, before saying the model/LoRA setup is correct, or when an edit prompt is ignored. READ-ONLY: present useful findings to the user and ask before applying any recommendation unless they already explicitly asked you to fix it.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_prompt_director_audit" }),
+    ),
+    def(
       "panel_get_subgraph",
       "Read INSIDE a subgraph node on the user's open graph: ids, types, widget values, and connections of its inner nodes. Use after panel_graph_outline / panel_query_graph shows a node with is_subgraph=true. Read-only.",
       { node_id: z.number().int().describe("Subgraph node id (is_subgraph=true).") },

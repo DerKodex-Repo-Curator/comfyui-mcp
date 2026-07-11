@@ -136,6 +136,70 @@ describe("backendReadiness", () => {
   });
 });
 
+describe("backendReadiness: in-panel OAuth status", () => {
+  // The readiness fns take an injectable `oauthStatus` array + `now` (ms) so a
+  // test never has to touch the real ~/.comfyui-mcp/panel-secrets.json. Status
+  // records mirror OAuthStatusRecord: { provider, account_label, obtained_at,
+  // expires_at? (unix SECONDS), experimental? }.
+  const NOW = 1_700_000_000_000; // fixed ms clock
+  const FUTURE = Math.floor(NOW / 1000) + 3600; // +1h, in seconds
+  const PAST = Math.floor(NOW / 1000) - 3600; // -1h, in seconds
+
+  it("non-expired panel OAuth entry → auth true even when CLI+file are absent", () => {
+    // Empty PATH (no CLI) + fake home with no auth.json (no native file).
+    const r = backendReadiness("codex", {
+      home: tmp,
+      now: NOW,
+      oauthStatus: [{ provider: "codex", account_label: "user@example.com", obtained_at: NOW, expires_at: FUTURE }],
+    });
+    expect(r.cli).toBe(false); // no CLI on PATH
+    expect(r.auth).toBe(true); // flipped true purely by the panel-OAuth entry
+    expect(r.ready).toBe(false); // still gated on cli for codex
+  });
+
+  it("EXPIRED panel OAuth entry does NOT flip auth on its own (falls back to CLI/file check)", () => {
+    const r = backendReadiness("grok", {
+      home: tmp,
+      now: NOW,
+      oauthStatus: [{ provider: "grok", account_label: "x@ai", obtained_at: NOW, expires_at: PAST }],
+    });
+    // No ~/.grok/auth.json in the fake home either, so the OR-fallback yields false.
+    expect(r.auth).toBe(false);
+  });
+
+  it("panel OAuth entry with NO expires_at is treated as non-expiring (auth true)", () => {
+    const r = backendReadiness("codex", {
+      home: tmp,
+      now: NOW,
+      oauthStatus: [{ provider: "codex", account_label: "user@example.com", obtained_at: NOW }],
+    });
+    expect(r.auth).toBe(true);
+  });
+
+  it("expired panel entry still yields auth true when the native CLI/file login exists (OR-fallback)", () => {
+    // The external-CLI login path must keep winning regardless of a stale mirror entry.
+    putOnPath(process.platform === "win32" ? "codex.cmd" : "codex");
+    mkdirSync(join(tmp, ".codex"), { recursive: true });
+    writeFileSync(join(tmp, ".codex", "auth.json"), "{}");
+    const r = backendReadiness("codex", {
+      home: tmp,
+      now: NOW,
+      oauthStatus: [{ provider: "codex", account_label: "stale", obtained_at: NOW, expires_at: PAST }],
+    });
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+  });
+
+  it("external-CLI login with NO panel OAuth entry still yields auth true (backward-compat)", () => {
+    putOnPath(process.platform === "win32" ? "grok.cmd" : "grok");
+    mkdirSync(join(tmp, ".grok"), { recursive: true });
+    writeFileSync(join(tmp, ".grok", "auth.json"), "{}");
+    const r = backendReadiness("grok", { home: tmp, now: NOW, oauthStatus: [] });
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+  });
+});
+
 describe("allBackendReadiness", () => {
   it("rolls up any_ready (Claude alone makes it true)", () => {
     const { backends, any_ready } = allBackendReadiness(["claude", "codex", "gemini"]);

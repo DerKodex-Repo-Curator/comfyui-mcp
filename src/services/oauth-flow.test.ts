@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { pkcePair, assertAllowedTokenHost, runLoopbackPKCE, OAUTH_PROVIDERS } from "./oauth-flow.js";
+import { beginDeviceCode, pollDeviceToken } from "./oauth-flow.js";
 import { createHash } from "node:crypto";
 
 describe("pkcePair", () => {
@@ -113,5 +114,43 @@ describe("OAUTH_PROVIDERS", () => {
     expect(g.tokenUrl).toBe("https://auth.x.ai/oauth2/token");
     expect(g.apiHostAllowlist).toContain("x.ai");
     expect(g.loopbackPort).toBe(56121);
+  });
+});
+
+const dcfg = {
+  id: "copilot" as const, label: "GitHub Copilot", kind: "device_code" as const,
+  authorizeUrl: "", tokenUrl: "https://github.com/login/oauth/access_token",
+  deviceCodeUrl: "https://github.com/login/device/code",
+  clientId: "Iv1.b507a08c87ecfe98", scopes: ["read:user"],
+  tokenFile: "/tmp/copilot.json", apiHostAllowlist: ["github.com", "githubcopilot.com"],
+  experimental: true,
+};
+
+describe("device-code", () => {
+  it("begins a device code and returns the user_code + verification url", async () => {
+    const fetchFn = vi.fn(async () =>
+      new Response(JSON.stringify({ device_code: "DC", user_code: "WXYZ-1234", verification_uri: "https://github.com/login/device", interval: 5, expires_in: 900 }), { status: 200 }));
+    const r = await beginDeviceCode(dcfg, { fetch: fetchFn as any });
+    expect(r.user_code).toBe("WXYZ-1234");
+    expect(r.verification_url).toBe("https://github.com/login/device");
+    expect(r.device_code).toBe("DC");
+  });
+
+  it("polls through authorization_pending then succeeds", async () => {
+    let calls = 0;
+    const fetchFn = vi.fn(async () => {
+      calls++;
+      if (calls < 2) return new Response(JSON.stringify({ error: "authorization_pending" }), { status: 200 });
+      return new Response(JSON.stringify({ access_token: "ghu_AT", token_type: "bearer" }), { status: 200 });
+    });
+    const tokens = await pollDeviceToken(dcfg, "DC", { fetch: fetchFn as any, now: () => 0 });
+    expect(tokens.access_token).toBe("ghu_AT");
+    expect(calls).toBe(2);
+  });
+
+  it("copilot registry entry is experimental", async () => {
+    const { OAUTH_PROVIDERS } = await import("./oauth-flow.js");
+    expect(OAUTH_PROVIDERS.copilot.experimental).toBe(true);
+    expect(OAUTH_PROVIDERS.copilot.clientId).toBe("Iv1.b507a08c87ecfe98");
   });
 });

@@ -199,6 +199,90 @@ export function runLoopbackPKCE(cfg: OAuthProviderConfig, deps: OAuthDeps = {}):
   });
 }
 
+/**
+ * Device-code step 1: request a device/user code pair from `cfg.deviceCodeUrl`.
+ * The caller shows `user_code` + `verification_url` to the user, then calls
+ * `pollDeviceToken` to wait for them to complete sign-in in their browser.
+ */
+export async function beginDeviceCode(
+  cfg: OAuthProviderConfig,
+  deps: OAuthDeps = {},
+): Promise<{ user_code: string; verification_url: string; device_code: string; interval: number; expires_in: number }> {
+  const fetchFn = deps.fetch ?? fetch;
+  if (!cfg.deviceCodeUrl) throw new ValidationError(`${cfg.label}: no device-code endpoint configured.`);
+  assertAllowedTokenHost(cfg.deviceCodeUrl, cfg.apiHostAllowlist);
+  const res = await fetchFn(cfg.deviceCodeUrl, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: cfg.clientId, scope: cfg.scopes.join(" ") }).toString(),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new ValidationError(`${cfg.label} device-code request failed (${res.status}): ${redactTokens(text).slice(0, 200)}`);
+  const j = JSON.parse(text) as Record<string, unknown>;
+  const user_code = String(j.user_code ?? "");
+  const verification_url = String(j.verification_uri ?? j.verification_url ?? "");
+  const device_code = String(j.device_code ?? "");
+  if (!user_code || !verification_url || !device_code) throw new ValidationError(`${cfg.label} device-code response incomplete.`);
+  return {
+    user_code,
+    verification_url,
+    device_code,
+    interval: typeof j.interval === "number" ? j.interval : 5,
+    expires_in: typeof j.expires_in === "number" ? j.expires_in : 900,
+  };
+}
+
+/**
+ * Device-code step 2: poll `cfg.tokenUrl` until the user completes sign-in
+ * (or expiry). Honors `authorization_pending` (keep polling at the current
+ * interval) and `slow_down` (grow the interval) per RFC 8628. When
+ * `deps.now` is injected (test mode), sleeps resolve immediately so tests
+ * don't actually wait, and the poll loop is bounded so a fixed injected
+ * clock can't spin forever.
+ */
+export async function pollDeviceToken(
+  cfg: OAuthProviderConfig,
+  deviceCode: string,
+  deps: OAuthDeps = {},
+): Promise<OAuthTokens> {
+  const fetchFn = deps.fetch ?? fetch;
+  assertAllowedTokenHost(cfg.tokenUrl, cfg.apiHostAllowlist);
+  const testMode = typeof deps.now === "function";
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, testMode ? 0 : ms));
+  const deadline = (deps.now?.() ?? Date.now()) + 15 * 60_000;
+  let intervalMs = 5000;
+  // Bounded loop so a test with a fixed injected now() can't spin forever.
+  for (let i = 0; i < 1000; i++) {
+    if ((deps.now?.() ?? Date.now()) > deadline) throw new ValidationError(`${cfg.label} device sign-in expired.`);
+    const res = await fetchFn(cfg.tokenUrl, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: cfg.clientId,
+        device_code: deviceCode,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }).toString(),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const j = JSON.parse(await res.text()) as Record<string, unknown>;
+    const access = String(j.access_token ?? "").trim();
+    if (access) {
+      return {
+        access_token: access,
+        refresh_token: j.refresh_token ? String(j.refresh_token) : undefined,
+        expires_in: typeof j.expires_in === "number" ? j.expires_in : undefined,
+        raw: j,
+      };
+    }
+    const err = String(j.error ?? "");
+    if (err === "authorization_pending") { await sleep(intervalMs); continue; }
+    if (err === "slow_down") { intervalMs += 5000; await sleep(intervalMs); continue; }
+    throw new ValidationError(`${cfg.label} device sign-in failed: ${err || "unknown error"}`);
+  }
+  throw new ValidationError(`${cfg.label} device sign-in did not complete.`);
+}
+
 const codexTokenFile = join(homedir(), ".codex", "auth.json");
 const grokTokenFile = join(homedir(), ".grok", "auth.json");
 const copilotTokenFile = join(homedir(), ".comfyui-mcp", "copilot-auth.json");
@@ -232,6 +316,20 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
     redirectPath: "/callback",
     tokenFile: grokTokenFile,
     apiHostAllowlist: ["x.ai"],
+  },
+  // copilot: device-code only (Copilot's other flows don't work outside VS Code) — EXPERIMENTAL, ToS risk.
+  copilot: {
+    id: "copilot",
+    label: "GitHub Copilot",
+    kind: "device_code",
+    authorizeUrl: "",
+    tokenUrl: "https://github.com/login/oauth/access_token",
+    deviceCodeUrl: "https://github.com/login/device/code",
+    clientId: "Iv1.b507a08c87ecfe98", // VS Code Copilot extension id — EXPERIMENTAL, ToS risk
+    scopes: ["read:user"],
+    tokenFile: copilotTokenFile,
+    apiHostAllowlist: ["github.com", "githubcopilot.com"],
+    experimental: true,
   },
 };
 

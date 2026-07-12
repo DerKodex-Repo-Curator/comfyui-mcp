@@ -1224,9 +1224,14 @@ export async function runPanelOrchestrator(): Promise<void> {
   }
 
   // Loopback MCP console (control plane): OAuth, MCP mappings, service lifecycle.
-  // Default port bridge+2 (9180→9182). Opened from the panel Advanced section.
+  // Default port bridge+3 (9180→9183). NOT +2: bridge+2 is the phone-pairing
+  // listener's port (see pairPort above), and the fork this console was ported
+  // from predates pairing — on Windows both binds accidentally coexist
+  // (specific 127.0.0.1 vs wildcard 0.0.0.0), on Linux whichever comes second
+  // dies with EADDRINUSE. The panel never hardcodes this port — it uses the
+  // console_url advertised on the `backends` frame.
   let panelConsoleHttp: PanelConsoleHttpServer | null = null;
-  const consolePort = Number(process.env.COMFYUI_MCP_CONSOLE_PORT) || bridgePort + 2;
+  const consolePort = Number(process.env.COMFYUI_MCP_CONSOLE_PORT) || bridgePort + 3;
   const consoleToken = randomBytes(24).toString("hex");
   try {
     panelConsoleHttp = await startPanelConsoleHttpServer({

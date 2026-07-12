@@ -1,0 +1,37 @@
+name: ltx23-distill-3stage
+display_name: LTX-2.3 — 3-stage distill I2V/T2V
+family: ltx
+kind: video
+description: >-
+  LTX-2.3 (Lightricks, 22B dev fp8 transformer) 3-stage distill pipeline for
+  image-to-video AND text-to-video. Pass 1 generates at low res (8 manual sigma
+  steps), pass 2 spatially upscales 2x + 3 refine steps (~720p), pass 3
+  upscales 1.5x + 3 refine steps (~1080p). Distilled speed LoRA + gemma
+  abliterated-heretic LoRA + LTX2 NAG + SageAttention memory patch. Flip the
+  PrimitiveBoolean (node 30) for T2V; point VHS_LoadImagePath (node 2009) at an
+  absolute image path for I2V. Ported from jcd315/comfyui-mcp-muse.
+vram: "24GB+ (fp8 transformer ~23GB; 3rd pass at 1080p is the peak)"
+workflow: workflow.json
+skill: ltxv2-video
+launch_args: []
+sources:
+  model: https://huggingface.co/Lightricks/LTX-2.3
+  transformer: https://huggingface.co/Kijai/LTX2.3_comfy
+  mirror: https://huggingface.co/Aitrepreneur/FLX
+  origin: https://github.com/jcd315/comfyui-mcp-muse
+notes:
+  - Run the generated installer from your ComfyUI root.
+  - Workflow originally built by @jcd315 in jcd315/comfyui-mcp-muse
+    (63f3b2a..d087cdf); adapted to the packs/ manifest system (model paths
+    flattened to the manifest's local_path folders).
+  - Resolution defaults use the internal (W//4//32)*32 latent formula —
+    W=2560/H=1408 yields 1280x704 after pass 2 (720p path); H=1536 yields
+    1920x1152 after pass 3 (1080p path).
+  - Character LoRA slot is the Power Lora Loader (node 122); the distill LoRA
+    (node 22) and gemma heretic LoRA (node 2007) ship in the manifest.
+  - VHS_VideoCombine defaults to video/nvenc_h264-mp4 (NVIDIA NVENC). On
+    non-NVIDIA hardware switch the format widget to video/h264-mp4.
+  - Needs the kornia fix (fix-ltxvideo-kornia.sh in the ltx-2.3 pack) if
+    ComfyUI-LTXVideo's pyramid import breaks.
+post_install:
+  - Restart ComfyUI, load workflow.json.

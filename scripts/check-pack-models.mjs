@@ -87,7 +87,17 @@ function referencedFiles(workflow) {
     else if (v && typeof v === "object") Object.values(v).forEach((x) => walk(x, node));
     else record(v, node);
   };
-  for (const node of workflow.nodes || []) walk(node.widgets_values, node);
+  if (Array.isArray(workflow.nodes)) {
+    for (const node of workflow.nodes) walk(node.widgets_values, node);
+  } else {
+    // API/prompt-format workflow: { "<id>": { class_type, inputs } }. Scan only
+    // scalar input values (link references are [nodeId, slot] arrays, but a
+    // string filename can't be confused with one).
+    for (const [id, node] of Object.entries(workflow)) {
+      if (!node || typeof node !== "object" || !node.class_type) continue;
+      walk(node.inputs, { type: node.class_type, id, mode: 0 });
+    }
+  }
   return refs;
 }
 

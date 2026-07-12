@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { unlink } from "node:fs/promises";
+import { unlink, writeFile } from "node:fs/promises";
 import { isLocalMode } from "../config.js";
+import { logger } from "../utils/logger.js";
 import {
   downloadModel,
   resolveExistingModelFile,
@@ -10,8 +11,35 @@ import {
 import {
   resolveCivitaiModel,
   resolveCivitaiModelVersion,
+  buildCivitaiMarkdown,
+  type CivitaiMetadata,
 } from "../services/civitai-resolver.js";
 import { ValidationError, errorToToolResult } from "../utils/errors.js";
+
+/**
+ * Write the CivitAI metadata sidecars next to a freshly downloaded model:
+ * `<file>.civitai.json` (structured, incl. example generation params) and
+ * `<file>.civitai.md` (agent-readable usage docs + example recipes). Best-effort
+ * — a sidecar failure never fails the download. Returns the sidecar paths written.
+ */
+async function writeCivitaiSidecar(
+  savedPath: string,
+  metadata: CivitaiMetadata,
+): Promise<{ json: string; md: string } | null> {
+  try {
+    const jsonPath = `${savedPath}.civitai.json`;
+    const mdPath = `${savedPath}.civitai.md`;
+    await writeFile(jsonPath, JSON.stringify(metadata, null, 2), "utf8");
+    await writeFile(mdPath, buildCivitaiMarkdown(metadata), "utf8");
+    return { json: jsonPath, md: mdPath };
+  } catch (err) {
+    logger.warn("Failed to write CivitAI metadata sidecar", {
+      savedPath,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
 
 /** Graceful "not supported remotely" tool result (no isError), matching the
  *  degrade-don't-throw pattern list_local_models uses. */
@@ -151,6 +179,24 @@ export function registerModelExtrasTools(server: McpServer): void {
         ];
         if (resolved.modelName) lines.push(`  Model: ${resolved.modelName}`);
         lines.push(`  Version id: ${resolved.versionId}`);
+
+        // Write usage-docs sidecars beside the file so the panel agent has the
+        // description, trigger words, and example generation params on hand.
+        // Local-only: remote mode has no local FS (savedPath is a status string).
+        if (isLocalMode() && resolved.metadata) {
+          const sidecar = await writeCivitaiSidecar(savedPath, resolved.metadata);
+          if (sidecar) {
+            const tw = resolved.metadata.trainedWords;
+            if (tw.length) lines.push(`  Trigger words: ${tw.join(", ")}`);
+            const recipes = resolved.metadata.examples.filter(
+              (e) => e.meta && Object.keys(e.meta).length > 0,
+            ).length;
+            lines.push(
+              `  Metadata: ${sidecar.md}` +
+                (recipes ? ` (${recipes} example recipe${recipes === 1 ? "" : "s"})` : ""),
+            );
+          }
+        }
 
         return {
           content: [{ type: "text" as const, text: lines.join("\n") }],

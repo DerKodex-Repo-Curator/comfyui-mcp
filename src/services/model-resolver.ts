@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
-import { readdir, stat, mkdir } from "node:fs/promises";
+import { readdir, stat, mkdir, readFile } from "node:fs/promises";
 import { join, basename, resolve, relative, sep, isAbsolute } from "node:path";
 import { config, isRemoteMode } from "../config.js";
 import { getClient } from "../comfyui/client.js";
@@ -112,6 +112,11 @@ export interface LocalModel {
   size: number;
   modified: string;
   type: string;
+  /** Trigger/activation words from the CivitAI download sidecar, when present —
+   *  so the agent applies them automatically when generating with this model. */
+  triggerWords?: string[];
+  /** Base model from the CivitAI sidecar (e.g. "SDXL 1.0"), when present. */
+  baseModel?: string;
 }
 
 /**
@@ -217,7 +222,10 @@ export async function listLocalModels(
         logger.debug(`HTTP /models/${dir} failed, continuing`, { err });
       }
     }
-    if (httpReturnedAny) return results;
+    if (httpReturnedAny) {
+      await enrichWithCivitaiMetadata(results);
+      return results;
+    }
   } catch (err) {
     logger.debug("HTTP model listing unavailable, trying filesystem", { err });
   }
@@ -254,7 +262,41 @@ export async function listLocalModels(
     }
   }
 
+  await enrichWithCivitaiMetadata(results);
   return results;
+}
+
+/**
+ * Best-effort: attach `triggerWords` + `baseModel` from each model's CivitAI
+ * sidecar (`<file>.civitai.json`, written by download_civitai_model) so the
+ * agent applies the trigger words automatically when generating. Silent when a
+ * sidecar is missing or there's no local filesystem (remote/cloud).
+ */
+async function enrichWithCivitaiMetadata(models: LocalModel[]): Promise<void> {
+  const base = resolveComfyUIBase();
+  if (!base) return;
+  const modelsRoot = join(base, "models");
+  await Promise.all(
+    models.map(async (m) => {
+      // FS-scan paths are absolute; HTTP paths are `dir/name` relative to models/.
+      const abs = isAbsolute(m.path) ? m.path : join(modelsRoot, m.path);
+      try {
+        const raw = await readFile(`${abs}.civitai.json`, "utf8");
+        const j = JSON.parse(raw) as {
+          trainedWords?: unknown;
+          baseModel?: unknown;
+        };
+        if (Array.isArray(j.trainedWords) && j.trainedWords.length > 0) {
+          m.triggerWords = j.trainedWords.map(String);
+        }
+        if (typeof j.baseModel === "string" && j.baseModel) {
+          m.baseModel = j.baseModel;
+        }
+      } catch {
+        // No sidecar (or unreadable) — leave the model un-enriched.
+      }
+    }),
+  );
 }
 
 /** True when `url`'s host is civitai.com (or a subdomain), parsed safely. */

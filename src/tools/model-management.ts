@@ -138,7 +138,7 @@ export function registerModelManagementTools(server: McpServer): void {
 
   server.tool(
     "list_local_models",
-    "List model files available to the connected ComfyUI, grouped by type. Read-only. Queries ComfyUI's /models REST endpoint first (works with remote ComfyUI and respects extra_model_paths.yaml — symlinked / mounted dirs the install-path filesystem scan would miss), then falls back to a filesystem scan of COMFYUI_PATH/models/ when the REST endpoint is unavailable. Size and modified time are only available on the filesystem fallback path. Use to see which models are already available before generating or downloading; use search_models to discover new models on HuggingFace, then download_model to fetch them.",
+    "List model files available to the connected ComfyUI, grouped by type. Read-only. Queries ComfyUI's /models REST endpoint first (works with remote ComfyUI and respects extra_model_paths.yaml — symlinked / mounted dirs the install-path filesystem scan would miss), then falls back to a filesystem scan of COMFYUI_PATH/models/ when the REST endpoint is unavailable. Size and modified time are only available on the filesystem fallback path. Use to see which models are already available before generating or downloading; use search_models to discover new models on HuggingFace, then download_model to fetch them. For models fetched via download_civitai_model, any CivitAI trigger/activation words and base model are shown inline (read from the `<file>.civitai.json` sidecar) — apply those trigger words in your prompt when generating with that model.",
     {
       model_type: modelTypeEnum
         .optional()
@@ -177,6 +177,16 @@ export function registerModelManagementTools(server: McpServer): void {
               lines.push(`- ${m.name} (${sizeMB} MB) — modified ${m.modified}`);
             } else {
               lines.push(`- ${m.name}`);
+            }
+            // Surface CivitAI sidecar hints so the agent applies the trigger
+            // words (and picks the right base model) when it builds a workflow.
+            if (m.triggerWords && m.triggerWords.length > 0) {
+              lines.push(
+                `    trigger words: ${m.triggerWords.join(", ")}` +
+                  (m.baseModel ? `  ·  base: ${m.baseModel}` : ""),
+              );
+            } else if (m.baseModel) {
+              lines.push(`    base: ${m.baseModel}`);
             }
           }
           lines.push("");

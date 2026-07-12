@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { ModelError, ValidationError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { htmlToMarkdown } from "../utils/html-to-markdown.js";
 import { civitaiDisabled, CIVITAI_DISABLED_MESSAGE } from "./model-resolver.js";
 
 const CIVITAI_API_BASE = "https://civitai.com/api/v1";
@@ -14,20 +15,75 @@ interface CivitaiFile {
   downloadUrl?: string;
   primary?: boolean;
   type?: string;
+  sizeKB?: number;
+}
+
+/** An example image/video shown in the model's gallery, with generation params. */
+interface CivitaiImage {
+  url?: string;
+  width?: number;
+  height?: number;
+  nsfwLevel?: number;
+  type?: string; // "image" | "video"
+  hash?: string;
+  meta?: Record<string, unknown> | null;
 }
 
 interface CivitaiModelVersion {
   id: number;
   name?: string;
+  baseModel?: string;
+  description?: string;
+  trainedWords?: string[];
   downloadUrl?: string;
   files?: CivitaiFile[];
+  images?: CivitaiImage[];
+  // Present on GET /model-versions/{id} (not on the nested versions of /models/{id}).
+  model?: { name?: string; type?: string };
 }
 
 interface CivitaiModel {
   id: number;
   name?: string;
   type?: string;
+  description?: string;
+  tags?: string[];
+  creator?: { username?: string };
   modelVersions?: CivitaiModelVersion[];
+}
+
+/** One example generation captured from a model's gallery, for the recipe. */
+export interface CivitaiExample {
+  url?: string;
+  type?: string; // image | video
+  width?: number;
+  height?: number;
+  nsfwLevel?: number;
+  meta?: Record<string, unknown> | null;
+}
+
+/**
+ * Rich, human/agent-facing metadata about a downloaded CivitAI model, written
+ * as a sidecar next to the file so the panel agent can read usage docs, trigger
+ * words, and example generation params without re-querying CivitAI.
+ */
+export interface CivitaiMetadata {
+  modelId?: number;
+  modelName?: string;
+  modelType?: string;
+  creator?: string;
+  tags?: string[];
+  modelDescriptionHtml?: string;
+  versionId: number;
+  versionName?: string;
+  versionDescriptionHtml?: string;
+  baseModel?: string;
+  trainedWords: string[];
+  fileName?: string;
+  fileSizeKB?: number;
+  /** Canonical CivitAI page URL for this model/version. */
+  sourceUrl: string;
+  examples: CivitaiExample[];
 }
 
 export interface CivitaiResolved {
@@ -43,6 +99,8 @@ export interface CivitaiResolved {
   versionId: number;
   /** Model name, when resolvable. */
   modelName?: string;
+  /** Rich metadata for the download sidecar (best-effort; undefined if unbuildable). */
+  metadata?: CivitaiMetadata;
 }
 
 function authHeaders(): Record<string, string> {
@@ -86,9 +144,55 @@ function pickFile(version: CivitaiModelVersion): CivitaiFile | undefined {
   return files.find((f) => f.primary) ?? files[0];
 }
 
+/** Max example generations captured into the sidecar (those carrying params first). */
+const MAX_EXAMPLES = 8;
+
+function buildExamples(version: CivitaiModelVersion): CivitaiExample[] {
+  const imgs = version.images ?? [];
+  // Prefer examples that actually carry generation params (a usable recipe).
+  const withMeta = imgs.filter((i) => i.meta && Object.keys(i.meta).length > 0);
+  const ordered = [...withMeta, ...imgs.filter((i) => !withMeta.includes(i))];
+  return ordered.slice(0, MAX_EXAMPLES).map((i) => ({
+    url: i.url,
+    type: i.type,
+    width: i.width,
+    height: i.height,
+    nsfwLevel: i.nsfwLevel,
+    meta: i.meta ?? null,
+  }));
+}
+
+function buildMetadata(
+  version: CivitaiModelVersion,
+  file: CivitaiFile | undefined,
+  model?: CivitaiModel,
+): CivitaiMetadata {
+  const modelId = model?.id;
+  const sourceUrl = modelId
+    ? `https://civitai.com/models/${modelId}?modelVersionId=${version.id}`
+    : `https://civitai.com/model-versions/${version.id}`;
+  return {
+    modelId,
+    modelName: model?.name ?? version.model?.name,
+    modelType: model?.type ?? version.model?.type,
+    creator: model?.creator?.username,
+    tags: model?.tags,
+    modelDescriptionHtml: model?.description,
+    versionId: version.id,
+    versionName: version.name,
+    versionDescriptionHtml: version.description,
+    baseModel: version.baseModel,
+    trainedWords: version.trainedWords ?? [],
+    fileName: file?.name,
+    fileSizeKB: file?.sizeKB,
+    sourceUrl,
+    examples: buildExamples(version),
+  };
+}
+
 function resolveFromVersion(
   version: CivitaiModelVersion,
-  modelName?: string,
+  model?: CivitaiModel,
 ): CivitaiResolved {
   const file = pickFile(version);
   const downloadUrl =
@@ -100,7 +204,8 @@ function resolveFromVersion(
     downloadUrl,
     filename: file?.name,
     versionId: version.id,
-    modelName,
+    modelName: model?.name ?? version.model?.name,
+    metadata: buildMetadata(version, file, model),
   };
 }
 
@@ -115,6 +220,79 @@ export async function resolveCivitaiModelVersion(
     `/model-versions/${versionId}`,
   );
   return resolveFromVersion(version);
+}
+
+/**
+ * Render a CivitAI metadata bundle as agent-readable Markdown for the sidecar.
+ * Usage docs (trigger words, base model, descriptions) up top; a compact
+ * "example recipes" section from the gallery's generation params below.
+ */
+export function buildCivitaiMarkdown(m: CivitaiMetadata): string {
+  const lines: string[] = [];
+  lines.push(`# ${m.modelName ?? "CivitAI model"}`);
+  const facts: string[] = [];
+  if (m.modelType) facts.push(`**Type:** ${m.modelType}`);
+  if (m.baseModel) facts.push(`**Base model:** ${m.baseModel}`);
+  if (m.versionName) facts.push(`**Version:** ${m.versionName}`);
+  if (m.creator) facts.push(`**Creator:** ${m.creator}`);
+  if (facts.length) lines.push("", facts.join("  \n"));
+  lines.push("", `Source: ${m.sourceUrl}`);
+
+  if (m.trainedWords.length) {
+    lines.push("", "## Trigger words", "");
+    lines.push(m.trainedWords.map((w) => `\`${w}\``).join(", "));
+  }
+
+  const modelMd = htmlToMarkdown(m.modelDescriptionHtml);
+  if (modelMd) lines.push("", "## Description", "", modelMd);
+
+  const versionMd = htmlToMarkdown(m.versionDescriptionHtml);
+  if (versionMd) lines.push("", "## Version notes", "", versionMd);
+
+  const recipes = m.examples.filter(
+    (e) => e.meta && Object.keys(e.meta).length > 0,
+  );
+  if (recipes.length) {
+    lines.push("", "## Example recipes", "");
+    lines.push(
+      "Generation params pulled from the model's gallery — reuse the seed to replicate, or vary it to remix.",
+    );
+    recipes.forEach((e, i) => {
+      lines.push("", `### Example ${i + 1}`);
+      if (e.url) lines.push(`Image: ${e.url}`);
+      lines.push("", "```", formatMeta(e.meta!), "```");
+    });
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+/** Flatten a CivitAI image `meta` object into readable `key: value` lines,
+ *  surfacing the params that matter for reproduction first. */
+function formatMeta(meta: Record<string, unknown>): string {
+  const order = [
+    "prompt",
+    "negativePrompt",
+    "seed",
+    "steps",
+    "sampler",
+    "cfgScale",
+    "Size",
+    "Model",
+    "Denoising strength",
+    "Clip skip",
+  ];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (k: string, v: unknown) => {
+    if (v === undefined || v === null || v === "") return;
+    if (typeof v === "object") return; // skip nested (resources/hashes) here
+    out.push(`${k}: ${v}`);
+    seen.add(k);
+  };
+  for (const k of order) if (k in meta) push(k, meta[k]);
+  for (const [k, v] of Object.entries(meta)) if (!seen.has(k)) push(k, v);
+  return out.join("\n");
 }
 
 /**
@@ -150,5 +328,5 @@ export async function resolveCivitaiModel(
     version = versions[0];
   }
 
-  return resolveFromVersion(version, model.name);
+  return resolveFromVersion(version, model);
 }

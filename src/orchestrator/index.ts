@@ -34,6 +34,10 @@ import {
 } from "./panel-agent.js";
 import { createPanelMcpServer } from "./panel-tools.js";
 import { readUserMcpServers } from "../services/user-mcp-config.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { registerAllTools } from "../tools/index.js";
 import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath } from "../config.js";
 import {
   buildComfyuiMcpEnv,
@@ -570,6 +574,51 @@ function isRemoteHttpsUrl(u: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The direct tool channel: a mobile client can invoke these READ/DOWNLOAD backend
+ *  tools without an agent turn (structured nav data + rig-side downloads). The
+ *  bridge is already token-gated; this whitelist keeps call_tool to non-destructive
+ *  tools (no restart/remove/clear/install). */
+const CALL_TOOL_WHITELIST = new Set<string>([
+  "list_workflows",
+  "get_workflow",
+  "analyze_workflow",
+  "query_workflow",
+  "workflow_from_image",
+  "list_output_images",
+  "get_image",
+  "list_local_models",
+  "download_civitai_model",
+  "download_model",
+  "enqueue_workflow",
+  // Persist a workflow to the ComfyUI library (mobile "pull workflow from a
+  // CivitAI example" → save_workflow). Writes a workflow file (auto-converts
+  // API-format graphs to canvas-openable UI format); overwrites same-filename,
+  // so the client generates a unique name. No model/system mutation.
+  "save_workflow",
+]);
+
+/** Lazily build ONE in-process MCP client wired to the full comfyui tool surface,
+ *  reused across call_tool requests. Reuses the exact tool implementations (same
+ *  getClient()/COMFYUI_URL as the agents) — no logic duplication. */
+let callToolClientPromise: Promise<Client> | null = null;
+function getCallToolClient(): Promise<Client> {
+  if (!callToolClientPromise) {
+    callToolClientPromise = (async () => {
+      const server = new McpServer({ name: "comfyui-mcp-calltool", version: "1.0.0" });
+      await registerAllTools(server);
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "orchestrator-calltool", version: "1.0.0" });
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      logger.info("[panel-orchestrator] call_tool in-process MCP client ready");
+      return client;
+    })().catch((err) => {
+      callToolClientPromise = null; // allow retry on next call
+      throw err;
+    });
+  }
+  return callToolClientPromise;
 }
 
 export async function runPanelOrchestrator(): Promise<void> {
@@ -2092,6 +2141,50 @@ export async function runPanelOrchestrator(): Promise<void> {
       })().catch((err) => {
         bridge.push(
           { type: "pair_error", mode, error: err instanceof Error ? err.message : String(err) },
+          tabId,
+        );
+      });
+      return;
+    }
+
+    // Direct tool channel: the mobile app invokes a WHITELISTED read/download tool
+    // (structured data for nav lists + rig downloads) without an agent turn. Replies
+    // with a `tool_result` frame the client correlates by rid.
+    if (event.type === "call_tool" && event.tab_id) {
+      const tabId = event.tab_id;
+      // NOTE: correlate with `cid`, NOT `rid` — the bridge reserves top-level `rid`
+      // for orchestrator→panel command replies, so a `rid` frame would be misrouted.
+      const ev = event as { cid?: unknown; tool?: unknown; args?: unknown };
+      const cid = typeof ev.cid === "string" ? ev.cid : undefined;
+      const tool = typeof ev.tool === "string" ? ev.tool : "";
+      const toolArgs =
+        ev.args && typeof ev.args === "object" ? (ev.args as Record<string, unknown>) : {};
+      void (async () => {
+        if (!CALL_TOOL_WHITELIST.has(tool)) {
+          bridge.push({ type: "tool_result", cid, tool, ok: false, error: `tool "${tool}" is not permitted` }, tabId);
+          logger.warn(`[panel-orchestrator] call_tool rejected non-whitelisted "${tool}" (tab ${tabId.slice(0, 8)})`);
+          return;
+        }
+        const client = await getCallToolClient();
+        const result = (await client.callTool({ name: tool, arguments: toolArgs })) as {
+          content?: unknown;
+          isError?: boolean;
+        };
+        bridge.push(
+          {
+            type: "tool_result",
+            cid,
+            tool,
+            ok: result.isError !== true,
+            result: result.content ?? [],
+            ...(result.isError ? { error: "tool returned an error" } : {}),
+          },
+          tabId,
+        );
+        logger.info(`[panel-orchestrator] call_tool ${tool} → ${result.isError ? "error" : "ok"} (tab ${tabId.slice(0, 8)})`);
+      })().catch((err) => {
+        bridge.push(
+          { type: "tool_result", cid, tool, ok: false, error: err instanceof Error ? err.message : String(err) },
           tabId,
         );
       });

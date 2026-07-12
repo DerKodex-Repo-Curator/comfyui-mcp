@@ -380,6 +380,30 @@ if (forceRemote && !urlOverride) {
   );
 }
 
+/**
+ * Comfy.org API key for partner/API-node auth (extra_data.api_key_comfy_org).
+ * Precedence: COMFY_API_KEY env var, then ~/.comfy-api-key (trimmed file
+ * contents) — the file fallback lets headless setups keep the key out of env/
+ * process listings (chmod 600 recommended). Best-effort: unreadable/empty file
+ * just means no key. Never log the key value.
+ * File fallback originally contributed by @joaolvivas in
+ * `joaolvivas/comfyui-mcp-byjlucas@4b989e4` and reimplemented here with thanks.
+ */
+function resolveComfyApiKey(): string | undefined {
+  const env = process.env.COMFY_API_KEY;
+  if (env && env.trim()) return env.trim();
+  try {
+    const keyFile = join(homedir(), ".comfy-api-key");
+    if (existsSync(keyFile)) {
+      const key = readFileSync(keyFile, "utf-8").trim();
+      if (key) return key;
+    }
+  } catch {
+    // Unreadable file — behave as if no key is configured.
+  }
+  return undefined;
+}
+
 const parsedConfig = configSchema.parse({
   comfyuiHost: urlOverride?.host ?? process.env.COMFYUI_HOST,
   comfyuiPort: urlOverride?.port ?? (process.env.COMFYUI_PORT || undefined),
@@ -398,7 +422,7 @@ const parsedConfig = configSchema.parse({
   huggingfaceToken: process.env.HUGGINGFACE_TOKEN,
   githubToken: process.env.GITHUB_TOKEN,
   civitaiApiToken: process.env.CIVITAI_API_TOKEN,
-  comfyApiKey: process.env.COMFY_API_KEY,
+  comfyApiKey: resolveComfyApiKey(),
 });
 
 // Resolve port:

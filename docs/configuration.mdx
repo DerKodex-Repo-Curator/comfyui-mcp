@@ -122,6 +122,9 @@ error. Architecture and `cloud-client` dispatcher originally contributed by
 </ParamField>
 <ParamField path="COMFY_API_KEY" type="string">
   comfy.org API key forwarded to hosted API nodes via the `/prompt` `extra_data` payload.
+  If the env var is unset, the key is read from `~/.comfy-api-key` (trimmed file
+  contents; `chmod 600` recommended) — handy for headless setups that keep secrets
+  out of environment/process listings.
 </ParamField>
 <ParamField path="REGISTRY_ACCESS_TOKEN" type="string">
   Comfy Registry API key used by `publish_custom_node` to publish a node pack. Passed to comfy-cli via env, never placed in args or logs.

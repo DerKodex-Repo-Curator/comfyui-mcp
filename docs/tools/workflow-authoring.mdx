@@ -95,12 +95,15 @@ Validate a ComfyUI workflow without executing it. Checks for missing node types,
 
 ## get_node_info
 
-Query a running ComfyUI server's /object_info endpoint for installed node type definitions (inputs, outputs, category, description). Requires a reachable ComfyUI instance; results reflect that server's installed custom nodes. Use the node_type filter to inspect a specific node before composing or modifying a workflow. Note: when more than 20 node types match, returns only a summarized list (name, display_name, category, description) and asks you to narrow the filter to get full input/output schemas; 20 or fewer returns complete definitions.
+Query a running ComfyUI server's /object_info endpoint for installed node type definitions. Requires a reachable ComfyUI instance; results reflect that server's installed custom nodes. Use the node_type filter to inspect a specific node before composing or modifying a workflow. Default response is a STRUCTURAL summary: input/output names and type tags, with enum (dropdown) inputs collapsed to a value count — safe for context even on Loader nodes whose model dropdowns embed the entire local model list (hundreds of KB raw). Pass verbose=true (20 or fewer matches) for the complete raw definitions including every dropdown value. When more than 20 node types match, returns only a name/category list and asks you to narrow the filter.
 
 ### Parameters
 
 <ParamField path="node_type" type="string">
   Filter by node class_type name (case-insensitive substring match). Omit to list all available nodes.
+</ParamField>
+<ParamField path="verbose" type="boolean" required default="false">
+  If true, return the full raw /object_info definitions including enum dropdown values (model lists etc.) — can be hundreds of KB per Loader node, so only use it when you need the actual enum values (e.g. exact model filenames) and the filter matches few nodes. Default false: structural summary with enum value counts.
 </ParamField>
 
 ### Example
@@ -110,7 +113,9 @@ Query a running ComfyUI server's /object_info endpoint for installed node type d
 ```json
 {
   "tool": "get_node_info",
-  "arguments": {}
+  "arguments": {
+    "verbose": true
+  }
 }
 ```
 
@@ -143,7 +148,7 @@ Convert a ComfyUI API-format workflow into a compact, human/LLM-readable DSL —
 
 ## dsl_to_workflow
 
-Convert the compact workflow DSL (see workflow_to_dsl) back into executable ComfyUI API-format JSON. Useful for authoring/editing workflows in the legible DSL, then converting to run with enqueue_workflow. (Experimental.)
+Convert the compact workflow DSL (see workflow_to_dsl) back into executable ComfyUI API-format JSON. Useful for authoring/editing workflows in the legible DSL, then converting to run with enqueue_workflow. When ComfyUI is reachable, the result also carries advisory `warnings` (unknown class_type, output index out of range, type mismatches) — the conversion still succeeds regardless. (Experimental.)
 
 ### Parameters
 

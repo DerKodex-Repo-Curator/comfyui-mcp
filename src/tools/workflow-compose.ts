@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { WorkflowJSON } from "../comfyui/types.js";
+import type { ComfyUINodeDef, WorkflowJSON } from "../comfyui/types.js";
 import {
   createWorkflow,
   modifyWorkflow,
@@ -145,7 +145,7 @@ export function registerWorkflowComposeTools(server: McpServer): void {
   // 3. get_node_info
   server.tool(
     "get_node_info",
-    "Query a running ComfyUI server's /object_info endpoint for installed node type definitions (inputs, outputs, category, description). Requires a reachable ComfyUI instance; results reflect that server's installed custom nodes. Use the node_type filter to inspect a specific node before composing or modifying a workflow. Note: when more than 20 node types match, returns only a summarized list (name, display_name, category, description) and asks you to narrow the filter to get full input/output schemas; 20 or fewer returns complete definitions.",
+    "Query a running ComfyUI server's /object_info endpoint for installed node type definitions. Requires a reachable ComfyUI instance; results reflect that server's installed custom nodes. Use the node_type filter to inspect a specific node before composing or modifying a workflow. Default response is a STRUCTURAL summary: input/output names and type tags, with enum (dropdown) inputs collapsed to a value count — safe for context even on Loader nodes whose model dropdowns embed the entire local model list (hundreds of KB raw). Pass verbose=true (20 or fewer matches) for the complete raw definitions including every dropdown value. When more than 20 node types match, returns only a name/category list and asks you to narrow the filter.",
     {
       node_type: z
         .string()
@@ -153,10 +153,20 @@ export function registerWorkflowComposeTools(server: McpServer): void {
         .describe(
           "Filter by node class_type name (case-insensitive substring match). Omit to list all available nodes.",
         ),
+      verbose: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "If true, return the full raw /object_info definitions including enum dropdown " +
+            "values (model lists etc.) — can be hundreds of KB per Loader node, so only use " +
+            "it when you need the actual enum values (e.g. exact model filenames) and the " +
+            "filter matches few nodes. Default false: structural summary with enum value counts.",
+        ),
     },
-    async ({ node_type }) => {
+    async ({ node_type, verbose }) => {
       try {
-        logger.info("Getting node info", { filter: node_type });
+        logger.info("Getting node info", { filter: node_type, verbose });
         const info = await getObjectInfo();
 
         let entries = Object.entries(info);
@@ -204,12 +214,37 @@ export function registerWorkflowComposeTools(server: McpServer): void {
           };
         }
 
-        const result = Object.fromEntries(entries);
+        // verbose=true restores the pre-summary behavior: full raw definitions
+        // (only reachable at <=20 matches, same threshold as before).
+        if (verbose) {
+          const result = Object.fromEntries(entries);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        // Default: structural summary. Keeps input/output names and type tags but
+        // collapses enum dropdowns to a value count — Loader nodes embed the entire
+        // local model list in their dropdowns, so a raw dump can be 100s of KB.
+        const summary = entries.map(([name, def]) => summarizeNodeDef(name, def));
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(
+                {
+                  count: summary.length,
+                  nodes: summary,
+                  hint: "Structural summary (enum dropdown values collapsed to counts). Pass verbose=true for full definitions including dropdown values.",
+                },
+                null,
+                2,
+              ),
             },
           ],
         };
@@ -218,4 +253,48 @@ export function registerWorkflowComposeTools(server: McpServer): void {
       }
     },
   );
+}
+
+// ── get_node_info structural summary ─────────────────────────────────────────
+// Summary-by-default (with verbose opt-out) originally contributed by
+// @joaolvivas in `joaolvivas/comfyui-mcp-byjlucas@de82ecd` and reimplemented
+// here with thanks — the motivating case was Loader nodes (UNETLoader,
+// CheckpointLoaderSimple, LoraLoader, …) whose model dropdowns embed the full
+// local model list, producing multi-hundred-KB /object_info dumps per node.
+
+/** Collapse one input-spec map to `{ name: typeTag }`, dropping enum value lists. */
+function summarizeInputSpecs(
+  specs: Record<string, unknown> | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(specs ?? {}).map(([inputName, spec]) => {
+      // Spec shape is [typeOrEnumValues, options?]; enum inputs carry the full
+      // value array in slot 0 — that array is what makes Loader nodes huge.
+      if (Array.isArray(spec)) {
+        const first = spec[0];
+        if (Array.isArray(first)) {
+          return [inputName, `enum(${first.length} values)`];
+        }
+        return [inputName, String(first)];
+      }
+      return [inputName, typeof spec];
+    }),
+  );
+}
+
+/** Structural summary of a node definition: names + type tags, no dropdown values. */
+export function summarizeNodeDef(
+  name: string,
+  def: ComfyUINodeDef,
+): Record<string, unknown> {
+  return {
+    name,
+    display_name: def.display_name,
+    category: def.category,
+    description: def.description || "",
+    input_required: summarizeInputSpecs(def.input?.required),
+    input_optional: summarizeInputSpecs(def.input?.optional),
+    output_types: def.output ?? [],
+    output_names: def.output_name ?? [],
+  };
 }

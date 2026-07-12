@@ -8,7 +8,7 @@
 
 import { createReadStream, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join, resolve } from "node:path";
+import { extname, join, resolve, sep } from "node:path";
 import { allBackendReadiness } from "./backend-readiness.js";
 import { getLoraCatalog, loraPreviewsDir } from "../services/lora-catalog.js";
 import { setPanelSecret, listPanelSecretsMasked, CREDENTIAL_SLOTS } from "../services/panel-secrets.js";
@@ -125,7 +125,9 @@ function serveLoraPreview(req: IncomingMessage, res: ServerResponse): void {
   }
   const previewsRoot = resolve(loraPreviewsDir());
   const abs = resolve(join(previewsRoot, entry.previewFile));
-  if (!abs.startsWith(previewsRoot + "/") && abs !== previewsRoot) {
+  // Path containment: use the platform separator (sep) so the check also holds
+  // on Windows, where resolve() yields backslash-separated paths.
+  if (!abs.startsWith(previewsRoot + sep) && abs !== previewsRoot) {
     sendJson(res, 403, { ok: false, error: "invalid preview path" });
     return;
   }

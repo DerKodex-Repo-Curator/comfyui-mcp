@@ -1,0 +1,149 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+
+const mocks = vi.hoisted(() => ({
+  run: vi.fn(),
+  resolve: vi.fn(() => "/bin/comfy"),
+  version: vi.fn(() => "1.11.1"),
+}));
+
+vi.mock("../../services/comfy-cli.js", () => ({
+  runComfyCli: mocks.run,
+  resolveComfyCliExecutable: mocks.resolve,
+  getComfyCliVersion: mocks.version,
+  assertComfyCliOk: (envelope: { ok: boolean }) => {
+    if (!envelope.ok) throw new Error("failed");
+    return envelope;
+  },
+}));
+
+import { registerComfyCliTools } from "../../tools/comfy-cli.js";
+
+type Handler = (args: Record<string, any>) => Promise<CallToolResult>;
+
+function handlers(): Map<string, Handler> {
+  const result = new Map<string, Handler>();
+  const server = {
+    tool: (...args: unknown[]) => {
+      result.set(args[0] as string, args.at(-1) as Handler);
+    },
+  };
+  registerComfyCliTools(server as never);
+  return result;
+}
+
+const envelope = (command = "test") => ({
+  schema: "envelope/1",
+  type: "envelope",
+  ok: true,
+  command,
+  version: "1.11.1",
+  where: "local",
+  data: {},
+  error: null,
+});
+
+describe("comfy-cli MCP command construction", () => {
+  beforeEach(() => {
+    mocks.run.mockReset();
+    mocks.run.mockResolvedValue(envelope());
+    mocks.resolve.mockClear();
+    mocks.version.mockClear();
+  });
+
+  it("uses the same workspace for status path and version", async () => {
+    await handlers().get("comfy_cli_status")!({ detail: "version", workspace: "/ws" });
+    expect(mocks.resolve).toHaveBeenCalledWith({ workspace: "/ws" });
+    expect(mocks.version).toHaveBeenCalledWith({ workspace: "/ws" });
+  });
+
+  it("restarts by stopping then launching in the background with extras", async () => {
+    await handlers().get("comfy_cli_server")!({
+      action: "restart",
+      workspace: "/ws",
+      launchArgs: ["--port", "9000"],
+    });
+    expect(mocks.run.mock.calls.map((call) => call[0])).toEqual([
+      ["stop"],
+      ["launch", "--background", "--", "--port", "9000"],
+    ]);
+  });
+
+  it("constructs job wait arguments and routing", async () => {
+    await handlers().get("comfy_cli_jobs")!({
+      action: "wait",
+      promptIds: ["a", "b"],
+      timeoutSeconds: 30,
+      where: "cloud",
+    });
+    expect(mocks.run).toHaveBeenCalledWith(
+      ["jobs", "wait", "a", "b", "--timeout", "30"],
+      expect.objectContaining({ where: "cloud", timeoutMs: 40_000 }),
+    );
+  });
+
+  it("constructs workflow validation and execution flags", async () => {
+    const handler = handlers().get("comfy_cli_workflow")!;
+    await handler({ action: "validate", workflowPath: "wf.json" });
+    await handler({ action: "run", workflowPath: "wf.json", wait: true, timeoutSeconds: 45 });
+    expect(mocks.run.mock.calls.map((call) => call[0])).toEqual([
+      ["validate", "--workflow", "wf.json"],
+      ["run", "--workflow", "wf.json", "--wait", "--timeout", "45"],
+    ]);
+  });
+
+  it("constructs upload and download commands", async () => {
+    const handler = handlers().get("comfy_cli_transfer")!;
+    await handler({ action: "upload", files: ["a.png", "b.png"], overwrite: false });
+    await handler({ action: "download", promptId: "p1", outDir: "out", urlOnly: true });
+    expect(mocks.run.mock.calls.map((call) => call[0])).toEqual([
+      ["upload", "a.png", "b.png", "--no-overwrite"],
+      ["download", "p1", "--out-dir", "out", "--url-only"],
+    ]);
+  });
+
+  it("uses plural discovery and singular model mutation commands", async () => {
+    const handler = handlers().get("comfy_cli_models")!;
+    await handler({ action: "search", text: "flux", type: "checkpoint", limit: 4 });
+    await handler({ action: "download", url: "https://example.com/m.safetensors", relativePath: "models/loras" });
+    await handler({ action: "remove", modelNames: ["a.safetensors", "b.safetensors"], relativePath: "models/loras" });
+    expect(mocks.run.mock.calls.map((call) => call[0])).toEqual([
+      ["models", "search", "--text", "flux", "--type", "checkpoint", "--limit", "4"],
+      ["model", "download", "--url", "https://example.com/m.safetensors", "--relative-path", "models/loras"],
+      ["model", "remove", "--relative-path", "models/loras", "--model-names", "a.safetensors b.safetensors"],
+    ]);
+  });
+
+  it("keeps skill installation dry-run unless apply is explicit", async () => {
+    const handler = handlers().get("comfy_cli_skills")!;
+    await handler({ action: "install", scope: "project", projectDir: "/project", targets: ["agents"], skills: ["comfy"], apply: false });
+    await handler({ action: "install", scope: "project", projectDir: "/project", apply: true });
+    expect(mocks.run.mock.calls.map((call) => call[0])).toEqual([
+      ["skills", "install", "--scope", "project", "--target", "agents", "--skill", "comfy", "--dry-run"],
+      ["skills", "install", "--scope", "project"],
+    ]);
+    expect(mocks.run.mock.calls[0][1]).toEqual(expect.objectContaining({ cwd: "/project" }));
+  });
+
+  it("rejects project-scoped skill operations without a project directory", async () => {
+    const result = await handlers().get("comfy_cli_skills")!({ action: "install", scope: "project", apply: false });
+    expect(result.isError).toBe(true);
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it("constructs loaded-node search with offline object info", async () => {
+    await handlers().get("comfy_cli_search_nodes")!({ query: "sampler", limit: 5, objectInfoPath: "object_info.json" });
+    expect(mocks.run).toHaveBeenCalledWith(
+      ["nodes", "search", "sampler", "--limit", "5", "--input", "object_info.json"],
+      expect.objectContaining({ timeoutMs: 60_000 }),
+    );
+  });
+
+  it("returns failed CLI envelopes intact and marks the MCP result as an error", async () => {
+    const failed = { ...envelope("validate"), ok: false, data: null, error: { code: "workflow_invalid_json", message: "bad JSON" } };
+    mocks.run.mockResolvedValueOnce(failed);
+    const result = await handlers().get("comfy_cli_workflow")!({ action: "validate", workflowPath: "bad.json" });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual(failed);
+  });
+});

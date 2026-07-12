@@ -50,6 +50,7 @@ import { registerSelfUpdateTools } from "./self-update.js";
 import { registerCalculateTools } from "./calculate.js";
 import { registerComfyUISettingsTools } from "./comfyui-settings.js";
 import { registerNodeDevTools } from "./node-dev.js";
+import { registerComfyCliTools } from "./comfy-cli.js";
 import { DefaultsManager } from "../services/defaults-manager.js";
 import { ToolCatalog } from "./catalog.js";
 
@@ -59,6 +60,7 @@ import { ToolCatalog } from "./catalog.js";
  * compact tool mode's list_tools manifest.
  */
 const TOOL_GROUPS: ReadonlyArray<readonly [category: string, register: (server: McpServer) => void]> = [
+  ["comfy-cli", registerComfyCliTools],
   ["workflows", registerWorkflowExecuteTools],
   ["workflow-authoring", registerWorkflowVisualizeTools],
   ["workflow-authoring", registerWorkflowComposeTools],

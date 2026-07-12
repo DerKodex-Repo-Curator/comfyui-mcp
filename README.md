@@ -344,6 +344,21 @@ for the port, the capability matrix, and the per-provider "clink" points, and th
 | `search_custom_nodes` | Search the ComfyUI Registry for custom node packs by keyword |
 | `get_node_pack_details` | Get full details of a custom node pack (description, author, nodes, install info) |
 | `generate_node_skill` | Generate a Claude skill `.md` file from a Registry ID or GitHub URL |
+| `comfy_cli_search_nodes` | Search actual loaded node classes through official `comfy nodes search` |
+
+### Official comfy-cli
+
+Install [comfy-cli](https://docs.comfy.org/comfy-cli/getting-started#install-cli) 1.11.1 or newer to enable the official JSON-backed tools. The MCP resolves `comfy` from `COMFY_CLI_PATH`, `PATH`, or the selected workspace's `.venv`/`venv`. Local custom-node operations prefer `comfy node` when a supported CLI is available and otherwise fall back to Manager HTTP; remote targets retain Manager HTTP.
+
+| Tool | Description |
+|------|-------------|
+| `comfy_cli_status` | Inspect version, selected workspace (`which`), environment, or the self-describing command surface |
+| `comfy_cli_server` | Start, stop, or restart a CLI-managed background ComfyUI |
+| `comfy_cli_jobs` | List, inspect, wait for, watch, or cancel local/cloud jobs |
+| `comfy_cli_workflow` | Validate or run workflow files through the official CLI |
+| `comfy_cli_transfer` | Upload inputs or download completed job outputs |
+| `comfy_cli_models` | Browse/search local or cloud models; download/remove workspace model files |
+| `comfy_cli_skills` | List/show/validate/install/status/uninstall official bundled agent skills |
 
 ### Diagnostics
 
@@ -573,7 +588,8 @@ npx -y comfyui-mcp@latest --comfyui-url http://localhost:8188 --force-remote
 | `COMFYUI_HOST` | `127.0.0.1` | ComfyUI server address |
 | `COMFYUI_PORT` | *(auto-detect)* | ComfyUI server port (tries 8188, then 8000) |
 | `COMFYUI_PATH` | *(auto-detect)* | Path to ComfyUI data directory. Auto-detection suppressed in remote/cloud modes. |
-| `COMFYUI_PYTHON` | `python` | Python interpreter for cm-cli subprocess operations (`useCmCli`, `sync_node_dependencies`) — point it at your ComfyUI venv's python. cm-cli needs the local filesystem, so these are **local-mode only**; on remote targets use the Manager HTTP path (the default). |
+| `COMFY_CLI_PATH` | *(auto-detect)* | Path to the official `comfy` executable (comfy-cli >=1.11.1). Resolution also checks `PATH` and the selected workspace's `.venv`/`venv`. |
+| `COMFYUI_PYTHON` | `python` | Python interpreter used by legacy git-clone dependency fallbacks. Point it at your ComfyUI venv's Python when needed. |
 | `COMFYUI_MCP_BRIDGE_HOST` | `127.0.0.1` | Panel-bridge bind host. Set `0.0.0.0` (or a LAN IP) to run the orchestrator on a 24/7 server and connect panels from other machines — **requires a token** (below); the orchestrator prints a ready-to-paste `ws://…/?token=…` Bridge URL. |
 | `COMFYUI_MCP_BRIDGE_TOKEN` | *(generated when needed)* | Shared secret gating every bridge connection (checked constant-time on the WS upgrade). Mandatory for a non-loopback `COMFYUI_MCP_BRIDGE_HOST`; pin it so the Bridge URL survives restarts. Never logged beyond the startup banner. |
 | `COMFYUI_MCP_DATA_DIR` | `~/.comfyui-mcp` | Base dir for per-instance data (the `generations.db` used by `suggest_settings`) when there's no local `COMFYUI_PATH` (remote/cloud/undetected). Scoped per target under `instances/<host_port>/`. |

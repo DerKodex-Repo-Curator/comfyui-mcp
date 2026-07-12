@@ -11,11 +11,25 @@ import {
   type InstalledNode,
 } from "../services/node-management.js";
 import { errorToToolResult } from "../utils/errors.js";
+import { getComfyCliVersion, resolveComfyCliExecutable, shouldUseComfyCli } from "../services/comfy-cli.js";
 
 /** Graceful "not supported remotely" tool result (no isError), matching the
  *  degrade-don't-throw pattern list_local_models uses. */
 function remoteUnsupported(message: string) {
   return { content: [{ type: "text" as const, text: message }] };
+}
+
+function preferLocalComfyCli(explicit: boolean | undefined): boolean {
+  if (explicit !== undefined) return explicit;
+  if (!isLocalMode()) return false;
+  const executable = resolveComfyCliExecutable();
+  if (!executable) return false;
+  return shouldUseComfyCli(
+    undefined,
+    true,
+    executable,
+    getComfyCliVersion(),
+  );
 }
 
 const modeSchema = z
@@ -29,7 +43,7 @@ const useCmCliSchema = z
   .boolean()
   .optional()
   .describe(
-    "Force the cm-cli.py subprocess instead of the ComfyUI-Manager HTTP API. Requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.",
+    "Force the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install.",
   );
 
 const channelSchema = z
@@ -57,7 +71,7 @@ function formatInstalledNodes(nodes: InstalledNode[]): string {
 export function registerNodeManagementTools(server: McpServer): void {
   server.tool(
     "install_custom_node",
-    "Install a ComfyUI custom node pack by registry id (e.g. 'comfyui-impact-pack'), git URL, or name. Uses the ComfyUI-Manager HTTP API (works against remote instances) and falls back to the cm-cli subprocess when forced. A ComfyUI restart may be required to load newly installed nodes.",
+    "Install a ComfyUI custom node pack by registry id, git URL, or name. Local installs prefer official comfy-cli when available; remote or CLI-unavailable installs use the ComfyUI-Manager HTTP API. A ComfyUI restart may be required.",
     {
       id: z
         .string()
@@ -86,7 +100,7 @@ export function registerNodeManagementTools(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await installCustomNode(args);
+        const result = await installCustomNode({ ...args, useCmCli: preferLocalComfyCli(args.useCmCli) });
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
@@ -98,7 +112,7 @@ export function registerNodeManagementTools(server: McpServer): void {
 
   server.tool(
     "update_custom_node",
-    "Update an installed ComfyUI custom node pack, or pass 'all' to update every installed pack. Uses the ComfyUI-Manager HTTP API with a cm-cli subprocess fallback.",
+    "Update an installed ComfyUI custom node pack, or pass 'all' to update every installed pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP.",
     {
       id: z
         .string()
@@ -109,7 +123,7 @@ export function registerNodeManagementTools(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await updateCustomNode(args);
+        const result = await updateCustomNode({ ...args, useCmCli: preferLocalComfyCli(args.useCmCli) });
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
@@ -121,7 +135,7 @@ export function registerNodeManagementTools(server: McpServer): void {
 
   server.tool(
     "reinstall_custom_node",
-    "Reinstall a ComfyUI custom node pack (uninstall then install). Uses the ComfyUI-Manager HTTP API with a cm-cli subprocess fallback. A ComfyUI restart may be required.",
+    "Reinstall a ComfyUI custom node pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP. A ComfyUI restart may be required.",
     {
       id: z.string().describe("Registry id / module name to reinstall."),
       version: z
@@ -134,7 +148,7 @@ export function registerNodeManagementTools(server: McpServer): void {
     },
     async (args) => {
       try {
-        const result = await reinstallCustomNode(args);
+        const result = await reinstallCustomNode({ ...args, useCmCli: preferLocalComfyCli(args.useCmCli) });
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
@@ -146,7 +160,7 @@ export function registerNodeManagementTools(server: McpServer): void {
 
   server.tool(
     "fix_custom_node",
-    "Repair a ComfyUI custom node pack's install and Python dependencies, or pass 'all' to repair every pack. Single-pack repair uses the ComfyUI-Manager HTTP API; 'all' and forced runs use the cm-cli subprocess (requires a local ComfyUI install).",
+    "Repair a ComfyUI custom node pack's install and Python dependencies, or pass 'all' to repair every pack. Local operations prefer official comfy-cli; remote single-pack repairs use Manager HTTP.",
     {
       id: z
         .string()
@@ -168,7 +182,7 @@ export function registerNodeManagementTools(server: McpServer): void {
         );
       }
       try {
-        const result = await fixCustomNode(args);
+        const result = await fixCustomNode({ ...args, useCmCli: preferLocalComfyCli(args.useCmCli) });
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
@@ -204,7 +218,7 @@ export function registerNodeManagementTools(server: McpServer): void {
 
   server.tool(
     "sync_node_dependencies",
-    "Reconcile the Python dependencies of all installed custom node packs (comfy-cli `node uv-sync` analogue). Runs cm-cli restore-dependencies as a subprocess and requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.",
+    "Reconcile the Python dependencies of all installed custom node packs through official `comfy node restore-dependencies`. Requires a local ComfyUI install and comfy-cli.",
     {},
     async () => {
       if (!isLocalMode()) {

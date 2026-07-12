@@ -34,6 +34,11 @@ vi.mock("../../config.js", () => {
 // Mock child_process for the cm-cli subprocess paths.
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
+  spawnSync: vi.fn(() => ({
+    status: 0,
+    stdout: JSON.stringify({ schema: "envelope/1", type: "envelope", ok: true, command: "version", version: "1.11.1", where: null, data: {}, error: null }),
+    stderr: "",
+  })),
 }));
 
 // Mock fs so resolveCmCliPath's existsSync check is controllable.
@@ -67,7 +72,8 @@ const mockedExists = vi.mocked(existsSync);
 // platform separator (backslashes on Windows). Build the expected values the
 // same way instead of hardcoding POSIX paths.
 const COMFY = "/fake/comfy";
-const CM_CLI = join(COMFY, "custom_nodes", "ComfyUI-Manager", "cm-cli.py");
+const COMFY_CLI = join(COMFY, ".venv", process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "comfy.exe" : "comfy");
+const cliEnvelope = (data: unknown) => JSON.stringify({ schema: "envelope/1", type: "envelope", ok: true, command: "node", version: "1.11.1", where: "local", data, error: null });
 // runGitCheckout now resolves the target with path.resolve (containment check),
 // so the -C dir carries the drive letter on Windows — match it.
 const BAR_DIR = resolve(COMFY, "custom_nodes", "bar");
@@ -591,14 +597,18 @@ describe("node-management service", () => {
     });
 
     it("uses cm-cli subprocess when forced", async () => {
-      mockedExec.mockReturnValue("installed ok" as never);
+      mockedExec.mockReturnValue(cliEnvelope({ message: "installed ok" }) as never);
       const res = await installCustomNode({ id: "some-pack", useCmCli: true });
 
-      expect(res.mechanism).toBe("cm-cli");
+      expect(res.mechanism).toBe("comfy-cli");
       const [bin, args] = mockedExec.mock.calls[0];
-      expect(bin).toBe("python");
+      expect(bin).toBe(COMFY_CLI);
       expect(args).toEqual([
-        CM_CLI,
+        "--json",
+        "--workspace",
+        COMFY,
+        "--skip-prompt",
+        "node",
         "install",
         "some-pack",
         "--mode",
@@ -609,17 +619,21 @@ describe("node-management service", () => {
     });
 
     it("checks out the requested git ref after forced cm-cli install", async () => {
-      mockedExec.mockReturnValue("installed ok" as never);
+      mockedExec.mockReturnValue(cliEnvelope({ message: "installed ok" }) as never);
       const res = await installCustomNode({
         id: "https://github.com/foo/bar/tree/dev",
         ref: "abc123",
         useCmCli: true,
       });
 
-      expect(res.mechanism).toBe("cm-cli");
+      expect(res.mechanism).toBe("comfy-cli");
       expect(mockedExec).toHaveBeenCalledTimes(3);
       expect(mockedExec.mock.calls[0][1]).toEqual([
-        CM_CLI,
+        "--json",
+        "--workspace",
+        COMFY,
+        "--skip-prompt",
+        "node",
         "install",
         "https://github.com/foo/bar",
         "--mode",
@@ -701,9 +715,9 @@ describe("node-management service", () => {
     });
 
     it("routes 'all' to the cm-cli subprocess", async () => {
-      mockedExec.mockReturnValue("fixed all" as never);
+      mockedExec.mockReturnValue(cliEnvelope({ message: "fixed all" }) as never);
       const res = await fixCustomNode({ id: "all" });
-      expect(res.mechanism).toBe("cm-cli");
+      expect(res.mechanism).toBe("comfy-cli");
       const [, args] = mockedExec.mock.calls[0];
       expect(args).toContain("fix");
       expect(args).toContain("all");
@@ -774,12 +788,16 @@ describe("node-management service", () => {
 
   describe("syncNodeDependencies", () => {
     it("runs cm-cli restore-dependencies", async () => {
-      mockedExec.mockReturnValue("deps restored" as never);
+      mockedExec.mockReturnValue(cliEnvelope({ message: "deps restored" }) as never);
       const res = await syncNodeDependencies();
-      expect(res.mechanism).toBe("cm-cli");
+      expect(res.mechanism).toBe("comfy-cli");
       const [, args] = mockedExec.mock.calls[0];
       expect(args).toEqual([
-        CM_CLI,
+        "--json",
+        "--workspace",
+        COMFY,
+        "--skip-prompt",
+        "node",
         "restore-dependencies",
       ]);
     });

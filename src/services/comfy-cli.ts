@@ -1,0 +1,333 @@
+import * as childProcess from "node:child_process";
+import { existsSync } from "node:fs";
+import { delimiter, dirname, extname, join } from "node:path";
+import { config } from "../config.js";
+
+export interface ComfyCliError {
+  code: string;
+  message: string;
+  hint?: string | null;
+  details?: unknown;
+}
+
+export interface ComfyCliEnvelope<T = unknown> {
+  schema?: string;
+  type?: string;
+  ok: boolean;
+  command: string;
+  version: string;
+  where: "local" | "cloud" | null;
+  data: T | null;
+  error: ComfyCliError | null;
+}
+
+export interface ComfyCliRunOptions {
+  workspace?: string | null;
+  where?: "local" | "cloud";
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+}
+
+const MIN_COMFY_CLI_VERSION = [1, 11, 1] as const;
+const versionCache = new Map<string, string | null>();
+
+function executableNames(): string[] {
+  return process.platform === "win32" ? ["comfy.exe", "comfy"] : ["comfy"];
+}
+
+function workspaceCandidates(workspace?: string | null): string[] {
+  if (!workspace) return [];
+  const roots = [workspace, dirname(workspace)];
+  const dirs = roots.flatMap((root) => [
+    join(root, ".venv", process.platform === "win32" ? "Scripts" : "bin"),
+    join(root, "venv", process.platform === "win32" ? "Scripts" : "bin"),
+  ]);
+  return dirs.flatMap((dir) => executableNames().map((name) => join(dir, name)));
+}
+
+/** Resolve comfy-cli without invoking a shell. COMFY_CLI_PATH is authoritative. */
+export function resolveComfyCliExecutable(options: { refresh?: boolean; workspace?: string | null } = {}): string | null {
+  const explicit = process.env.COMFY_CLI_PATH?.trim();
+  if (explicit) {
+    if (process.platform === "win32" && [".cmd", ".bat"].includes(extname(explicit).toLowerCase())) {
+      return null;
+    }
+    return existsSync(explicit) ? explicit : null;
+  }
+
+  const workspace = options.workspace ?? config.comfyuiPath;
+  for (const candidate of workspaceCandidates(workspace)) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const dir of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+    for (const name of executableNames()) {
+      const candidate = join(dir.replace(/^"|"$/g, ""), name);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildArgs(args: readonly string[], options: ComfyCliRunOptions): string[] {
+  const result = ["--json"];
+  const workspace = options.workspace === undefined ? config.comfyuiPath : options.workspace;
+  if (workspace) result.push("--workspace", workspace);
+  if (options.where) result.push("--where", options.where);
+  result.push("--skip-prompt", ...args);
+  return result;
+}
+
+export function parseComfyCliEnvelope<T>(stdout: string, stderr = "", exitCode?: number): ComfyCliEnvelope<T> {
+  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+  let parsed: unknown;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    try {
+      parsed = JSON.parse(lines[index]);
+      break;
+    } catch {
+      // JSON streaming commands may emit events before the final envelope.
+    }
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`comfy-cli did not return a JSON envelope${exitCode == null ? "" : ` (exit ${exitCode})`}: ${stderr || stdout}`);
+  }
+  const envelope = parsed as Partial<ComfyCliEnvelope<T>>;
+  if (
+    envelope.schema !== "envelope/1" ||
+    envelope.type !== "envelope" ||
+    typeof envelope.ok !== "boolean" ||
+    typeof envelope.command !== "string" ||
+    typeof envelope.version !== "string"
+  ) {
+    throw new Error("comfy-cli returned JSON that does not match envelope/1");
+  }
+  return envelope as ComfyCliEnvelope<T>;
+}
+
+function hasJsonRecord(stdout: string): boolean {
+  return stdout.trim().split(/\r?\n/).some((line) => {
+    try {
+      JSON.parse(line);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function normalizeComfyCliResult<T = unknown>(
+  args: readonly string[],
+  options: ComfyCliRunOptions,
+  result: { stdout: string; stderr: string; exitCode: number },
+  version: string,
+): ComfyCliEnvelope<T> {
+  try {
+    return parseComfyCliEnvelope<T>(result.stdout, result.stderr, result.exitCode);
+  } catch (error) {
+    if (hasJsonRecord(result.stdout)) throw error;
+  }
+
+  const command = args.join(" ");
+  const details = { stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+  const alreadyStopped =
+    args.length === 1 &&
+    args[0] === "stop" &&
+    /no comfyui is running in the background/i.test(details.stderr || details.stdout);
+  if (alreadyStopped) {
+    return {
+      schema: "envelope/1",
+      type: "envelope",
+      ok: true,
+      command,
+      version,
+      where: options.where ?? null,
+      data: { ...details, already_stopped: true } as T,
+      error: null,
+    };
+  }
+  if (result.exitCode !== 0) {
+    return {
+      schema: "envelope/1",
+      type: "envelope",
+      ok: false,
+      command,
+      version,
+      where: options.where ?? null,
+      data: null,
+      error: {
+        code: "legacy_command_failed",
+        message: details.stderr || details.stdout || `comfy-cli exited with code ${result.exitCode}`,
+        details: { ...details, exit_code: result.exitCode },
+      },
+    };
+  }
+  return {
+    schema: "envelope/1",
+    type: "envelope",
+    ok: true,
+    command,
+    version,
+    where: options.where ?? null,
+    data: details as T,
+    error: null,
+  };
+}
+
+function requireExecutable(options: ComfyCliRunOptions): string {
+  const executable = resolveComfyCliExecutable({ workspace: options.workspace });
+  if (!executable) {
+    throw new Error(
+      "comfy-cli was not found. Install comfy-cli>=1.11.1 and ensure `comfy` is on PATH, " +
+        "set COMFY_CLI_PATH, or install it in the selected ComfyUI workspace's .venv.",
+    );
+  }
+  return executable;
+}
+
+function unsupportedVersionEnvelope<T>(
+  args: readonly string[],
+  options: ComfyCliRunOptions,
+  version: string | null,
+): ComfyCliEnvelope<T> {
+  return {
+    schema: "envelope/1",
+    type: "envelope",
+    ok: false,
+    command: args.join(" "),
+    version: version ?? "unknown",
+    where: options.where ?? null,
+    data: null,
+    error: {
+      code: "unsupported_version",
+      message: `comfy-cli >=1.11.1 is required; found ${version ?? "an unrecognized version"}.`,
+      hint: "Upgrade with: python -m pip install --upgrade comfy-cli",
+    },
+  };
+}
+
+export async function runComfyCli<T = unknown>(args: readonly string[], options: ComfyCliRunOptions = {}): Promise<ComfyCliEnvelope<T>> {
+  const executable = requireExecutable(options);
+  const detectedVersion = getExecutableVersion(executable);
+  if (!isSupportedComfyCliVersion(detectedVersion)) {
+    return unsupportedVersionEnvelope<T>(args, options, detectedVersion);
+  }
+  const version = detectedVersion!;
+  try {
+    const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      childProcess.execFile(
+        executable,
+        buildArgs(args, options),
+        {
+          encoding: "utf8",
+          timeout: options.timeoutMs ?? 120_000,
+          windowsHide: true,
+          maxBuffer: 16 * 1024 * 1024,
+          env: { ...process.env, PYTHONUTF8: "1", ...options.env },
+          cwd: options.cwd,
+        },
+        (error, stdout, stderr) => error ? reject(Object.assign(error, { stdout, stderr })) : resolve({ stdout, stderr }),
+      );
+    });
+    return normalizeComfyCliResult<T>(args, options, { ...result, exitCode: 0 }, version);
+  } catch (error) {
+    const processError = error as Error & { stdout?: string; stderr?: string; code?: number | string };
+    if (processError.code === "ENOENT") throw error;
+    const exitCode = typeof processError.code === "number" ? processError.code : 1;
+    return normalizeComfyCliResult<T>(
+      args,
+      options,
+      {
+        stdout: processError.stdout ?? "",
+        stderr: processError.stderr || processError.message,
+        exitCode,
+      },
+      version,
+    );
+  }
+}
+
+export function runComfyCliSync<T = unknown>(args: readonly string[], options: ComfyCliRunOptions = {}): ComfyCliEnvelope<T> {
+  const executable = requireExecutable(options);
+  const detectedVersion = getExecutableVersion(executable);
+  if (!isSupportedComfyCliVersion(detectedVersion)) {
+    return unsupportedVersionEnvelope<T>(args, options, detectedVersion);
+  }
+  const version = detectedVersion!;
+  try {
+    const stdout = childProcess.execFileSync(executable, buildArgs(args, options), {
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? 120_000,
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, PYTHONUTF8: "1", ...options.env },
+      cwd: options.cwd,
+    });
+    return normalizeComfyCliResult<T>(args, options, { stdout, stderr: "", exitCode: 0 }, version);
+  } catch (error) {
+    const processError = error as Error & { code?: string; stdout?: string | Buffer; stderr?: string | Buffer; status?: number };
+    if (processError.code === "ENOENT") throw error;
+    const stdout = processError.stdout?.toString() ?? "";
+    const stderr = processError.stderr?.toString() || processError.message;
+    return normalizeComfyCliResult<T>(args, options, { stdout, stderr, exitCode: processError.status ?? 1 }, version);
+  }
+}
+
+function getExecutableVersion(executable: string): string | null {
+  if (versionCache.has(executable)) return versionCache.get(executable) ?? null;
+  const result = childProcess.spawnSync(executable, ["--json", "--version"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 10_000,
+    maxBuffer: 1024 * 1024,
+    env: { ...process.env, PYTHONUTF8: "1" },
+  });
+  try {
+    const version = parseComfyCliEnvelope(result.stdout ?? "", result.stderr ?? "", result.status ?? undefined).version;
+    versionCache.set(executable, version);
+    return version;
+  } catch {
+    versionCache.set(executable, null);
+    return null;
+  }
+}
+
+export function getComfyCliVersion(options: { workspace?: string | null } = {}): string | null {
+  const executable = resolveComfyCliExecutable({ workspace: options.workspace });
+  return executable ? getExecutableVersion(executable) : null;
+}
+
+export function isSupportedComfyCliVersion(version: string | null): boolean {
+  if (!version) return false;
+  const parts = version.split(".").slice(0, 3).map((part) => Number.parseInt(part, 10));
+  if (parts.some((part) => !Number.isFinite(part))) return false;
+  for (let index = 0; index < MIN_COMFY_CLI_VERSION.length; index++) {
+    if ((parts[index] ?? 0) > MIN_COMFY_CLI_VERSION[index]) return true;
+    if ((parts[index] ?? 0) < MIN_COMFY_CLI_VERSION[index]) return false;
+  }
+  return true;
+}
+
+export function shouldUseComfyCli(
+  explicit: boolean | undefined,
+  localMode: boolean,
+  executable: string | null,
+  version: string | null,
+): boolean {
+  if (explicit !== undefined) return explicit;
+  return localMode && executable !== null && isSupportedComfyCliVersion(version);
+}
+
+export function assertComfyCliOk<T>(envelope: ComfyCliEnvelope<T>): ComfyCliEnvelope<T> {
+  if (!envelope.ok) {
+    const error = envelope.error;
+    throw new Error(`${error?.code ? `${error.code}: ` : ""}${error?.message ?? "comfy-cli command failed"}${error?.hint ? ` (${error.hint})` : ""}`);
+  }
+  return envelope;
+}

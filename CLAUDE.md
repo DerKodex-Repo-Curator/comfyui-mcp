@@ -19,6 +19,19 @@ This works for both:
 
 After code changes: `npm run build` then `/mcp` reconnect in Claude Code.
 
+## Official comfy-cli Integration
+
+`comfyui-mcp` integrates with official `comfy-cli` 1.11.1 or newer. Resolve the executable in this order: `COMFY_CLI_PATH`, the selected ComfyUI workspace's `.venv`/`venv`, then `PATH`.
+
+- Prefer the `comfy_cli_*` MCP tools for CLI-owned behavior: environment/workspace discovery, managed server lifecycle, jobs, loaded-node search, workflow validation/execution, upload/download, model discovery/download/removal, and official agent skills.
+- Local custom-node install/update/reinstall/fix operations prefer `comfy node` when a supported CLI is available. Fall back to ComfyUI-Manager HTTP when the CLI is missing or too old. Remote custom-node operations use Manager HTTP because the MCP host cannot manage the remote filesystem.
+- Always invoke comfy-cli non-interactively with global `--json --skip-prompt`. Newer commands emit `envelope/1`; legacy `stop`, `node`, and singular `model` commands may still print plain text in v1.11.1, so the adapter normalizes their exit status/stdout/stderr into the same envelope contract.
+- Treat `comfy stop` reporting that no background ComfyUI is running as idempotent success, so restart can continue to launch.
+- Project-scoped `comfy skills` operations require an explicit project working directory. Do not let them inherit the MCP package directory.
+- Do not reintroduce ComfyUI-Manager's removed `cm-cli.py` subprocess path.
+
+See the **Official comfy-cli** section in `README.md` and `COMFY_CLI_PATH` in `.env.example` for the user-facing contract.
+
 ## Plugin File Sync
 
 The plugin runs from cached copies, not the source tree. After changing files in `plugin/`:

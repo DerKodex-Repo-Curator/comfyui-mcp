@@ -695,15 +695,34 @@ export async function runPanelOrchestrator(): Promise<void> {
   // claude.ai login, never an API key. Unset the key for the SDK subprocess.
   delete process.env.ANTHROPIC_API_KEY;
 
-  // First non-internal IPv4 — display-only, for the LAN-bridge banner when the
-  // bind host is 0.0.0.0/:: (the real reachable address depends on the network).
+  // The phone-reachable LAN IPv4 for the pairing URL. Naively taking the FIRST
+  // non-internal IPv4 breaks on machines with a VPN (NordLynx/Tailscale/…) or a
+  // virtual adapter (WSL/Hyper-V/VMware/Docker) enumerated first — the phone
+  // can't reach 10.5.0.2 (a VPN tunnel) or 172.x (a WSL switch). Score candidates
+  // so a real Wi-Fi/Ethernet 192.168.x address wins and virtual/VPN NICs lose.
   const firstLanIPv4 = (): string | undefined => {
-    for (const addrs of Object.values(networkInterfaces())) {
+    const cands: Array<{ name: string; addr: string }> = [];
+    for (const [name, addrs] of Object.entries(networkInterfaces())) {
       for (const a of addrs ?? []) {
-        if (!a.internal && a.family === "IPv4") return a.address;
+        if (!a.internal && a.family === "IPv4") cands.push({ name, addr: a.address });
       }
     }
-    return undefined;
+    if (cands.length === 0) return undefined;
+    const isVirtual = (n: string) =>
+      /vethernet|hyper-v|\bwsl\b|virtualbox|vmware|\bvmnet\b|docker|nordlynx|tailscale|zerotier|\btun\d*\b|\btap\b|utun|radmin|hamachi|loopback/i.test(
+        n,
+      );
+    const score = (c: { name: string; addr: string }): number => {
+      let s = 0;
+      if (isVirtual(c.name)) s -= 100;
+      if (/wi-?fi|wlan|wireless|ethernet|en0|eth\d/i.test(c.name)) s += 20;
+      if (c.addr.startsWith("192.168.")) s += 30;
+      else if (/^172\.(1[6-9]|2\d|3[01])\./.test(c.addr)) s += 10;
+      else if (c.addr.startsWith("10.")) s += 5;
+      return s;
+    };
+    cands.sort((a, b) => score(b) - score(a));
+    return cands[0].addr;
   };
 
   // Secure bridge: when driving a REMOTE https ComfyUI (a pod), the pod's HTTPS

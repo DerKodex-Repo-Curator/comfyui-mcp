@@ -312,6 +312,21 @@ export function setAgentSecret(key: string, value: string): void {
   emitter.emit("agentChange");
 }
 
+/** Remove a stored agent secret. Returns false if absent. Also drops it from
+ *  process.env (setAgentSecret put it there — a revoked key must stop applying
+ *  NOW, not on the next restart). Emits on removal. */
+export function removeAgentSecret(key: string): boolean {
+  const secrets = read();
+  const env = secrets.agentEnv;
+  if (!env || !(key in env)) return false;
+  delete env[key];
+  secrets.agentEnv = env;
+  write(secrets);
+  delete process.env[key];
+  emitter.emit("agentChange");
+  return true;
+}
+
 /**
  * Build the comfyui MCP server's spawn env: the orchestrator's `base` env
  * (COMFYUI_URL, progress dir, COMFYUI_PATH…) MERGED with the persisted tool
@@ -358,6 +373,19 @@ export function setPanelSecret(slotId: string, value: string): void {
   if (!slot) throw new Error(`unknown credential slot "${slotId}"`);
   const set = slot.store === "agent" ? setAgentSecret : setComfyuiSecret;
   for (const key of slot.envKeys) set(key, value);
+}
+
+/** Clear a slot: remove EVERY env key (alias fan-out, mirroring setPanelSecret)
+ *  from its store. Returns true if anything was removed. Throws on unknown slot.
+ *  This is the revoke path (issue #203) — without it a saved key could only be
+ *  overwritten, never removed, short of hand-editing panel-secrets.json. */
+export function clearPanelSecret(slotId: string): boolean {
+  const slot = SLOT_BY_ID.get(slotId);
+  if (!slot) throw new Error(`unknown credential slot "${slotId}"`);
+  const remove = slot.store === "agent" ? removeAgentSecret : removeComfyuiSecret;
+  let removed = false;
+  for (const key of slot.envKeys) removed = remove(key) || removed;
+  return removed;
 }
 
 /** Masked per-slot state: set = the slot's PRIMARY (first) env key has a stored value. */

@@ -11,7 +11,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname, join, resolve, sep } from "node:path";
 import { allBackendReadiness } from "./backend-readiness.js";
 import { getLoraCatalog, loraPreviewsDir } from "../services/lora-catalog.js";
-import { setPanelSecret, listPanelSecretsMasked, CREDENTIAL_SLOTS } from "../services/panel-secrets.js";
+import { setPanelSecret, clearPanelSecret, listPanelSecretsMasked, CREDENTIAL_SLOTS } from "../services/panel-secrets.js";
 import { logger } from "../utils/logger.js";
 
 const KNOWN_BACKENDS = [
@@ -395,8 +395,18 @@ export function startPanelConsoleHttpServer(opts: {
         try { body = await readJsonBody(req); } catch { sendJson(res, 400, { ok: false, error: "bad json" }); return; }
         const slot = String(body?.slot ?? "");
         const value = String(body?.value ?? "");
-        if (!slot || !value) { sendJson(res, 400, { ok: false, error: "slot and value required" }); return; }
+        const clear = body?.clear === true;
+        if (!slot || (!value && !clear)) {
+          sendJson(res, 400, { ok: false, error: "slot and value required (or clear: true to revoke)" });
+          return;
+        }
         try {
+          if (clear) {
+            // Revoke path (issue #203): remove every alias key of the slot.
+            const removed = clearPanelSecret(slot);
+            sendJson(res, 200, { ok: true, slot, cleared: removed });
+            return;
+          }
           setPanelSecret(slot, value);
           const masked = listPanelSecretsMasked().find((s) => s.id === slot)?.masked ?? null;
           sendJson(res, 200, { ok: true, slot, masked });

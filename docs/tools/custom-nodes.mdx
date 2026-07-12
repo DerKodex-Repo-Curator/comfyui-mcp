@@ -64,7 +64,7 @@ Get full details for one ComfyUI custom node pack from the public ComfyUI Regist
 
 ## install_custom_node
 
-Install a ComfyUI custom node pack by registry id (e.g. 'comfyui-impact-pack'), git URL, or name. Uses the ComfyUI-Manager HTTP API (works against remote instances) and falls back to the cm-cli subprocess when forced. A ComfyUI restart may be required to load newly installed nodes.
+Install a ComfyUI custom node pack by registry id, git URL, or name. Local installs prefer official comfy-cli when available; remote or CLI-unavailable installs use the ComfyUI-Manager HTTP API. A ComfyUI restart may be required.
 
 ### Parameters
 
@@ -87,7 +87,7 @@ Install a ComfyUI custom node pack by registry id (e.g. 'comfyui-impact-pack'), 
   ComfyUI-Manager channel name (default 'default').
 </ParamField>
 <ParamField path="useCmCli" type="boolean">
-  Force the cm-cli.py subprocess instead of the ComfyUI-Manager HTTP API. Requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.
+  Force the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install.
 </ParamField>
 
 ### Example
@@ -107,7 +107,7 @@ Install a ComfyUI custom node pack by registry id (e.g. 'comfyui-impact-pack'), 
 
 ## update_custom_node
 
-Update an installed ComfyUI custom node pack, or pass 'all' to update every installed pack. Uses the ComfyUI-Manager HTTP API with a cm-cli subprocess fallback.
+Update an installed ComfyUI custom node pack, or pass 'all' to update every installed pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP.
 
 ### Parameters
 
@@ -121,7 +121,7 @@ Update an installed ComfyUI custom node pack, or pass 'all' to update every inst
   ComfyUI-Manager channel name (default 'default').
 </ParamField>
 <ParamField path="useCmCli" type="boolean">
-  Force the cm-cli.py subprocess instead of the ComfyUI-Manager HTTP API. Requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.
+  Force the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install.
 </ParamField>
 
 ### Example
@@ -141,7 +141,7 @@ Update an installed ComfyUI custom node pack, or pass 'all' to update every inst
 
 ## reinstall_custom_node
 
-Reinstall a ComfyUI custom node pack (uninstall then install). Uses the ComfyUI-Manager HTTP API with a cm-cli subprocess fallback. A ComfyUI restart may be required.
+Reinstall a ComfyUI custom node pack. Local operations prefer official comfy-cli; remote operations use Manager HTTP. A ComfyUI restart may be required.
 
 ### Parameters
 
@@ -158,7 +158,7 @@ Reinstall a ComfyUI custom node pack (uninstall then install). Uses the ComfyUI-
   ComfyUI-Manager channel name (default 'default').
 </ParamField>
 <ParamField path="useCmCli" type="boolean">
-  Force the cm-cli.py subprocess instead of the ComfyUI-Manager HTTP API. Requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.
+  Force the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install.
 </ParamField>
 
 ### Example
@@ -178,7 +178,7 @@ Reinstall a ComfyUI custom node pack (uninstall then install). Uses the ComfyUI-
 
 ## fix_custom_node
 
-Repair a ComfyUI custom node pack's install and Python dependencies, or pass 'all' to repair every pack. Single-pack repair uses the ComfyUI-Manager HTTP API; 'all' and forced runs use the cm-cli subprocess (requires a local ComfyUI install).
+Repair a ComfyUI custom node pack's install and Python dependencies, or pass 'all' to repair every pack. Local operations prefer official comfy-cli; remote single-pack repairs use Manager HTTP.
 
 ### Parameters
 
@@ -192,7 +192,7 @@ Repair a ComfyUI custom node pack's install and Python dependencies, or pass 'al
   ComfyUI-Manager channel name (default 'default').
 </ParamField>
 <ParamField path="useCmCli" type="boolean">
-  Force the cm-cli.py subprocess instead of the ComfyUI-Manager HTTP API. Requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.
+  Force the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install.
 </ParamField>
 
 ### Example
@@ -220,7 +220,7 @@ List installed ComfyUI custom node packs with their version and enabled/disabled
   'default' lists all installed packs; 'imported' lists only those successfully imported this session. Options: `default`, `imported`.
 </ParamField>
 <ParamField path="useCmCli" type="boolean">
-  Force the cm-cli.py subprocess instead of the ComfyUI-Manager HTTP API. Requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.
+  Force the official comfy-cli subprocess instead of the ComfyUI-Manager HTTP API. Local operations use comfy-cli by default; set false to force Manager HTTP. Requires a local ComfyUI install.
 </ParamField>
 
 ### Example
@@ -238,7 +238,7 @@ List installed ComfyUI custom node packs with their version and enabled/disabled
 
 ## sync_node_dependencies
 
-Reconcile the Python dependencies of all installed custom node packs (comfy-cli `node uv-sync` analogue). Runs cm-cli restore-dependencies as a subprocess and requires a local ComfyUI install (COMFYUI_PATH); errors in remote --comfyui-url mode.
+Reconcile the Python dependencies of all installed custom node packs through official `comfy node restore-dependencies`. Requires a local ComfyUI install and comfy-cli.
 
 <Note>This tool takes no parameters.</Note>
 

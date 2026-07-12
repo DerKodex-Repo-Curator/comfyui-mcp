@@ -490,9 +490,11 @@ describe("panel-tools: workflow target (per-workflow agent)", () => {
       push: () => 1,
     } as PanelToolCtx["bridge"];
     const ctx = makePanelToolCtx(bridge, "test-tab", store);
-    await defByName("panel_get_graph").handler({}, ctx);
+    // Upstream replaced panel_get_graph (graph_get_state) with panel_query_graph
+    // (graph_query) — same injection path: any graph_* command gets the pin.
+    await defByName("panel_query_graph").handler({}, ctx);
     expect(calls[0]).toMatchObject({
-      cmd: "graph_get_state",
+      cmd: "graph_query",
       workflow_path: "workflows/pinned.json",
     });
   });

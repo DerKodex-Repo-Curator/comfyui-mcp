@@ -106,6 +106,7 @@ const CATEGORIES: Array<{
       "create_workflow", "modify_workflow", "validate_workflow", "get_node_info",
       "workflow_to_dsl", "dsl_to_workflow", "visualize_workflow",
       "visualize_workflow_hierarchical", "mermaid_to_workflow",
+      "prompt_director_inspect",
     ],
   },
   {
@@ -137,6 +138,7 @@ const CATEGORIES: Array<{
       "search_models", "download_model", "download_civitai_model", "list_local_models",
       "remove_model", "list_extra_paths", "add_extra_path", "remove_extra_path",
       "get_embeddings", "clear_vram",
+      "model_metadata_read", "model_metadata_propose", "model_metadata_fetch_civitai",
     ],
   },
   {

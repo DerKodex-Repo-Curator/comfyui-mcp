@@ -9,7 +9,16 @@
 
 import type { ImageRef } from "./panel-agent.js";
 
-export type BackendId = "claude" | "codex" | "gemini" | "grok" | "ollama" | "openrouter";
+export type BackendId =
+  | "claude"
+  | "codex"
+  | "chatgpt"
+  | "gemini"
+  | "grok"
+  | "glm"
+  | "kimi"
+  | "ollama"
+  | "openrouter";
 
 /**
  * A user turn in PROVIDER-NEUTRAL form. PanelAgent owns the queue/turn-gate and
@@ -254,4 +263,28 @@ export const OLLAMA_CAPABILITIES: AgentCapabilities = {
   slashCommands: false,
   hooks: false,
   vision: false,
+};
+
+/** ChatGPT subscription via direct Codex OAuth (~/.codex/auth.json) — Codex Responses
+ *  HTTP backend (not the codex app-server CLI). Same 6-tool router as Ollama. */
+export const CHATGPT_CAPABILITIES: AgentCapabilities = {
+  persistentChannel: true,
+  streamingDeltas: true,
+  interruptMidTurn: true,
+  forkAtAnchor: false,
+  inProcessMcp: false,
+  modelEnumeration: true, // ~/.codex/models_cache.json + configured default
+  slashCommands: false,
+  hooks: false,
+  vision: false,
+};
+
+/** Z.AI GLM Coding Plan — OpenAI-compatible /v1/chat/completions. */
+export const GLM_CAPABILITIES: AgentCapabilities = {
+  ...OLLAMA_CAPABILITIES,
+};
+
+/** Kimi Code subscription OAuth or KIMI_API_KEY — OpenAI-compatible coding API. */
+export const KIMI_CAPABILITIES: AgentCapabilities = {
+  ...OLLAMA_CAPABILITIES,
 };

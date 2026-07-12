@@ -117,6 +117,27 @@ export function backendReadiness(
     const auth = fileExists(home, ".codex", "auth.json");
     return { backend: "codex", cli, auth, ready: cli && auth };
   }
+  if (b === "chatgpt") {
+    // Direct Codex OAuth — no CLI; ~/.codex/auth.json from `codex login`.
+    const auth = fileExists(home, ".codex", "auth.json");
+    return { backend: "chatgpt", cli: true, auth, ready: !!auth };
+  }
+  if (b === "glm") {
+    const apiKey =
+      process.env.ZAI_API_KEY?.trim() ||
+      process.env.GLM_API_KEY?.trim() ||
+      process.env.ZHIPUAI_API_KEY?.trim() ||
+      process.env.ZHIPU_API_KEY?.trim();
+    const auth = !!apiKey;
+    return { backend: "glm", cli: true, auth, ready: auth };
+  }
+  if (b === "kimi") {
+    const apiKey = process.env.KIMI_API_KEY?.trim();
+    const kimiShare = process.env.KIMI_SHARE_DIR || join(home, ".kimi");
+    const oauth = fileExists(kimiShare, "credentials", "kimi-code.json");
+    const auth = !!apiKey || oauth;
+    return { backend: "kimi", cli: true, auth, ready: auth };
+  }
   if (b === "gemini") {
     const cli = onPath(CLI_NAMES.gemini);
     // The gemini CLI caches its Google OAuth at <home>/.gemini/oauth_creds.json

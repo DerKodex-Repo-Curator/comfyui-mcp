@@ -19,6 +19,7 @@ import { logger } from "../utils/logger.js";
 import type {
   AgentBackend,
   AgentEvent,
+  BackendId,
   BackendStartOptions,
   ModelChoice,
   NeutralTurn,
@@ -67,6 +68,8 @@ export interface OllamaBackendDeps {
   numCtx?: number;
   /** Test seam: replaces the MCP client construction from mcpServers specs. */
   connectToolClients?: () => Promise<{ comfyui?: McpToolClient; panel?: McpToolClient }>;
+  /** Panel backend id when reusing this driver for GLM/Kimi/Ollama (default ollama). */
+  backendId?: BackendId;
 }
 
 type ChatMessage = {
@@ -193,38 +196,45 @@ export function isOllamaModel(id: string): boolean {
 }
 
 export class OllamaBackend implements AgentBackend {
-  readonly id = "ollama" as const;
+  readonly id: BackendId;
   readonly capabilities = OLLAMA_CAPABILITIES;
-  private deps: OllamaBackendDeps;
-  private host: string;
-  private model: string;
-  private disposed = false;
-  private prepared = false;
+  protected deps: OllamaBackendDeps;
+  protected host: string;
+  protected model: string;
+  protected disposed = false;
+  protected prepared = false;
   /** In-flight turn abort — interrupt() aborts the current fetch/loop. */
-  private turnAbort: AbortController | null = null;
-  private comfy: McpToolClient | null = null;
-  private panel: McpToolClient | null = null;
+  protected turnAbort: AbortController | null = null;
+  protected comfy: McpToolClient | null = null;
+  protected panel: McpToolClient | null = null;
   /** comfyui compact meta-tool defs (from tools/list) — handed to the model verbatim. */
-  private comfyTools: McpToolInfo[] = [];
+  protected comfyTools: McpToolInfo[] = [];
   /** panel_* tool list (full defs stay HERE; the model gets 3 meta-tools). */
-  private panelTools: McpToolInfo[] = [];
+  protected panelTools: McpToolInfo[] = [];
   /** Conversation history for the live session (Ollama is stateless per request). */
   private history: ChatMessage[] = [];
   private sessionId: string | null = null;
 
   /** Wire dialect (see OllamaBackendDeps.api). */
-  private api: "ollama" | "openai";
-  private apiKey: string | undefined;
+  protected api: "ollama" | "openai";
+  protected apiKey: string | undefined;
 
   constructor(deps: OllamaBackendDeps = {}) {
     this.deps = deps;
+    this.id = deps.backendId ?? "ollama";
     this.api = deps.api ?? "ollama";
     this.apiKey = deps.apiKey;
     this.host = (deps.host ?? process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(/\/$/, "");
     this.model = deps.model ?? DEFAULT_MODEL;
   }
 
-  private authHeaders(): Record<string, string> {
+  protected setOpenAiAuth(host: string, apiKey: string): void {
+    this.api = "openai";
+    this.host = host.replace(/\/$/, "");
+    this.apiKey = apiKey;
+  }
+
+  protected authHeaders(): Record<string, string> {
     return this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {};
   }
 
@@ -279,7 +289,7 @@ export class OllamaBackend implements AgentBackend {
     );
   }
 
-  private async connectTools(): Promise<void> {
+  protected async connectTools(): Promise<void> {
     if (this.deps.connectToolClients) {
       const { comfyui, panel } = await this.deps.connectToolClients();
       this.comfy = comfyui ?? null;
@@ -317,7 +327,7 @@ export class OllamaBackend implements AgentBackend {
   }
 
   /** The six OpenAI-style tool defs the model sees. */
-  private buildModelTools(): Array<Record<string, unknown>> {
+  protected buildModelTools(): Array<Record<string, unknown>> {
     const defs: Array<Record<string, unknown>> = [];
     for (const t of this.comfyTools) {
       defs.push({
@@ -372,7 +382,7 @@ export class OllamaBackend implements AgentBackend {
   }
 
   /** Dispatch one model tool call; returns display text (never throws). */
-  private async dispatch(name: string, rawArgs: Record<string, unknown> | string): Promise<{ text: string; isError: boolean }> {
+  protected async dispatch(name: string, rawArgs: Record<string, unknown> | string): Promise<{ text: string; isError: boolean }> {
     let args: Record<string, unknown> = {};
     if (typeof rawArgs === "string") {
       try {

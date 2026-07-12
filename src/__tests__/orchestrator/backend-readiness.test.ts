@@ -93,6 +93,31 @@ describe("backendReadiness", () => {
     expect(r.ready).toBe(true);
   });
 
+  it("chatgpt: ready when ~/.codex/auth.json exists (no CLI)", () => {
+    mkdirSync(join(tmp, ".codex"), { recursive: true });
+    writeFileSync(join(tmp, ".codex", "auth.json"), "{}");
+    const r = backendReadiness("chatgpt", { home: tmp });
+    expect(r.cli).toBe(true);
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+  });
+
+  it("glm: ready when ZAI_API_KEY is set", () => {
+    process.env.ZAI_API_KEY = "zai-key";
+    const r = backendReadiness("glm", { home: tmp });
+    expect(r.ready).toBe(true);
+    delete process.env.ZAI_API_KEY;
+  });
+
+  it("kimi: ready with oauth file or KIMI_API_KEY", () => {
+    mkdirSync(join(tmp, ".kimi", "credentials"), { recursive: true });
+    writeFileSync(join(tmp, ".kimi", "credentials", "kimi-code.json"), "{}");
+    process.env.KIMI_SHARE_DIR = join(tmp, ".kimi");
+    const r = backendReadiness("kimi", { home: tmp });
+    expect(r.ready).toBe(true);
+    delete process.env.KIMI_SHARE_DIR;
+  });
+
   it("unknown backend is never ready", () => {
     expect(backendReadiness("bogus").ready).toBe(false);
   });

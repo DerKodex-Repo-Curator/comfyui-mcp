@@ -705,6 +705,21 @@ export class PanelAgent {
           resumeSessionId = undefined;
           resumeMiss = true;
         }
+        // SELF-HEAL: a crash mid-turn (the SDK process dying, e.g. code
+        // 4294967295) leaves the triggering message unprocessed. Resuming the
+        // session finds the turn already recorded as ended, so it produces empty
+        // "success" turns and the user's request is silently EATEN. Re-queue the
+        // in-flight message so the restarted/fresh session actually re-runs it.
+        // Idempotent enough: a duplicate render beats a lost request, and the
+        // quickRestarts give-up guard still bounds a message that crash-loops.
+        if (this.inFlight) {
+          const interrupted = this.inFlight;
+          this.inFlight = null;
+          this.queue.unshift(interrupted);
+          logger.warn(
+            `[panel-agent ${this.short()}] crash mid-turn — re-queued the interrupted message so it isn't lost`,
+          );
+        }
       }
       // Session ended (cleanly or via error) — disarm any armed watchdog AND the
       // interrupt-release fallback so a stale timer from the dead session can't fire

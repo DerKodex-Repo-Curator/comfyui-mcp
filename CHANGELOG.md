@@ -6,6 +6,33 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.32.0] - 2026-07-14
+
+### MCP
+
+#### Added
+- inline image delivery for every Ollama-family backend (ollama / OpenRouter /
+  LM Studio / llama.cpp / custom / GLM / Kimi / Copilot) — vision is per-MODEL,
+  always attempted (native `images` base64 or OpenAI `image_url` parts), with a
+  graceful one-shot strip-and-retry + honest 📎 note when the endpoint rejects
+  image input; live-verified against local ComfyUI and a cloudflared tunnel
+- boot diagnostic logging which keyed providers have a key and its source
+  (env / store / none — never values)
+
+#### Fixed
+- the gemma4 fine-tune tags' baked `temperature 0` caused greedy repetition
+  loops — the backend now sends the Gemma-recommended sampling (temp 1.0 /
+  top_k 64 / top_p 0.95) for the fine-tune tags; `COMFYUI_MCP_OLLAMA_TEMPERATURE`
+  / `TOP_K` / `TOP_P` override wholesale
+- render-completed events no longer tell a text-only model the image is
+  "attached below" (confabulation guard)
+
+#### Changed
+- `~/.comfyui-mcp/.env` is the only dotenv location (dev override; a legacy
+  package-root `.env` is auto-migrated once, then ignored) — panel users manage
+  keys via the API Keys card, MCP-only setups via the client config env block
+- docker build context whitelisted to exactly what the Dockerfile COPYs (#217)
+
 ## [0.31.1] - 2026-07-14
 
 ### MCP

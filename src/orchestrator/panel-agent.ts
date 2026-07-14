@@ -184,6 +184,10 @@ export class PanelAgent {
    *  session-restarting option change (effort) until the turn finishes, instead
    *  of interrupting and silently dropping the in-flight reply. */
   private busy = false;
+  /** True once THIS turn's failure has been surfaced to the user — set by the
+   *  `error` event case so an error-subtype `result` right behind it doesn't
+   *  paint a second failure line. Reset when a turn starts (busy = true). */
+  private errorSurfaced = false;
   // ---- turn idle watchdog (freeze safety net) ----
   // A stalled turn (the backend stops emitting ANY events — e.g. a wedged Codex
   // app-server) would otherwise leave the panel "working" forever. This is an
@@ -605,6 +609,7 @@ export class PanelAgent {
       // the watchdog's `busy` guard would be false for the exact zero-event freeze
       // it's meant to catch, so onTurnStalled() would no-op. (handleEvent's later
       // `busy = true` becomes a harmless no-op.) Also shows "working" immediately.
+      this.errorSurfaced = false; // fresh turn → its failure (if any) is unreported
       this.busy = true;
       this.deps.onTurn?.(this.tabId, "working");
       // Arm the freeze watchdog AT DISPATCH: a turn that produces NO events at all
@@ -883,6 +888,22 @@ export class PanelAgent {
         }
         break;
       }
+      case "error": {
+        // A backend-reported turn error (codex/gemini/grok emit these before
+        // their error result). Without this case the message fell through
+        // `default` and the user watched a turn end in TOTAL silence — the
+        // exact "three Hellos into the void" failure from the support thread.
+        // Surface it as a visible chat line; the follow-up `result` event still
+        // advances the turn gate normally.
+        const detail = typeof ev.message === "string" && ev.message.trim() ? ev.message.trim() : "unknown error";
+        this.errorSurfaced = true;
+        this.deps.onSay(
+          this.tabId,
+          `⚠️ The ${this.model} turn failed: ${detail}\n\nNothing was lost — try again, switch models from the composer picker, or check the terminal running the orchestrator for more detail.`,
+        );
+        logger.warn(`[panel-agent ${this.short()}] backend error: ${detail}`);
+        break;
+      }
       case "result": {
         // Cache the context window + cost from the result, then re-report using
         // the last assistant usage (the true current context).
@@ -902,6 +923,18 @@ export class PanelAgent {
         // fork the conversation here for a rewind.
         if (this.lastAssistantUuid) this.deps.onTurnAnchor?.(this.tabId, this.lastAssistantUuid);
         this.deps.onTurn?.(this.tabId, "done");
+        // Failed turn that never produced a visible error (the claude SDK path
+        // reports failures only via the result subtype; the `error` event case
+        // covers codex/gemini/grok) → say SOMETHING. A turn must never end in
+        // silence, error turns included.
+        if ((ev.ok === false || /error/i.test(ev.subtype ?? "")) && !this.errorSurfaced) {
+          this.errorSurfaced = true;
+          this.deps.onSay(
+            this.tabId,
+            `⚠️ That turn failed (${ev.subtype ?? "error"}) without a reply. ` +
+              `Nothing was lost — try again, switch models from the composer picker, or check the orchestrator terminal for detail.`,
+          );
+        }
         logger.info(
           `[panel-agent ${this.short()}] turn done (subtype=${ev.subtype})`,
         );

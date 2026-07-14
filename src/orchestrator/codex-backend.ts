@@ -541,6 +541,9 @@ export class CodexBackend implements AgentBackend {
   private disposed = false;
   /** Cached resolved path to the codex binary/launcher (set in prepare()). */
   private bin: string | null = null;
+  /** Account-aware model catalog from the app-server's model/list (set by
+   *  listModels()); resolveTurnModel() clamps every thread's model to it. */
+  private liveCatalog: ModelChoice[] | null = null;
   /** Sandbox posture for the app-server + every thread (COMFYUI_MCP_CODEX_SANDBOX,
    *  default danger-full-access — mirrors Claude's bypassPermissions). Read once at
    *  construction so it's stable for this backend instance. */
@@ -760,13 +763,19 @@ export class CodexBackend implements AgentBackend {
     // forkAtAnchor is false (CODEX_CAPABILITIES) → ignore opts.rewindAnchor; we
     // only do whole-thread resume.
     const resumeId = opts.resume ?? opts.sessionId ?? null;
+    // Make sure THIS instance knows the account's live model catalog before the
+    // thread opens — each tab's agent gets its own backend instance, so the
+    // catalog fetched by the connect-time advertisement lives elsewhere. Without
+    // this, resolveTurnModel() has nothing to clamp against and defers to the
+    // ~/.codex config default, which can be unrunnable (see resolveTurnModel).
+    if (!this.liveCatalog) await this.listModels().catch(() => {});
     let threadModel: string | undefined;
     if (resumeId) {
       // thread/resume continues an existing conversation by id.
       const res = await client.request<{ thread: { id: string }; model?: string }>("thread/resume", {
         threadId: resumeId,
         cwd,
-        model: this.model ?? null,
+        model: this.resolveTurnModel(),
         approvalPolicy: "never",
         sandbox: this.sandbox,
       });
@@ -779,7 +788,7 @@ export class CodexBackend implements AgentBackend {
       // thread/start opens a fresh conversation.
       const res = await client.request<{ thread: { id: string }; model?: string }>("thread/start", {
         cwd,
-        model: this.model ?? null,
+        model: this.resolveTurnModel(),
         approvalPolicy: "never",
         sandbox: this.sandbox,
         ephemeral: false,
@@ -1146,16 +1155,73 @@ export class CodexBackend implements AgentBackend {
   }
 
   /**
-   * Codex model enumeration. config/read reports the active provider/model rather
-   * than a catalog, so we surface a sensible static set (the current Codex model
-   * family). Returns [] only if even that can't be determined.
+   * Codex model enumeration — LIVE via the app-server's `model/list` (codex-cli
+   * ≥ ~0.14x), which is ACCOUNT-AWARE: a ChatGPT-plan login only sees models that
+   * plan can actually run. The old static list advertised ids the account
+   * couldn't use (e.g. "gpt-5.5-codex" on a ChatGPT account), so picking one
+   * 400'd every turn ("The 'gpt-5.5-codex' model is not supported when using
+   * Codex with a ChatGPT account" — Discord #help). Falls back to the static
+   * family only when the RPC is unavailable (older CLI) or errors.
    */
   async listModels(): Promise<ModelChoice[]> {
-    // Every Codex ModelChoice MUST carry CODEX_EFFORT_LEVELS so the panel enables
-    // the reasoning-effort dropdown (the backend applies effort to every turn).
-    // The fallback already does; if a future live config/read path builds its own
-    // ModelChoice(s) here, attach `supportedEffortLevels: [...CODEX_EFFORT_LEVELS]`.
+    try {
+      await this.prepare();
+      const client = this.client;
+      if (client) {
+        const res = await client.request<{
+          data?: Array<{
+            id?: string;
+            model?: string;
+            displayName?: string;
+            description?: string;
+            hidden?: boolean;
+            supportedReasoningEfforts?: Array<{ reasoningEffort?: string }>;
+          }>;
+        }>("model/list", {});
+        const live = (res?.data ?? [])
+          .filter((m) => (m.id || m.model) && m.hidden !== true)
+          .map((m): ModelChoice => {
+            const efforts = (m.supportedReasoningEfforts ?? [])
+              .map((e) => e.reasoningEffort)
+              .filter((e): e is string => typeof e === "string" && (CODEX_EFFORT_LEVELS as readonly string[]).includes(e));
+            return {
+              id: (m.id ?? m.model) as string,
+              ...(m.displayName ? { label: m.displayName } : {}),
+              // Every Codex ModelChoice MUST advertise effort support so the
+              // panel enables the reasoning dropdown (the backend applies
+              // effort to every turn regardless). Prefer the model's own list.
+              supportsEffort: true,
+              supportedEffortLevels: efforts.length ? efforts : [...CODEX_EFFORT_LEVELS],
+            };
+          });
+        if (live.length) {
+          this.liveCatalog = live;
+          return live;
+        }
+      }
+    } catch (err) {
+      logger.debug(`[codex-backend] model/list unavailable (older CLI?): ${msgOf(err)} — using static fallback`);
+    }
     return CODEX_FALLBACK_MODELS;
+  }
+
+  /** The model to pass to thread/start|resume, CLAMPED to the live catalog.
+   *  Passing null defers to the user's ~/.codex config default — which can name
+   *  a model the RESOLVED binary or the account can't run (e.g. a newer CLI
+   *  wrote `gpt-5.6-sol` into config, our optional-dep binary is older → every
+   *  turn 400s "requires a newer version of Codex"). If we know the catalog and
+   *  the requested/configured model isn't in it, use the catalog's first entry
+   *  and say so in the log. Without a catalog, behave as before. */
+  private resolveTurnModel(): string | null {
+    const cat = this.liveCatalog;
+    if (!cat || !cat.length) return this.model ?? null;
+    const wanted = this.model;
+    if (wanted && cat.some((m) => m.id === wanted)) return wanted;
+    const fallback = cat[0].id;
+    logger.warn(
+      `[codex-backend] model ${wanted ?? "(config default)"} is not in the account's live catalog — using ${fallback}`,
+    );
+    return fallback;
   }
 
   /** Permanently dispose of the backend (AgentBackend.close): kill the app-server

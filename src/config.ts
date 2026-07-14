@@ -2,7 +2,7 @@ import { z } from "zod";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, resolve, join } from "path";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { parseComfyUIUrl, type ComfyUITarget } from "./transport/comfyui-url.js";
 
@@ -21,6 +21,12 @@ try {
   if (!existsSync(homeEnvPath) && existsSync(legacyEnvPath)) {
     mkdirSync(dirname(homeEnvPath), { recursive: true });
     copyFileSync(legacyEnvPath, homeEnvPath);
+    // owner-only, matching panel-secrets.json (no-op on Windows ACLs)
+    try {
+      chmodSync(homeEnvPath, 0o600);
+    } catch {
+      /* ignore */
+    }
     process.stderr.write(`[comfyui-mcp] migrated ${legacyEnvPath} -> ${homeEnvPath} (the package .env is no longer read)\n`);
   }
 } catch {

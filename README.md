@@ -565,6 +565,8 @@ The server auto-detects your ComfyUI installation and port. Override with enviro
 
 You can set any variable below in your shell/system environment, or put it in **`~/.comfyui-mcp/.env`** (same path on Windows, macOS, and Linux — next to the rest of your comfyui-mcp files). Real environment variables win over `.env` values. See `.env.example` for a starting point.
 
+Keys pasted into the panel's **API Keys** card are stored separately in `~/.comfyui-mcp/panel-secrets.json` and only fill in what the environment didn't provide — if the same key exists in both, the environment/`.env` value wins.
+
 ### Deployment modes
 
 `comfyui-mcp` operates in one of three modes, auto-selected from the environment:

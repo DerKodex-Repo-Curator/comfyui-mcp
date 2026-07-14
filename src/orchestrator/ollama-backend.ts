@@ -787,13 +787,20 @@ export class OllamaBackend implements AgentBackend {
       u.searchParams.set("type", ref.type || "input");
       if (ref.subfolder) u.searchParams.set("subfolder", ref.subfolder);
       const res = await fetch(u, { signal: AbortSignal.timeout(15000) });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        logger.warn(`[ollama-backend] image ref fetch failed (${ref.filename}): http ${res.status}`);
+        return null;
+      }
       let mime = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
       if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mime)) mime = "image/png";
       const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > 12 * 1024 * 1024) return null; // keep context sane
+      if (buf.length > 12 * 1024 * 1024) {
+        logger.warn(`[ollama-backend] image ref too large to inline (${ref.filename}: ${buf.length} bytes)`);
+        return null;
+      }
       return { b64: buf.toString("base64"), mime };
-    } catch {
+    } catch (err) {
+      logger.warn(`[ollama-backend] image ref fetch failed (${ref?.filename ?? "?"}): ${msgOf(err)}`);
       return null;
     }
   }

@@ -251,9 +251,12 @@ export const GROK_CAPABILITIES: AgentCapabilities = {
  *  phase). Ollama is a stateless HTTP daemon, so the backend owns the whole
  *  agentic loop itself (stream /api/chat, dispatch tool calls, repeat) and
  *  keeps the conversation history in-memory — persistentChannel is true from
- *  the panel's perspective, but forkAtAnchor is out. Vision is false for now:
- *  most small tool-calling models are text-only, and a mixed field (gemma4 has
- *  vision, qwen3 doesn't) would fail unpredictably mid-conversation. */
+ *  the panel's perspective, but forkAtAnchor is out. Vision is true at the
+ *  BACKEND level: whether images are actually understood is a per-MODEL
+ *  property (gemma4 sees them, qwen3 doesn't; DeepSeek's API rejects them), so
+ *  the backend always attempts delivery and degrades gracefully — an endpoint
+ *  that rejects image input gets one retry with images stripped and an honest
+ *  note to both the user and the model. */
 export const OLLAMA_CAPABILITIES: AgentCapabilities = {
   persistentChannel: true, // in-memory history + repeated /api/chat
   streamingDeltas: true, // NDJSON chunk stream
@@ -263,7 +266,7 @@ export const OLLAMA_CAPABILITIES: AgentCapabilities = {
   modelEnumeration: true, // GET /api/tags (locally pulled models)
   slashCommands: false,
   hooks: false,
-  vision: false,
+  vision: true, // attempted for every model; graceful strip-and-retry on rejection
 };
 
 /** ChatGPT subscription via direct Codex OAuth (~/.codex/auth.json) — Codex Responses

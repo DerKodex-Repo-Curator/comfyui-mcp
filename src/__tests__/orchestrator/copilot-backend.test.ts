@@ -377,10 +377,10 @@ describe("CopilotBackend — host allowlist on the chat/models base (not just th
 });
 
 describe("CopilotBackend — identity + KNOWN_BACKENDS / readiness wiring", () => {
-  it("identifies itself as the 'copilot' backend with vision disabled (text-only 6-tool router)", () => {
+  it("identifies itself as the 'copilot' backend with vision attempted (per-model, graceful strip on rejection)", () => {
     const backend = new CopilotBackend({ resolveCopilotOAuth: async () => ({ ghuToken: "ghu_x" }) });
     expect(backend.id).toBe("copilot");
-    expect(backend.capabilities.vision).toBe(false);
+    expect(backend.capabilities.vision).toBe(true);
     expect(backend.capabilities.persistentChannel).toBe(true);
   });
 

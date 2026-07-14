@@ -31,6 +31,22 @@ function ndjsonStream(chunks: Array<Record<string, unknown>>, hang = false): Rea
 let hangNextChat = false;
 let modelsRequests: Array<{ url: string; headers: Record<string, string> }> = [];
 let modelsResponse: string[] | "404" = [];
+/** When set, the NEXT chat request (either dialect) 400s with this text —
+ *  simulates a text-only model/endpoint rejecting image input. */
+let rejectNextChatWith: string | null = null;
+/** Requests to the openai dialect's /chat/completions (body recorded). */
+let openaiChatRequests: Array<{ model: string; messages: Array<Record<string, unknown>> }> = [];
+
+function sseStream(events: Array<Record<string, unknown>>): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const e of events) controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n`));
+      controller.enqueue(enc.encode("data: [DONE]\n"));
+      controller.close();
+    },
+  });
+}
 
 const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const url = String(input);
@@ -50,9 +66,33 @@ const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Pr
     if (modelsResponse === "404") return new Response("not found", { status: 404 });
     return new Response(JSON.stringify({ data: modelsResponse.map((id) => ({ id })) }), { status: 200 });
   }
+  if (url.includes("/view?")) {
+    // ComfyUI image fetch for inline vision delivery: 4 PNG-ish bytes suffice.
+    return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+      status: 200,
+      headers: { "content-type": "image/png" },
+    });
+  }
+  if (url.endsWith("/chat/completions")) {
+    const body = JSON.parse(String(init?.body));
+    openaiChatRequests.push(body);
+    if (rejectNextChatWith) {
+      const msg = rejectNextChatWith;
+      rejectNextChatWith = null;
+      return new Response(msg, { status: 400 });
+    }
+    return new Response(sseStream([{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]), {
+      status: 200,
+    });
+  }
   if (url.endsWith("/api/chat")) {
     const body = JSON.parse(String(init?.body));
     chatRequests.push(body);
+    if (rejectNextChatWith) {
+      const msg = rejectNextChatWith;
+      rejectNextChatWith = null;
+      return new Response(msg, { status: 400 });
+    }
     const chunks = chatScript.shift();
     if (!chunks) return new Response("no scripted response", { status: 500 });
     const hang = hangNextChat;
@@ -107,6 +147,8 @@ beforeEach(() => {
   hangNextChat = false;
   modelsRequests = [];
   modelsResponse = [];
+  rejectNextChatWith = null;
+  openaiChatRequests = [];
   hangingStreamController = null;
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockClear();
@@ -436,5 +478,104 @@ describe("OllamaBackend", () => {
     expect(isOllamaModel("claude-opus-4-8")).toBe(false);
     expect(isOllamaModel("gemini-2.5-pro")).toBe(false);
     expect(isOllamaModel("gpt-5.5")).toBe(false);
+  });
+});
+
+describe("inline image delivery (per-model vision, graceful degradation)", () => {
+  const IMG_TURN: NeutralTurn = {
+    text: "what is in this screenshot?",
+    images: [{ filename: "shot.png", type: "input" }],
+  };
+
+  it("native dialect: user-turn images are fetched from ComfyUI and attached as base64", async () => {
+    const { client } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      comfyuiUrl: "http://127.0.0.1:8188",
+      connectToolClients: async () => ({ comfyui: client }),
+    });
+    chatScript.push([{ message: { content: "I see a node graph." }, done: true }]);
+    await collect(backend, turnsOf(IMG_TURN));
+    const user = chatRequests[0].messages.find((m) => m.role === "user") as {
+      images?: string[];
+      content: string;
+    };
+    expect(user.images).toHaveLength(1);
+    // base64 of the mocked PNG magic bytes
+    expect(user.images?.[0]).toBe(Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64"));
+  });
+
+  it("openai dialect: images become image_url data-URL content parts", async () => {
+    const { client } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({
+      api: "openai",
+      host: "http://127.0.0.1:9999/v1",
+      apiKey: "sk-test",
+      model: "vendor/vision-model",
+      comfyuiUrl: "http://127.0.0.1:8188",
+      connectToolClients: async () => ({ comfyui: client }),
+    });
+    await collect(backend, turnsOf(IMG_TURN));
+    const user = openaiChatRequests[0].messages.find((m) => m.role === "user") as {
+      content: Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    };
+    expect(Array.isArray(user.content)).toBe(true);
+    expect(user.content[0]).toEqual({ type: "text", text: "what is in this screenshot?" });
+    expect(user.content[1].type).toBe("image_url");
+    expect(user.content[1].image_url?.url.startsWith("data:image/png;base64,")).toBe(true);
+  });
+
+  it("a rejecting endpoint gets ONE retry without images + an honest note both ways", async () => {
+    const { client } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({
+      model: "qwen3:4b",
+      comfyuiUrl: "http://127.0.0.1:8188",
+      connectToolClients: async () => ({ comfyui: client }),
+    });
+    rejectNextChatWith = "this model is missing data required for image input";
+    chatScript.push([{ message: { content: "answering without the image" }, done: true }]);
+    const events = await collect(backend, turnsOf(IMG_TURN));
+    // request 1 carried the image; request 2 (retry) must not
+    expect(chatRequests).toHaveLength(2);
+    const first = chatRequests[0].messages.find((m) => m.role === "user") as { images?: string[] };
+    const second = chatRequests[1].messages.find((m) => m.role === "user") as {
+      images?: string[];
+      content: string;
+    };
+    expect(first.images).toHaveLength(1);
+    expect(second.images).toBeUndefined();
+    expect(second.content).toContain("rejected image input");
+    // the user was told, and the turn still completed successfully
+    const notes = events.filter((e) => e.type === "assistant").map((e) => (e as { text: string }).text);
+    expect(notes.some((t) => t.includes("rejected image input"))).toBe(true);
+    const result = events.find((e) => e.type === "result") as { ok: boolean };
+    expect(result.ok).toBe(true);
+  });
+
+  it("a second failure after the strip is NOT retried again (no loop)", async () => {
+    const { client } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({
+      model: "qwen3:4b",
+      comfyuiUrl: "http://127.0.0.1:8188",
+      connectToolClients: async () => ({ comfyui: client }),
+    });
+    rejectNextChatWith = "no images please";
+    // no scripted response for the retry → it 500s ("no scripted response")
+    const events = await collect(backend, turnsOf(IMG_TURN));
+    expect(chatRequests).toHaveLength(2);
+    const result = events.find((e) => e.type === "result") as { ok: boolean; subtype?: string };
+    expect(result.ok).toBe(false);
+  });
+
+  it("text-only turns are unchanged (no images field at all)", async () => {
+    const { client } = fakeMcpClient(COMFY_META);
+    const backend = new OllamaBackend({
+      model: "gemma4:e4b",
+      connectToolClients: async () => ({ comfyui: client }),
+    });
+    chatScript.push([{ message: { content: "hi" }, done: true }]);
+    await collect(backend, turnsOf({ text: "hello" }));
+    const user = chatRequests[0].messages.find((m) => m.role === "user") as { images?: string[] };
+    expect(user.images).toBeUndefined();
   });
 });

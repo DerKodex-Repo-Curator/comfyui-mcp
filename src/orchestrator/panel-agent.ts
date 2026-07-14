@@ -344,11 +344,19 @@ export class PanelAgent {
           ? `${note} `
           : `A run on the user's canvas just finished and produced ${imgs.length} output image(s): ${names}. `) +
         // Only claim images are attached when some actually are (a note-only event —
-        // e.g. a video that produced no storyboard — has none).
-        (imgs.length ? `The image(s) are attached below and already shown to the user in the panel. ` : ``) +
+        // e.g. a video that produced no storyboard — has none), and only when this
+        // backend can actually see them — a text-only backend told "attached below"
+        // would confabulate having viewed the render.
+        (imgs.length
+          ? this.backend.capabilities.vision
+            ? `The image(s) are attached below and already shown to the user in the panel. `
+            : `You cannot view images on this provider, but they are already shown to the user in the panel. `
+          : ``) +
         `Reply with ONE short sentence acknowledging the result and suggesting a sensible next step — you do NOT need to call any tools. Don't repeat an earlier comment.`;
       // Attach the outputs inline so the agent SEES the render (no fetch needed).
-      images = imgs.filter((i) => i.filename).map((i) => ({ ...i, type: i.type ?? "output" }));
+      if (this.backend.capabilities.vision) {
+        images = imgs.filter((i) => i.filename).map((i) => ({ ...i, type: i.type ?? "output" }));
+      }
     } else if (ev.kind === "run_error") {
       text =
         `[panel event] The user's workflow run just ERRORED: ${ev.error ?? "unknown error"}. ` +
@@ -598,8 +606,22 @@ export class PanelAgent {
       for (const it of batch) {
         if (it.mid) this.deps.onSeen?.(this.tabId, it.mid);
       }
-      const text = batch.map((it) => it.text).join("\n\n");
-      const images = batch.flatMap((it) => it.images ?? []);
+      let text = batch.map((it) => it.text).join("\n\n");
+      let images = batch.flatMap((it) => it.images ?? []);
+      if (images.length && !this.backend.capabilities.vision) {
+        // Text-only backend: every non-vision adapter silently ignores image
+        // refs, which reads to the user as "it ignored my screenshot". Say so
+        // visibly, and tell the MODEL too so it can't pretend it saw them.
+        this.deps.onSay(
+          this.tabId,
+          `📎 This provider is text-only, so I can't see the ${images.length > 1 ? "images" : "image"} you attached. ` +
+            `Describe what's in it, or switch to a vision-capable provider (Claude, Codex, or Gemini) and re-send.`,
+        );
+        text +=
+          `\n\n[panel note: the user attached ${images.length} image(s), but this provider is text-only and you CANNOT see them. ` +
+          `Do not claim or imply you saw them — if the content matters, ask the user to describe it or switch to a vision-capable provider.]`;
+        images = [];
+      }
       if (this.closed) return;
       // Remember the in-flight turn's user text so an interrupt mid-reply can
       // re-queue it (send-now must address BOTH the interrupted and new message).

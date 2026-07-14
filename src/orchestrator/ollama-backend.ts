@@ -24,6 +24,7 @@ import type {
   ModelChoice,
   NeutralTurn,
 } from "./agent-backend.js";
+import type { ImageRef } from "./panel-agent.js";
 import { OLLAMA_CAPABILITIES } from "./agent-backend.js";
 import type { GeminiMcpServerSpec } from "./gemini-backend.js";
 import { resolvePrompt } from "../services/prompt-overrides.js";
@@ -81,6 +82,14 @@ type ChatMessage = {
   tool_name?: string;
   /** OpenAI-dialect tool-result pairing (by call id). */
   tool_call_id?: string;
+  /** Inline image payloads (raw base64, no data: prefix) — Ollama's native
+   *  message shape; toOpenAiMessages re-wraps them as image_url content parts.
+   *  Whether the MODEL understands them is per-model, not per-provider: we
+   *  always attempt delivery, and a rejecting endpoint triggers one images-
+   *  stripped retry (see runTurn). */
+  images?: string[];
+  /** Mime types parallel to `images` (for the openai-dialect data: URLs). */
+  imageMimes?: string[];
 };
 
 type OllamaToolCall = {
@@ -113,6 +122,18 @@ function toOpenAiMessages(messages: ChatMessage[]): Array<Record<string, unknown
     }
     if (m.role === "tool") {
       return { role: "tool", tool_call_id: m.tool_call_id ?? "call_0", content: m.content };
+    }
+    if (m.role === "user" && m.images?.length) {
+      return {
+        role: "user",
+        content: [
+          { type: "text", text: m.content },
+          ...m.images.map((b64, i) => ({
+            type: "image_url",
+            image_url: { url: `data:${m.imageMimes?.[i] ?? "image/png"};base64,${b64}` },
+          })),
+        ],
+      };
     }
     return { role: m.role, content: m.content };
   });
@@ -755,11 +776,61 @@ export class OllamaBackend implements AgentBackend {
     }
   }
 
+  /** Fetch a ComfyUI image ref as raw base64 + mime, or null on any failure
+   *  (mirrors ClaudeBackend.fetchImageBlock; the text reference still names the
+   *  file as a fallback). */
+  private async fetchImageB64(ref: ImageRef): Promise<{ b64: string; mime: string } | null> {
+    if (!this.deps.comfyuiUrl || !ref?.filename) return null;
+    try {
+      const u = new URL("/view", this.deps.comfyuiUrl);
+      u.searchParams.set("filename", ref.filename);
+      u.searchParams.set("type", ref.type || "input");
+      if (ref.subfolder) u.searchParams.set("subfolder", ref.subfolder);
+      const res = await fetch(u, { signal: AbortSignal.timeout(15000) });
+      if (!res.ok) return null;
+      let mime = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mime)) mime = "image/png";
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 12 * 1024 * 1024) return null; // keep context sane
+      return { b64: buf.toString("base64"), mime };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Remove every inline image from history after an endpoint rejected image
+   *  input, leaving an honest note in the affected user messages so the model
+   *  never pretends it saw them. One-shot per turn (see runTurn). */
+  private stripImagesFromHistory(): void {
+    for (const m of this.history) {
+      if (m.images?.length) {
+        delete m.images;
+        delete m.imageMimes;
+        m.content +=
+          "\n[note: the attached image(s) were removed — this model/endpoint rejected image input. You did NOT see them; tell the user so if it matters.]";
+      }
+    }
+  }
+
   private async *runTurn(turn: NeutralTurn, opts: BackendStartOptions): AsyncIterable<AgentEvent> {
     const abort = new AbortController();
     this.turnAbort = abort;
     const tools = this.buildModelTools();
-    this.history.push({ role: "user", content: turn.text });
+    // Vision is a per-MODEL property (gemma4 sees images, qwen3 doesn't;
+    // DeepSeek's API rejects image parts outright), so ALWAYS attempt delivery:
+    // resolve the ComfyUI refs inline and let the strip-and-retry below handle
+    // endpoints that reject them.
+    const userMsg: ChatMessage = { role: "user", content: turn.text };
+    if (turn.images?.length) {
+      const resolved = (await Promise.all(turn.images.slice(0, 4).map((r) => this.fetchImageB64(r)))).filter(
+        (r): r is { b64: string; mime: string } => r !== null,
+      );
+      if (resolved.length) {
+        userMsg.images = resolved.map((r) => r.b64);
+        userMsg.imageMimes = resolved.map((r) => r.mime);
+      }
+    }
+    this.history.push(userMsg);
 
     let resultEmitted = false;
     // Loop-breaker: small models (especially stock ones) can wedge into
@@ -781,6 +852,7 @@ export class OllamaBackend implements AgentBackend {
     const DISCOVERY_TOOLS = new Set(["list_tools", "panel_list_tools", "search_models", "search_custom_nodes"]);
     const discoveryCounts = new Map<string, number>();
     let emptyFinalRetried = false;
+    let imagesStripped = false;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // Drain the chat stream manually: yield each delta event as it arrives,
@@ -790,13 +862,33 @@ export class OllamaBackend implements AgentBackend {
         let toolCalls: OllamaToolCall[] = [];
         let usage: Record<string, number> | undefined;
         let streamId: string | null = null;
-        for (;;) {
-          const r = await stream.next();
-          if (r.done) {
-            ({ content, toolCalls, usage, streamId } = r.value);
-            break;
+        try {
+          for (;;) {
+            const r = await stream.next();
+            if (r.done) {
+              ({ content, toolCalls, usage, streamId } = r.value);
+              break;
+            }
+            yield r.value;
           }
-          yield r.value;
+        } catch (err) {
+          // GRACEFUL IMAGE DEGRADATION: if the request carried inline images
+          // and the endpoint rejected it (text-only model — e.g. DeepSeek 400s
+          // on image parts; a non-vision Ollama model can error at prompt
+          // build), retry ONCE with the images stripped and an honest note in
+          // both directions. Any other failure re-throws to the normal handler.
+          if (!abort.signal.aborted && !imagesStripped && this.history.some((m) => m.images?.length)) {
+            imagesStripped = true;
+            logger.warn(`[ollama-backend] image input rejected (${msgOf(err).slice(0, 200)}) — retrying without images`);
+            this.stripImagesFromHistory();
+            yield {
+              type: "assistant",
+              text: `📎 ${this.model} rejected image input, so I'm continuing without the attachment — I can't see the image. Describe it in words, or switch to a vision-capable model.`,
+            };
+            round--; // the rejected request didn't count as a tool round
+            continue;
+          }
+          throw err;
         }
 
         if (!toolCalls.length) {
@@ -945,7 +1037,18 @@ export class OllamaBackend implements AgentBackend {
       mkdirSync(dir, { recursive: true });
       writeFileSync(
         join(dir, `${this.sessionId ?? "session"}.json`),
-        JSON.stringify({ model: this.model, messages: this.history }, null, 2),
+        JSON.stringify(
+          {
+            model: this.model,
+            // Inline image payloads are elided — a single screenshot would
+            // dwarf the whole conversation in the datagen transcript.
+            messages: this.history.map((m) =>
+              m.images?.length ? { ...m, images: m.images.map(() => "[inline image omitted]") } : m,
+            ),
+          },
+          null,
+          2,
+        ),
       );
     } catch (err) {
       logger.warn(`[ollama-backend] transcript dump failed: ${msgOf(err)}`);

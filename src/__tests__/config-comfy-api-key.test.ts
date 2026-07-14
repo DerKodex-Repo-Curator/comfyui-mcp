@@ -31,7 +31,7 @@ describe("COMFY_API_KEY resolution (env → ~/.comfy-api-key)", () => {
     fakeHome = tempRoot;
     process.env = { ...OLD_ENV };
     process.argv = [...OLD_ARGV];
-    // Empty-string (not delete) so dotenv can't re-inject from a package .env.
+    // Empty-string (not delete) so dotenv can't re-inject from ~/.comfyui-mcp/.env.
     process.env.COMFYUI_API_KEY = "";
     process.env.COMFYUI_URL = "";
     process.env.COMFYUI_PATH = "";

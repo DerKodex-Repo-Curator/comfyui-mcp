@@ -1018,6 +1018,18 @@ export async function runPanelOrchestrator(): Promise<void> {
   if (hydratedSecrets.length) {
     logger.info(`[panel-orchestrator] hydrated agent secrets from store: ${hydratedSecrets.join(", ")}`);
   }
+  // Boot diagnostic for the recurring "I set the key but the panel says not
+  // ready" reports (Discord #help): state which keyed providers have a key and
+  // where it came from — env (shell/system var) vs store (API Keys card) vs
+  // none. Presence + source ONLY, never values. This turns the next report
+  // from a mystery into a one-line answer.
+  {
+    const hydrated = new Set(hydratedSecrets);
+    const src = (k: string) => (process.env[k] ? (hydrated.has(k) ? "store" : "env") : "none");
+    logger.info(
+      `[panel-orchestrator] keyed providers: openrouter=${src("OPENROUTER_API_KEY")}, glm=${src("GLM_API_KEY")}, kimi=${src("KIMI_API_KEY")}`,
+    );
+  }
   const persistedAgent = getAgentSettings();
   let ollamaModel =
     process.env.COMFYUI_MCP_OLLAMA_MODEL ?? persistedAgent.ollama?.model ?? "artokun/gemma4-comfyui-mcp:e4b";

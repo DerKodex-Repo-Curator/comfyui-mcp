@@ -561,7 +561,9 @@ Generates a comprehensive skill file documenting every node, its inputs/outputs,
 
 ## Configuration
 
-The server auto-detects your ComfyUI installation and port. Override with environment variables if needed:
+The server auto-detects your ComfyUI installation and port. Override with environment variables if needed.
+
+You can set any variable below in your shell/system environment, or put it in **`~/.comfyui-mcp/.env`** (same path on Windows, macOS, and Linux — next to the rest of your comfyui-mcp files). Real environment variables win over `.env` values. See `.env.example` for a starting point.
 
 ### Deployment modes
 

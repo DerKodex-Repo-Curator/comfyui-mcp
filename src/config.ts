@@ -2,15 +2,31 @@ import { z } from "zod";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, resolve, join } from "path";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { parseComfyUIUrl, type ComfyUITarget } from "./transport/comfyui-url.js";
 
-// Resolve .env from the package root, not process.cwd()
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = resolve(__dirname, "..");
-dotenv.config({ path: resolve(packageRoot, ".env") });
+// Env-file config lives in the user's config dir — ~/.comfyui-mcp/.env — next
+// to panel-secrets.json and the token files, so the same path works for
+// npx/npm installs and git checkouts on Windows/mac/Linux alike. A package-root
+// .env (only reachable in dev checkouts; npm installs resolve into the package
+// cache) is legacy: migrate it once, then stop reading it. Real environment
+// variables always win — dotenv never overrides values that are already set.
+const homeEnvPath = join(homedir(), ".comfyui-mcp", ".env");
+const legacyEnvPath = resolve(packageRoot, ".env");
+try {
+  if (!existsSync(homeEnvPath) && existsSync(legacyEnvPath)) {
+    mkdirSync(dirname(homeEnvPath), { recursive: true });
+    copyFileSync(legacyEnvPath, homeEnvPath);
+    process.stderr.write(`[comfyui-mcp] migrated ${legacyEnvPath} -> ${homeEnvPath} (the package .env is no longer read)\n`);
+  }
+} catch {
+  // best-effort migration; real env vars and an existing home .env still work
+}
+dotenv.config({ path: homeEnvPath });
 
 /**
  * Does `p` look like a real ComfyUI install root? A ComfyUI Desktop-installer

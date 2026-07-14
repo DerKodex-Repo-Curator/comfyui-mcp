@@ -10,9 +10,11 @@
 [![comfyui-mcp MCP server](https://glama.ai/mcp/servers/artokun/comfyui-mcp/badges/card.svg)](https://glama.ai/mcp/servers/artokun/comfyui-mcp)
 [![comfyui-mcp MCP server](https://glama.ai/mcp/servers/artokun/comfyui-mcp/badges/score.svg)](https://glama.ai/mcp/servers/artokun/comfyui-mcp)
 
-[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b) &nbsp;**One-click GPU pod** — a ready-to-run ComfyUI with this project + [Agent Panel](https://github.com/artokun/comfyui-mcp-panel) + ComfyUI-Manager v2 preinstalled, on your own GPU. No setup.
+[![Deploy on RunPod](https://img.shields.io/badge/Deploy_on-RunPod-673AB7?style=for-the-badge)](https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b) [![Join the Discord](https://img.shields.io/badge/Discord-Join_%26_get_help-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/TtQpf96BHS) &nbsp;**One-click GPU pod** — a ready-to-run ComfyUI with this project + [Agent Panel](https://github.com/artokun/comfyui-mcp-panel) + ComfyUI-Manager v2 preinstalled, on your own GPU. No setup.
 
 Works on **macOS**, **Linux**, and **Windows**. Auto-detects your ComfyUI installation and port.
+
+**Stuck or have a question? [Join the Discord](https://discord.gg/TtQpf96BHS)** — help, model tips, and release announcements.
 
 **108 MCP tools** | **32 AI skills** (Flux · WAN · LTX 2.3 video · Qwen · Z-Image · Ideogram 4 · ERNIE · ANIMA · model registry · Civitai · node authoring · launch/perf flags) | **13 installer packs** | **11 slash commands** | **4 autonomous agents** | **4 hooks**
 

@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Added
+- **panel_flatten_workflow** — one-call, formatting-preserving flatten of the
+  live canvas: Get/Set buses, Reroutes, and cg-use-everywhere broadcasts
+  resolve to direct real links and the virtual nodes are deleted, while kept
+  nodes never move (groups/positions/colors/titles survive exactly; one undo
+  restores). UE broadcasts materialize from the pack's own computed
+  `extra.ue_links`; real executable nodes (rgthree Context, Seed Everywhere)
+  are kept
+
 ## [0.34.0] - 2026-07-14
 
 ### MCP

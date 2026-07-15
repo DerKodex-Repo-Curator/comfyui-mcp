@@ -757,7 +757,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   // token-less. LAN mode returns a same-wifi ws:// URL; tunnel mode fronts the same
   // token-gated listener with a cloudflared wss:// for anywhere access.
   const pairPort = lockPort + 2; // avoid the panel_* HTTP-MCP port (lockPort + 1)
-  let pairToken: string | null = null;
+  // A stable pairing token can be pinned via COMFYUI_MCP_PAIR_TOKEN. Without it,
+  // the token is generated per session, so a phone's saved bridge URL dies on the
+  // next orchestrator restart and the user must re-pair. With it pinned, the token
+  // is stable AND the LAN pairing listener is auto-started at boot (below), so the
+  // phone silently reconnects across restarts with no panel interaction.
+  const envPairToken = process.env.COMFYUI_MCP_PAIR_TOKEN?.trim() || null;
+  let pairToken: string | null = envPairToken;
   let pairListenerStarted = false;
   let pairTunnel: { url: string; stop: () => void } | null = null;
   const ensurePairListener = async (): Promise<string> => {
@@ -809,6 +815,38 @@ export async function runPanelOrchestrator(): Promise<void> {
       `[panel-orchestrator] could not bind the panel bridge port — another process owns it. Free that port and restart the orchestrator. Override the port with COMFYUI_MCP_BRIDGE_PORT.\n${portKillHint(lockPort)}`,
     );
     process.exit(1);
+  }
+
+  // With a pinned pair token, bring the LAN pairing listener up now so a phone's
+  // saved URL reconnects across restarts without ever touching the panel. This is
+  // strictly opt-in (COMFYUI_MCP_PAIR_TOKEN unset → the on-demand behavior above is
+  // unchanged). Tunnel pairing stays on-demand: cloudflared quick-tunnel hostnames
+  // rotate per run, so a stable token alone can't make a tunnel URL persist.
+  if (envPairToken) {
+    try {
+      await ensurePairListener();
+      const ip = firstLanIPv4();
+      const pairUrl = `ws://${ip ?? "<this-machine-ip>"}:${pairPort}/?token=${envPairToken}`;
+      process.stderr.write(
+        [
+          "",
+          "════════════════════════════════════════════════════════════════════",
+          " ComfyUI MCP — phone pairing listener AUTO-STARTED (stable token)",
+          "════════════════════════════════════════════════════════════════════",
+          ` Pair URL : ${pairUrl}`,
+          "",
+          " Paste this into the mobile app once — it survives restarts because",
+          " COMFYUI_MCP_PAIR_TOKEN is pinned. Anyone with this URL can drive the",
+          " agent — treat it like a password. Unset the env var to disable.",
+          "════════════════════════════════════════════════════════════════════",
+          "",
+        ].join("\n") + "\n",
+      );
+    } catch (err) {
+      logger.warn(
+        `[panel-orchestrator] could not auto-start the phone pairing listener on ${pairPort}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // We own the port — register our REAL pid + the launching ComfyUI pid so the

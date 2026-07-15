@@ -8,6 +8,12 @@ All notable changes to this project are documented here. This project adheres to
 
 ### MCP
 
+#### Fixed
+- UI→API conversion no longer scrambles widget values on nodes with a custom
+  serialized-widget layout (`properties.has_serialized_properties` — LTXDirector,
+  LTXSequencer, PromptRelay): authoritative named values in `node.properties`
+  now win over the shifted positional mapping (#222)
+
 #### Added
 - panel_strip_workflow / panel_slice_workflow read the LIVE CANVAS when called
   with no source (new panel graph_serialize command) — no more save-to-disk

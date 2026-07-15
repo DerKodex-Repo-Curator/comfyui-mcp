@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.33.0] - 2026-07-14
+
 ### MCP
 
 #### Added
@@ -15,6 +17,7 @@ All notable changes to this project are documented here. This project adheres to
   auto-starts at boot and prints the ready-to-paste `ws://<lan-ip>:<port>/?token=…`
   URL; leaving it unset keeps the previous on-demand, per-session behavior (and its
   default "nothing exposed until you ask" posture) unchanged (#219)
+
 
 ## [0.32.0] - 2026-07-14
 

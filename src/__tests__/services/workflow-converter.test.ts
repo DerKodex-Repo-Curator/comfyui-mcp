@@ -202,3 +202,117 @@ describe("convertUiToApi — bypass / mute resolution", () => {
     expect(workflow["4"].inputs.images).toEqual(["1", 0]); // resolved through the bus
   });
 });
+
+describe("convertUiToApi — serialized-widget nodes (has_serialized_properties)", () => {
+  // Real-world shape: WhatDreamsCost's LTXDirector packs extra/reordered widgets
+  // into widgets_values (23 slots, timeline JSON included), so positional mapping
+  // shifts every widget after the first unaccounted slot — frame_rate came out
+  // "seconds", display_mode 768, divisible_by 18 (field bug, 2026-07-14). The
+  // node's authoritative named values live in node.properties.
+  const DIRECTOR_INFO = {
+    LTXDirector: {
+      input: {
+        required: {
+          model: ["MODEL"],
+          clip: ["CLIP"],
+          start_second: ["FLOAT", { default: 0 }],
+          end_second: ["FLOAT", { default: 5 }],
+          timeline_data: ["STRING", { default: "" }],
+          local_prompts: ["STRING", { default: "", multiline: true }],
+          segment_lengths: ["STRING", { default: "" }],
+          epsilon: ["FLOAT", { default: 0.001 }],
+          guide_strength: ["STRING", { default: "" }],
+        },
+        optional: {
+          use_custom_audio: ["BOOLEAN", { default: false }],
+          use_custom_motion: ["BOOLEAN", { default: true }],
+          inpaint_audio: ["BOOLEAN", { default: true }],
+          frame_rate: ["FLOAT", { default: 24 }],
+          display_mode: [["frames", "seconds"], { default: "seconds" }],
+          custom_width: ["INT", { default: 0 }],
+          custom_height: ["INT", { default: 0 }],
+          resize_method: [["maintain aspect ratio", "stretch to fit", "pad"], {}],
+          divisible_by: ["INT", { default: 32 }],
+          img_compression: ["INT", { default: 18 }],
+          override_audio: ["BOOLEAN", { default: false }],
+        },
+      },
+      input_order: {
+        required: [
+          "model", "clip", "start_second", "end_second", "timeline_data",
+          "local_prompts", "segment_lengths", "epsilon", "guide_strength",
+        ],
+        optional: [
+          "use_custom_audio", "use_custom_motion", "inpaint_audio", "frame_rate",
+          "display_mode", "custom_width", "custom_height", "resize_method",
+          "divisible_by", "img_compression", "override_audio",
+        ],
+      },
+    },
+  } as never;
+
+  function directorGraph(withFlag: boolean) {
+    return {
+      nodes: [
+        {
+          id: 1316,
+          type: "LTXDirector",
+          mode: 0,
+          inputs: [
+            { name: "model", type: "MODEL", link: null },
+            { name: "clip", type: "CLIP", link: null },
+          ],
+          outputs: [],
+          // Deliberately misaligned vs input_order — the node's custom widget
+          // serialization, trimmed from the real 23-slot _stripscratch capture.
+          widgets_values: [
+            "0", "15", "15", "0", "360", "360",
+            '{"mainTrackEnabled":true}', "camera arc shot", "96,72,72", "0.001",
+            "1,1,1", false, true, true, 24, "seconds", 768, 1344,
+            "maintain aspect ratio", 32, 18, false, "extra",
+          ],
+          properties: {
+            ...(withFlag ? { has_serialized_properties: true } : {}),
+            "Node name for S&R": "LTXDirector",
+            frame_rate: 24,
+            display_mode: "seconds",
+            custom_width: 768,
+            custom_height: 1344,
+            resize_method: "maintain aspect ratio",
+            divisible_by: 32,
+            img_compression: 18,
+            use_custom_audio: false,
+            use_custom_motion: true,
+            inpaint_audio: true,
+            override_audio: false,
+            epsilon: 0.001,
+            start_second: 0,
+            timeline_data: '{"mainTrackEnabled":true}',
+          },
+        },
+      ],
+      links: [],
+    } as never;
+  }
+
+  it("prefers the authoritative properties values when the flag is set", () => {
+    const { workflow } = convertUiToApi(directorGraph(true), DIRECTOR_INFO);
+    const inputs = (workflow["1316"] as { inputs: Record<string, unknown> }).inputs;
+    expect(inputs.frame_rate).toBe(24);
+    expect(inputs.display_mode).toBe("seconds");
+    expect(inputs.custom_width).toBe(768);
+    expect(inputs.custom_height).toBe(1344);
+    expect(inputs.divisible_by).toBe(32);
+    expect(inputs.img_compression).toBe(18);
+    // non-input properties must NOT leak into the prompt
+    expect(inputs["Node name for S&R"]).toBeUndefined();
+  });
+
+  it("without the flag the positional mapping is untouched (stale property copies can't hijack normal nodes)", () => {
+    const { workflow } = convertUiToApi(directorGraph(false), DIRECTOR_INFO);
+    const inputs = (workflow["1316"] as { inputs: Record<string, unknown> }).inputs;
+    // positional (mis)mapping proceeds as before — the point is only that
+    // properties did NOT override it: frame_rate keeps whatever slot landed there.
+    expect(inputs.frame_rate).not.toBe(24);
+  });
+});

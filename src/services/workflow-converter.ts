@@ -1247,6 +1247,23 @@ export function convertUiToApi(
     }
     }
 
+    // Nodes with a CUSTOM serialized-widget layout (properties.has_serialized_properties
+    // — WhatDreamsCost's LTXDirector/LTXSequencer, kijai's PromptRelay) pack extra or
+    // reordered widgets into widgets_values that don't match object_info input_order,
+    // so the positional mapping above shifts every widget after the first unaccounted
+    // slot (field: LTXDirector resolved frame_rate:"seconds", display_mode:768,
+    // divisible_by:18 — each value pulled from a neighboring widget). These nodes ALSO
+    // write their authoritative NAMED values into node.properties — prefer those.
+    // Gated on the flag so normal nodes (whose properties can carry stale copies) are
+    // untouched, and matched against widgetNames so non-input properties (cnr_id,
+    // timeline_data, UI toggles) can't leak into the prompt.
+    const serializedProps = node.properties as Record<string, unknown> | undefined;
+    if (serializedProps?.has_serialized_properties === true) {
+      for (const name of widgetNames) {
+        if (name in serializedProps) inputs[name] = serializedProps[name];
+      }
+    }
+
     // Fill any required input not covered by widgets_values or a link with its
     // object_info default, so /prompt validation doesn't reject on a missing
     // required input (e.g. a node version added a required widget the saved graph

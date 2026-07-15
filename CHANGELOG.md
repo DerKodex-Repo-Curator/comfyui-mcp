@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Added
+- chatgpt backend delivers attached images via Responses-API `input_image`
+  data URLs, with the same one-shot strip-and-retry + honest 📎 note on
+  rejection as the Ollama family (#218)
+
 ## [0.33.0] - 2026-07-14
 
 ### MCP

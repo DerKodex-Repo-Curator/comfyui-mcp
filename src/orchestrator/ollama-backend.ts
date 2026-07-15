@@ -779,7 +779,7 @@ export class OllamaBackend implements AgentBackend {
   /** Fetch a ComfyUI image ref as raw base64 + mime, or null on any failure
    *  (mirrors ClaudeBackend.fetchImageBlock; the text reference still names the
    *  file as a fallback). */
-  private async fetchImageB64(ref: ImageRef): Promise<{ b64: string; mime: string } | null> {
+  protected async fetchImageB64(ref: ImageRef): Promise<{ b64: string; mime: string } | null> {
     if (!this.deps.comfyuiUrl || !ref?.filename) return null;
     try {
       const u = new URL("/view", this.deps.comfyuiUrl);

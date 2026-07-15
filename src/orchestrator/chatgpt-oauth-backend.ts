@@ -34,6 +34,13 @@ type TurnMessage = {
   content: string;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   tool_call_id?: string;
+  /** Inline image payloads (raw base64) for user messages — rendered as
+   *  Responses-API `input_image` data-URL items. Per-model like the Ollama
+   *  family: always attempted, stripped once with an honest note if the
+   *  endpoint rejects them (see runCodexTurn). */
+  images?: string[];
+  /** Mime types parallel to `images`. */
+  imageMimes?: string[];
 };
 
 function msgOf(err: unknown): string {
@@ -86,7 +93,15 @@ function historyToCodexInput(messages: TurnMessage[]): CodexInputItem[] {
       items.push({
         type: "message",
         role: "user",
-        content: [{ type: "input_text", text: m.content }],
+        content: [
+          { type: "input_text", text: m.content },
+          // Responses-API image items take the data URL as a plain string
+          // (unlike chat/completions' nested image_url object).
+          ...(m.images ?? []).map((b64, i) => ({
+            type: "input_image",
+            image_url: `data:${m.imageMimes?.[i] ?? "image/png"};base64,${b64}`,
+          })),
+        ],
       });
       continue;
     }
@@ -316,9 +331,23 @@ export class ChatGptOAuthBackend extends OllamaBackend {
     const abort = new AbortController();
     this.turnAbort = abort;
     const tools = this.buildModelTools();
-    this.turnHistory.push({ role: "user", content: turn.text });
+    // Vision (same contract as the Ollama family): always attempt inline
+    // delivery — GPT models take images, and if the endpoint rejects them the
+    // strip-and-retry below degrades honestly instead of failing the turn.
+    const userMsg: TurnMessage = { role: "user", content: turn.text };
+    if (turn.images?.length) {
+      const resolved = (await Promise.all(turn.images.slice(0, 4).map((r) => this.fetchImageB64(r)))).filter(
+        (r): r is { b64: string; mime: string } => r !== null,
+      );
+      if (resolved.length) {
+        userMsg.images = resolved.map((r) => r.b64);
+        userMsg.imageMimes = resolved.map((r) => r.mime);
+      }
+    }
+    this.turnHistory.push(userMsg);
 
     let resultEmitted = false;
+    let imagesStripped = false;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         const stream = this.codexResponsesStream(
@@ -332,13 +361,37 @@ export class ChatGptOAuthBackend extends OllamaBackend {
         let toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
         let usage: Record<string, number> | undefined;
         let streamId: string | null = null;
-        for (;;) {
-          const r = await stream.next();
-          if (r.done) {
-            ({ content, toolCalls, usage, streamId } = r.value);
-            break;
+        try {
+          for (;;) {
+            const r = await stream.next();
+            if (r.done) {
+              ({ content, toolCalls, usage, streamId } = r.value);
+              break;
+            }
+            yield r.value;
           }
-          yield r.value;
+        } catch (err) {
+          if (!abort.signal.aborted && !imagesStripped && this.turnHistory.some((m) => m.images?.length)) {
+            imagesStripped = true;
+            logger.warn(
+              `[chatgpt-oauth-backend] image input rejected (${msgOf(err).slice(0, 200)}) — retrying without images`,
+            );
+            for (const m of this.turnHistory) {
+              if (m.images?.length) {
+                delete m.images;
+                delete m.imageMimes;
+                m.content +=
+                  "\n[note: the attached image(s) were removed — this model/endpoint rejected image input. You did NOT see them; tell the user so if it matters.]";
+              }
+            }
+            yield {
+              type: "assistant",
+              text: `📎 ${this.model} rejected image input, so I'm continuing without the attachment — I can't see the image. Describe it in words, or switch to a vision-capable model.`,
+            };
+            round--; // the rejected request didn't count as a tool round
+            continue;
+          }
+          throw err;
         }
 
         if (!toolCalls.length) {

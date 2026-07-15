@@ -280,7 +280,7 @@ export const CHATGPT_CAPABILITIES: AgentCapabilities = {
   modelEnumeration: true, // ~/.codex/models_cache.json + configured default
   slashCommands: false,
   hooks: false,
-  vision: false,
+  vision: true, // Responses input_image data URLs; strip-and-retry on rejection (#218)
 };
 
 /** Z.AI GLM Coding Plan — OpenAI-compatible /v1/chat/completions. */

@@ -43,6 +43,7 @@ import {
   setUserMcpServerSecret,
 } from "../services/user-mcp-config.js";
 import { setComfyuiSecret, setAgentSecret, isAllowedAgentSecretKey } from "../services/panel-secrets.js";
+import { flattenUiWorkflow } from "../services/flatten-workflow.js";
 import { getNsfwConsent, setNsfwConsent } from "../services/panel-settings.js";
 import { QueueMonitor } from "../services/queue-monitor.js";
 import { getObjectInfo, backfillObjectInfo } from "../comfyui/client.js";
@@ -580,6 +581,55 @@ export function buildPanelToolDefs(): PanelToolDef[] {
               : "") +
             `\n\n${JSON.stringify(workflow, null, 2)}`,
         );
+      },
+    ),
+    def(
+      "panel_flatten_workflow",
+      "Flatten the user's workflow IN PLACE, preserving their layout: every Get/Set bus, Reroute, and " +
+        "cg-use-everywhere (UE) broadcast is resolved into a direct real link, and the virtual nodes are " +
+        "deleted — kept nodes never move, so groups/positions/colors/titles survive exactly (unlike " +
+        "panel_strip_workflow, whose API-format output can't go back on the canvas). With no source it " +
+        "flattens the LIVE CANVAS and reloads the result onto it (one undo restores); pass a `pack`, " +
+        "server-side `path`, or inline `graph` to flatten that instead (still loads onto the canvas " +
+        "unless `apply:false`). UE broadcasts materialize from the pack's own computed extra.ue_links; " +
+        "if senders exist without it, they're left in place with a warning (save/queue once, retry). " +
+        "Real executable nodes (rgthree Context/Context Switch, Seed Everywhere) are KEPT — they run.",
+      {
+        pack: z.string().optional().describe("Bundled pack name — its UI workflow.json is read server-side."),
+        path: z
+          .string()
+          .optional()
+          .describe("Workflow .json on the ComfyUI machine's disk — absolute or relative to user/default/workflows."),
+        graph: z
+          .union([z.string(), z.record(z.string(), z.unknown())])
+          .optional()
+          .describe("Inline UI workflow (object or JSON string) to flatten instead of the live canvas."),
+        include_ue: z.boolean().optional().describe("Materialize Use-Everywhere broadcasts (default true)."),
+        include_getset: z.boolean().optional().describe("Resolve Get/Set buses + Reroutes (default true)."),
+        apply: z
+          .boolean()
+          .optional()
+          .describe("Load the flattened graph onto the canvas (default true). false = return the graph JSON only."),
+      },
+      async (args: A, ctx) => {
+        const raw = await resolveWorkflowInput(args, ctx);
+        const { graph, report } = flattenUiWorkflow(raw as never, {
+          includeUe: args.include_ue !== false,
+          includeGetSet: args.include_getset !== false,
+        });
+        const summary =
+          `Flattened: removed ${report.removed.getset} Get/Set, ${report.removed.reroute} Reroute, ` +
+          `${report.removed.ue} UE sender(s); added ${report.added_links} direct link(s) ` +
+          `(${report.rewired_inputs} inputs rewired); ${report.kept_nodes} nodes kept in place.` +
+          (report.warnings.length
+            ? `\nWarnings:\n${report.warnings.map((w) => `- ${w}`).join("\n")}`
+            : "");
+        if (args.apply === false) {
+          return ok(`${summary}\n\n${JSON.stringify(graph)}`);
+        }
+        const loaded = await ctx.call({ cmd: "graph_load", graph: graph as never }, 30000);
+        const loadText = (loaded as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? "";
+        return ok(`${summary}\nLoaded onto the canvas (one undo restores the original). ${loadText.slice(0, 120)}`);
       },
     ),
     def(

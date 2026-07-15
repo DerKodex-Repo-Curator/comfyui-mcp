@@ -554,3 +554,61 @@ describe("panel_connect slot aliases (live panel finding: stripped aliases → a
     expect(calls[0]).toMatchObject({ from_output: "LATENT", to_input: "samples" });
   });
 });
+
+describe("panel-tools: strip/slice read the live canvas by default", () => {
+  const CANVAS_GRAPH = {
+    nodes: [
+      {
+        id: 1,
+        type: "SaveImage",
+        pos: [10, 10],
+        size: [100, 50],
+        inputs: [],
+        outputs: [],
+        widgets_values: [],
+      },
+    ],
+    links: [],
+    groups: [{ id: 1, title: "OUT", bounding: [0, 0, 200, 200] }],
+  };
+
+  function ctxWithCanvas(sendImpl?: () => Promise<unknown>) {
+    const send = vi.fn(sendImpl ?? (async () => ({ workflow: CANVAS_GRAPH, node_count: 1 })));
+    const ctx: PanelToolCtx = {
+      call: async (cmd) => ({ content: [{ type: "text", text: JSON.stringify(cmd) }] }),
+      confirm: async () => true,
+      bridge: { send } as unknown as PanelToolCtx["bridge"],
+      tabId: "test-tab",
+    };
+    return { ctx, send };
+  }
+
+  it("panel_slice_workflow with no source captures the canvas via graph_serialize", async () => {
+    const { ctx, send } = ctxWithCanvas();
+    const res = await defByName("panel_slice_workflow").handler({ groups: "OUT" }, ctx);
+    expect(send).toHaveBeenCalledWith({ cmd: "graph_serialize" }, { tabId: "test-tab", timeoutMs: 30000 });
+    const text = (res as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain("Sliced");
+  });
+
+  it("panel_strip_workflow with no source surfaces a clear error when the canvas capture fails", async () => {
+    const { ctx, send } = ctxWithCanvas(async () => {
+      throw new Error("no panel tab");
+    });
+    await expect(defByName("panel_strip_workflow").handler({}, ctx)).rejects.toThrow(
+      /Couldn't capture the live canvas/,
+    );
+    expect(send).toHaveBeenCalled();
+  });
+
+  it("explicit inline graph still wins over the canvas (no bridge call)", async () => {
+    const { ctx, send } = ctxWithCanvas();
+    const res = await defByName("panel_slice_workflow").handler(
+      { graph: CANVAS_GRAPH, groups: "OUT" },
+      ctx,
+    );
+    expect(send).not.toHaveBeenCalled();
+    const text = (res as { content: Array<{ text: string }> }).content[0].text;
+    expect(text).toContain("Sliced");
+  });
+});

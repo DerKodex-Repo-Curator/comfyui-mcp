@@ -285,6 +285,43 @@ export function makePanelToolCtx(
   return { call, confirm, bridge, tabId, workflowTarget: workflowTargets };
 }
 
+/**
+ * Resolve a workflow source for the strip/slice tools: an explicit `pack`,
+ * `path`, or inline `graph` — or, when none is given, the LIVE CANVAS via the
+ * panel's graph_serialize command. The canvas default exists because "flatten
+ * what I have open" is the common ask, and requiring a save-to-disk round trip
+ * first derailed real sessions (deleted placeholder files, 404 tabs).
+ */
+async function resolveWorkflowInput(
+  args: Record<string, unknown>,
+  ctx: PanelToolCtx,
+): Promise<Record<string, unknown>> {
+  if (args.pack) return readPackWorkflow(args.pack as string);
+  if (args.path) return readWorkflowFromPath(args.path as string);
+  if (args.graph != null) {
+    return (typeof args.graph === "string"
+      ? JSON.parse(args.graph as string)
+      : args.graph) as Record<string, unknown>;
+  }
+  let reply: unknown;
+  try {
+    reply = await ctx.bridge.send({ cmd: "graph_serialize" } as { cmd: string }, {
+      tabId: ctx.tabId,
+      timeoutMs: 30000,
+    });
+  } catch (err) {
+    throw new Error(
+      `Couldn't capture the live canvas (${err instanceof Error ? err.message : String(err)}). ` +
+        `An older panel version may not support graph_serialize — pass pack, path, or graph instead.`,
+    );
+  }
+  const wf = (reply as { workflow?: unknown } | null)?.workflow;
+  if (!wf || typeof wf !== "object") {
+    throw new Error("The live canvas returned no graph — pass pack, path, or graph explicitly.");
+  }
+  return wf as Record<string, unknown>;
+}
+
 /** One shared tool definition: name, description, zod raw-shape schema, and a
  *  transport-agnostic handler that receives parsed args + the tab-bound context. */
 export interface PanelToolDef {
@@ -494,12 +531,13 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       "panel_strip_workflow",
       "Strip a workflow to a clean, flat, RESOLVED graph — Get/Set buses, Reroutes, subgraph " +
         "definitions, and bypassed/muted nodes all collapsed into real connections (the " +
-        "'de-getter-setter' pass). Takes the same input as panel_load_workflow — a `pack`, a server-side " +
-        "`path` (absolute or relative to the ComfyUI workflows folder), or an inline `graph` — but RETURNS " +
-        "the de-virtualized graph plus a node-type summary for INSPECTION / REBUILD instead of loading it " +
-        "onto the canvas. Use this to understand or rebuild an expert workflow's real wiring without the " +
-        "virtual nodes (e.g. a staged 150KB graph full of GetNode/SetNode/Reroute). The resolved graph is " +
-        "much smaller than the raw UI JSON and is read SERVER-SIDE.",
+        "'de-getter-setter' pass). With NO arguments it reads the LIVE CANVAS directly (no need to save " +
+        "to a file first); or pass a `pack`, a server-side `path` (absolute or relative to the ComfyUI " +
+        "workflows folder), or an inline `graph`. RETURNS the de-virtualized graph (API/prompt format) " +
+        "plus a node-type summary for INSPECTION / EXECUTION / REBUILD — it does NOT and CANNOT load the " +
+        "result back onto the canvas (the canvas only loads UI-format graphs). Use it to understand an " +
+        "expert workflow's real wiring, run the resolved graph headless, or rebuild connections with the " +
+        "graph edit tools. The resolved graph is much smaller than the raw UI JSON.",
       {
         pack: z
           .string()
@@ -516,20 +554,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           .optional()
           .describe("Inline UI workflow (object or JSON string) to strip instead of a pack/path."),
       },
-      async (args: A) => {
-        let raw: Record<string, unknown>;
-        if (args.pack) {
-          raw = readPackWorkflow(args.pack as string);
-        } else if (args.path) {
-          raw = readWorkflowFromPath(args.path as string);
-        } else if (args.graph != null) {
-          raw = (typeof args.graph === "string"
-            ? JSON.parse(args.graph as string)
-            : args.graph) as Record<string, unknown>;
-        } else {
-          throw new Error("Provide exactly one of: pack, path, or graph.");
-        }
-
+      async (args: A, ctx) => {
+        const raw = await resolveWorkflowInput(args, ctx);
         const ui = raw as unknown as UiWorkflow;
         const bulk = await getObjectInfo();
         const objectInfo = await backfillObjectInfo(bulk, collectNodeTypes(ui));
@@ -562,10 +588,12 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         "Bypasser/Muter' — one graph holding many pipelines, only one active at a time). Seeds from the " +
         "output nodes in the named `groups`, takes their backward closure (real links + virtual Set/Get " +
         "buses), un-bypasses the kept nodes and their subgraph internals, and RETURNS a standalone, " +
-        "activated UI graph (only the subgraph defs it uses). Reads a `pack`, server-side `path`, or " +
-        "inline `graph`. Pair with panel_strip_workflow to then flatten the Set/Get buses. This returns " +
+        "activated UI graph (only the subgraph defs it uses). With NO source argument it reads the LIVE " +
+        "CANVAS directly; or pass a `pack`, server-side `path`, or inline `graph`. Pair with " +
+        "panel_strip_workflow to then flatten the Set/Get buses. This returns " +
         "the sliced graph for inspection — it does NOT load it onto the canvas (feed the result to " +
-        "panel_load_workflow if you want that).",
+        "panel_load_workflow if you want that; unlike the strip tool's API-format output, the slice IS a " +
+        "loadable UI graph).",
       {
         pack: z.string().optional().describe("Bundled pack name (its UI workflow.json is read server-side)."),
         path: z
@@ -582,20 +610,8 @@ export function buildPanelToolDefs(): PanelToolDef[] {
             "Group-title substrings (case-insensitive) whose output nodes seed the slice — CSV string or array, e.g. 'TEXT TO IMAGE' or ['extend','sampler'].",
           ),
       },
-      async (args: A) => {
-        let raw: Record<string, unknown>;
-        if (args.pack) {
-          raw = readPackWorkflow(args.pack as string);
-        } else if (args.path) {
-          raw = readWorkflowFromPath(args.path as string);
-        } else if (args.graph != null) {
-          raw = (typeof args.graph === "string"
-            ? JSON.parse(args.graph as string)
-            : args.graph) as Record<string, unknown>;
-        } else {
-          throw new Error("Provide exactly one of: pack, path, or graph.");
-        }
-
+      async (args: A, ctx) => {
+        const raw = await resolveWorkflowInput(args, ctx);
         const groupList = Array.isArray(args.groups)
           ? (args.groups as string[])
           : String(args.groups ?? "").split(",");

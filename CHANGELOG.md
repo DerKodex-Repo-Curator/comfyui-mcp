@@ -9,6 +9,10 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Added
+- panel_strip_workflow / panel_slice_workflow read the LIVE CANVAS when called
+  with no source (new panel graph_serialize command) — no more save-to-disk
+  round trip; strip's description now states its API-format output cannot be
+  loaded back onto the canvas
 - chatgpt backend delivers attached images via Responses-API `input_image`
   data URLs, with the same one-shot strip-and-retry + honest 📎 note on
   rejection as the Ollama family (#218)

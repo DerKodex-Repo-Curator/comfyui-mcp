@@ -458,12 +458,20 @@ export async function searchCivitaiModels(
   params.set("limit", String(CREATOR_SCAN_PAGE_SIZE));
   const q = keyword.toLowerCase();
   const matches: CivitaiSearchItem[] = [];
+  const seenIds = new Set<number>();
   let scanned = 0;
   let cursor: string | undefined;
+  // True when the scan stopped with pages plausibly unseen: the page cap was
+  // hit with a next cursor remaining, or the API handed back a degenerate
+  // (repeated) cursor we refuse to follow.
+  let stoppedEarly = false;
   for (let page = 0; page < CREATOR_SCAN_MAX_PAGES; page++) {
     if (cursor !== undefined) params.set("cursor", cursor);
     const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
-    const items = data.items ?? [];
+    // Dedupe across pages by model id — a misbehaving cursor that replays a
+    // page must not double-count `scanned` or fill `limit` with duplicates.
+    const items = (data.items ?? []).filter((m) => !seenIds.has(m.id));
+    for (const m of items) seenIds.add(m.id);
     scanned += items.length;
     matches.push(
       ...items.filter(
@@ -472,13 +480,21 @@ export async function searchCivitaiModels(
           (m.tags ?? []).some((t) => t.toLowerCase().includes(q)),
       ),
     );
-    cursor = data.metadata?.nextCursor;
-    if (cursor === undefined || matches.length >= limit) break;
+    // Falsy (missing OR empty-string) cursor → the catalog is exhausted; a
+    // REPEATED cursor would loop the same page forever → treat as stuck.
+    const next = data.metadata?.nextCursor || undefined;
+    if (!next || next === cursor) {
+      stoppedEarly = next !== undefined; // repeated cursor: pages may remain unseen
+      break;
+    }
+    cursor = next;
+    if (matches.length >= limit) break;
+    if (page === CREATOR_SCAN_MAX_PAGES - 1) stoppedEarly = true; // page cap, more remained
   }
   return {
     hits: matches.slice(0, limit).map(toSearchHit),
     scanned,
-    scanCapped: cursor !== undefined && matches.length < limit,
+    scanCapped: stoppedEarly && matches.length < limit,
   };
 }
 

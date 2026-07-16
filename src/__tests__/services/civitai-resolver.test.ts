@@ -338,6 +338,62 @@ describe("searchCivitaiModels", () => {
     expect(scanCapped).toBe(false);
   });
 
+  it("creator + keyword: an empty-string nextCursor terminates the scan (full scan, no cap)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [{ id: 1, name: "Detail A", modelVersions: [] }],
+        metadata: { nextCursor: "" }, // degenerate: falsy, not just missing
+      }),
+    );
+    const { hits, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(hits).toHaveLength(1);
+    expect(scanCapped).toBe(false); // exhausted, not capped
+  });
+
+  it("creator + keyword: a REPEATED cursor breaks out instead of looping, and reports the cap", async () => {
+    // Page 1 → cursor "stuck"; page 2 replays the SAME items and the SAME cursor.
+    const page = {
+      items: [{ id: 1, name: "Unrelated", modelVersions: [] }],
+      metadata: { nextCursor: "stuck" },
+    };
+    fetchMock.mockResolvedValueOnce(jsonResponse(page)).mockResolvedValueOnce(jsonResponse(page));
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // followed "stuck" once, then refused the repeat
+    expect(hits).toEqual([]);
+    expect(scanned).toBe(1); // the replayed page is NOT double-counted
+    expect(scanCapped).toBe(true); // stuck mid-catalog → the miss is not definitive
+  });
+
+  it("creator + keyword: duplicate model ids across pages are deduped (never fill limit twice)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [
+            { id: 1, name: "Detail A", modelVersions: [] },
+            { id: 2, name: "Other", modelVersions: [] },
+          ],
+          metadata: { nextCursor: "p2" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          // id 1 replayed by a misbehaving cursor + one genuinely new match.
+          items: [
+            { id: 1, name: "Detail A", modelVersions: [] },
+            { id: 3, name: "Detail B", modelVersions: [] },
+          ],
+        }),
+      );
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", {
+      creator: "jed",
+      limit: 2,
+    });
+    expect(hits.map((h) => h.model_id)).toEqual([1, 3]); // no duplicate id 1
+    expect(scanned).toBe(3); // unique models only
+    expect(scanCapped).toBe(false);
+  });
+
   it("creator-only mode uses the caller's limit (no over-fetch)", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ items: [] }));
     await searchCivitaiModels("", { creator: "jed", limit: 5 });

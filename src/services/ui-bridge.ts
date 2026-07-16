@@ -495,8 +495,27 @@ export class UiBridge {
           }
         }
         tabId = msg.tab_id;
+        const incomingHeadless = (msg as { headless?: unknown }).headless === true;
         const existing = this.conns.get(tabId);
         if (existing && existing.sock !== sock) {
+          // SECURITY: a viewer must not hello-hijack another client's tab id. The
+          // reconnect-supersede path evicts the current holder, so without this a
+          // headless phone could re-hello under a DESKTOP's id, kill its socket, and
+          // register as that tab — bypassing attach_tab's authoritative stamping and
+          // driving the tab it never attached to. Only same-kind reconnects (a real
+          // reload: desktop→desktop, phone→phone) may supersede. Cross-kind is refused.
+          if (existing.headless !== incomingHeadless) {
+            logger.warn(
+              `[ui-bridge] refused cross-kind hello takeover of tab ${tabId.slice(0, 8)} ` +
+              `(existing headless=${existing.headless}, incoming headless=${incomingHeadless})`,
+            );
+            try {
+              sock.close();
+            } catch {
+              // Already gone.
+            }
+            return;
+          }
           // Same tab reconnected (reload) — supersede the stale socket.
           try {
             existing.sock.close();
@@ -587,6 +606,11 @@ export class UiBridge {
         // and prevent subscribing to another headless (mobile) client.
         const valid = this.conns.has(target) && !this.headlessSeen.has(target);
         if (valid) {
+          // A viewer mirrors ONE tab at a time — drop any prior subscription first so
+          // re-attaching (A→B) doesn't keep streaming A's activity alongside B's.
+          for (const [tid, s] of this.subscribers) {
+            if (s.delete(sock) && s.size === 0) this.subscribers.delete(tid);
+          }
           let set = this.subscribers.get(target);
           if (!set) {
             set = new Set();
@@ -653,6 +677,13 @@ export class UiBridge {
         wasPrimary = true;
         this.conns.delete(tabId);
         if (this.lastActiveTabId === tabId) this.lastActiveTabId = null;
+        // The mirrored desktop tab is gone — detach its viewers so their input
+        // reverts to their OWN session instead of routing into a dead id (and its
+        // output isn't silently buffered forever). They can re-attach if it returns.
+        for (const [s, drivenTab] of this.mirrorViewers) {
+          if (drivenTab === tabId) this.mirrorViewers.delete(s);
+        }
+        this.subscribers.delete(tabId);
         logger.info(
           `[ui-bridge] panel tab disconnected: ${tabId.slice(0, 8)} — ${this.conns.size} tab(s) remain`,
         );

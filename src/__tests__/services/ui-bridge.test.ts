@@ -755,4 +755,62 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     bridge.push({ type: "say", text: "post-migrate" }, "old-id");
     await onPhone; // resolves, or the test times out (fan-out broke)
   });
+
+  it("refuses a headless hello takeover of a desktop tab id (no drive-path hijack)", async () => {
+    const desktop = await connectPanel("desktop-h", "G");
+    autoReply(desktop, "desktop");
+    const phone = await connectHeadless("phone-h");
+    await settle();
+
+    // Malicious: the phone re-hellos under the DESKTOP's id to seize it without
+    // going through attach_tab. This must be refused — the desktop stays primary.
+    phone.send(JSON.stringify({ type: "hello", tab_id: "desktop-h", title: "evil", headless: true }));
+    await settle();
+
+    const res = (await bridge.send({ cmd: "graph_state" } as { cmd: string }, {
+      tabId: "desktop-h",
+    })) as { from?: string };
+    expect(res.from).toBe("desktop"); // desktop not evicted; the takeover was refused
+  });
+
+  it("re-attaching to another tab stops the first tab's fanout", async () => {
+    await connectPanel("desktop-A", "A");
+    await connectPanel("desktop-B", "B");
+    const phone = await connectHeadless("phone-ab");
+    await settle();
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "1", target_tab_id: "desktop-A" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached" && m.cid === "1");
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "2", target_tab_id: "desktop-B" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached" && m.cid === "2");
+
+    let gotA = false;
+    phone.on("message", (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.type === "say" && m.text === "from-A") gotA = true;
+    });
+    bridge.push({ type: "say", text: "from-A" }, "desktop-A"); // old tab — must NOT arrive
+    const onB = nextFrame(phone, (m) => m.type === "say" && m.text === "from-B");
+    bridge.push({ type: "say", text: "from-B" }, "desktop-B"); // new tab — must arrive
+    await onB;
+    expect(gotA).toBe(false);
+  });
+
+  it("reverts a viewer's drive to its own tab when the mirrored desktop closes", async () => {
+    const desktop = await connectPanel("desktop-c", "G");
+    const phone = await connectHeadless("phone-c");
+    await settle();
+    const seen: Array<{ type?: string; tab_id?: string; text?: string }> = [];
+    bridge.onPanelMessage = (e) => seen.push(e as { type?: string; tab_id?: string; text?: string });
+
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "desktop-c" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached");
+
+    desktop.close(); // the mirrored desktop goes away
+    await settle();
+
+    phone.send(JSON.stringify({ type: "user_message", text: "after-close", context: {} }));
+    await settle();
+    const msg = seen.find((e) => e.type === "user_message" && e.text === "after-close");
+    expect(msg?.tab_id).toBe("phone-c"); // reverted to own tab, not routed into the dead id
+  });
 });

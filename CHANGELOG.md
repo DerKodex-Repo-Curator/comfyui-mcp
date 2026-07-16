@@ -18,6 +18,10 @@ All notable changes to this project are documented here. This project adheres to
   versions. Purely additive; no whitelist change — `list_local_models` is
   already mobile-callable.
 
+#### Docs
+- mobile app (beta) page — Android (Firebase App Distribution) + iOS
+  (TestFlight) beta-tester links, pairing walkthrough, wired into the docs nav
+
 ## [0.36.0] - 2026-07-15
 
 ### MCP

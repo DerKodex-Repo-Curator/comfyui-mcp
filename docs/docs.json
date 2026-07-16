@@ -57,6 +57,7 @@
               "concepts",
               "plugin",
               "panel",
+              "mobile",
               "backends",
               "local-llms",
               "arena",

@@ -1,0 +1,62 @@
+---
+title: "Mobile app (beta)"
+description: "ComfyUI-MCP Mobile — chat with your ComfyUI agent from your phone. Pair with the Agent Panel's QR code and drive generations, workflows, and models from anywhere on your network. Now in closed beta on Android and iOS."
+icon: "mobile"
+---
+
+<Note>
+**Join the beta.** The ComfyUI-MCP mobile app is in closed beta — install a
+build for your platform:
+
+- **Android** — [Firebase App Distribution](https://appdistribution.firebase.dev/i/27a5cccde72ffb42)
+- **iOS** — [TestFlight](https://testflight.apple.com/join/ws65s4a2)
+</Note>
+
+The mobile app is a phone-native front end to the same agent that powers the
+[Sidebar Panel](/panel). It connects to the panel orchestrator's bridge, so
+everything the panel can do — generate images, run and inspect workflows, switch
+models — is available from your phone, with your desktop's ComfyUI doing the
+work.
+
+## Pairing
+
+The app talks to the agent host over the panel bridge, so you pair once and
+you're in:
+
+1. Install and run [comfyui-mcp](/quickstart) with the
+   [Agent Panel](/panel) on your desktop.
+2. Open the panel in ComfyUI and show the **pairing QR**.
+3. In the mobile app, tap **Scan QR from panel** — or paste the bridge URL
+   (`ws://…?token=…`) by hand.
+
+The QR encodes a lander URL whose pairing data rides the URL fragment, so the
+host and token never leave your devices. The app also registers the
+`comfyui-mcp://pair` deep link for the lander's **Open in app** button.
+
+<Note>
+Phone and desktop need a network path between them — the same LAN in the
+simple case, or a [secure relay](/self-hosted-relay) /
+[cloud deployment](/cloud-deployment) when the host isn't directly reachable.
+</Note>
+
+## What's in the app
+
+- **Agent chat** — the same conversation you'd have in the panel sidebar,
+  from your phone.
+- **Model picker** — live model catalog from the orchestrator; switch models
+  mid-session.
+- **Civitai browsing** — search models and creators, likes and favorites.
+- **Remote control** — mirror the desktop panel tab and check workflow
+  diagnostics on the go.
+
+## Feedback
+
+Beta feedback and bug reports are welcome on
+[Discord](https://discord.gg/cW9arBhzCu) or the
+[issue tracker](https://github.com/artokun/comfyui-mcp/issues).
+
+## See also
+
+- [Sidebar Panel](/panel) — the in-ComfyUI agent the app pairs with
+- [Cloud deployment](/cloud-deployment) — drive a remote ComfyUI pod
+- [Self-hosted relay](/self-hosted-relay) — own the secure bridge path

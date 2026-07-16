@@ -17,6 +17,17 @@ All notable changes to this project are documented here. This project adheres to
   mobile LoRA hub) can link back to the source and check CivitAI for newer
   versions. Purely additive; no whitelist change — `list_local_models` is
   already mobile-callable.
+- **live `queue_status` bridge frame** — the orchestrator now broadcasts
+  ComfyUI's live render/queue state (running, queue depth, current node,
+  sampler progress, prompt_id) to every connected tab, riding the existing
+  QueueMonitor watchdog so browser-queued jobs are covered too. Change-only
+  and capped at 1 frame/sec: an idle rig broadcasts nothing. Each tab is also
+  seeded with the current state on `hello`, so a client connecting mid-render
+  sees the running job immediately. Powers the mobile app's live queue monitor
+- **`cancel_job` on the mobile call_tool whitelist** — one-tap cancel of the
+  running render from the phone's queue monitor. Narrowly scoped: the client
+  passes the `prompt_id` it observed, cancel_job only interrupts a still-matching
+  running job, and pending jobs are never touched
 
 #### Docs
 - mobile app (beta) page — Android (Firebase App Distribution) + iOS

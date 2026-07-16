@@ -7,9 +7,12 @@
 // once let the agent stack three more behind it before anyone noticed.
 //
 // This service opens its OWN lightweight WebSocket to COMFYUI_URL. ComfyUI
-// broadcasts execution events (status / executing / progress / execution_*) to
-// every connected client, so we receive the live stream for ANY job — including
-// the browser-queued ones — without touching the panel or the agent subprocess.
+// broadcasts `status`, `progress`, and `progress_state` to every connected
+// client, so we receive the live stream for ANY job — including the
+// browser-queued ones — without touching the panel or the agent subprocess.
+// (The legacy execution_start / executing / execution_* events are sid-scoped
+// to the QUEUING client on modern ComfyUI — verified live on 0.28 — so the
+// handlers below also derive the run state from the broadcast-safe frames.)
 // It holds the last-known run state and derives a stall/backlog report the
 // orchestrator surfaces to the agent as a turn-start note (the same channel as
 // the crash-dump injector).
@@ -57,6 +60,11 @@ export interface QueueSnapshot {
   running: boolean;
   runningPromptId: string | null;
   queueDepth: number;
+  /** The node id currently executing (ComfyUI graph node id), null when idle. */
+  currentNode: string | null;
+  /** Progress of the current node (sampler steps), null before the first tick. */
+  progressValue: number | null;
+  progressMax: number | null;
 }
 
 const RECONNECT_MS = 5000;
@@ -194,6 +202,16 @@ class QueueMonitorImpl {
     this.state.lastActivityTs = Date.now();
   }
 
+  /** Adopt [promptId] as the running prompt when it's new — the broadcast-safe
+   *  substitute for the sid-scoped execution_start this client never receives
+   *  on modern ComfyUI. Fires the start transition exactly once per run. */
+  private adoptRunningPrompt(promptId: unknown): void {
+    if (typeof promptId !== "string" || promptId === this.state.runningPromptId) return;
+    this.state.runningPromptId = promptId;
+    this.touchActivity();
+    this.emitStart();
+  }
+
   private clearRunning(): void {
     this.state.runningPromptId = null;
     this.state.currentNode = null;
@@ -217,9 +235,15 @@ class QueueMonitorImpl {
         const qr = execInfo?.queue_remaining;
         if (typeof qr === "number") {
           this.state.queueRemaining = qr;
-          // A status frame arriving with an empty queue after a run is the
-          // authoritative "fully idle" signal — flush a pending end transition.
-          if (qr === 0) this.emitEndIfIdle();
+          // A status frame with an empty queue is ComfyUI's authoritative
+          // "fully idle" signal. On modern ComfyUI (0.2x) the sid-scoped
+          // executing/execution_success events never reach this passive
+          // watchdog (see the progress_state case), so a run learned from
+          // progress frames would otherwise never clear — drain it here.
+          if (qr === 0) {
+            if (this.state.runningPromptId !== null) this.clearRunning();
+            this.emitEndIfIdle();
+          }
         }
         break;
       }
@@ -255,6 +279,31 @@ class QueueMonitorImpl {
         this.state.progressValue = value;
         this.state.progressMax = max;
         if (typeof data.node === "string") this.state.currentNode = data.node;
+        // progress IS broadcast to every client and carries the prompt_id —
+        // adopt it, since the sid-scoped execution_start may never have arrived
+        // (see the progress_state case below).
+        this.adoptRunningPrompt(data.prompt_id);
+        break;
+      }
+      case "progress_state": {
+        // Modern ComfyUI (verified live on 0.28): execution_start / executing /
+        // execution_success are sent ONLY to the client that queued the prompt,
+        // so this passive watchdog never sees them — but progress_state IS
+        // broadcast, fires from the first node on, and names the running
+        // prompt + node. Derive the run state from it so browser-/agent-queued
+        // renders stay visible here (running flag, prompt_id, current node).
+        this.adoptRunningPrompt(data.prompt_id);
+        const nodes = data.nodes;
+        if (nodes && typeof nodes === "object") {
+          for (const entry of Object.values(nodes as Record<string, unknown>)) {
+            if (!entry || typeof entry !== "object") continue;
+            const n = entry as { state?: unknown; node_id?: unknown };
+            if (n.state === "running" && typeof n.node_id === "string") {
+              if (n.node_id !== this.state.currentNode) this.touchActivity(); // node advanced
+              this.state.currentNode = n.node_id;
+            }
+          }
+        }
         break;
       }
       case "execution_success":
@@ -269,13 +318,17 @@ class QueueMonitorImpl {
     }
   }
 
-  /** Cheap snapshot for backpressure (panel_run): is anything already in flight? */
+  /** Cheap snapshot for backpressure (panel_run) and the live `queue_status`
+   *  broadcast (queue-status-broadcast.ts): is anything in flight, and where? */
   snapshot(): QueueSnapshot {
     return {
       connected: this.state.connected,
       running: this.state.runningPromptId !== null,
       runningPromptId: this.state.runningPromptId,
       queueDepth: Math.max(0, this.state.queueRemaining),
+      currentNode: this.state.currentNode,
+      progressValue: this.state.progressValue,
+      progressMax: this.state.progressMax,
     };
   }
 

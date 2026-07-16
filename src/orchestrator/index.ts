@@ -75,6 +75,10 @@ import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "./pane
 import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor, type StallReport } from "../services/queue-monitor.js";
+import {
+  buildQueueStatusFrame,
+  createQueueStatusBroadcaster,
+} from "../services/queue-status-broadcast.js";
 import { unloadAllOllama, warmOllama, resolveOllamaHost } from "../services/ollama-vram.js";
 import {
   isLocalLmstudio,
@@ -632,6 +636,13 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   // API-format graphs to canvas-openable UI format); overwrites same-filename,
   // so the client generates a unique name. No model/system mutation.
   "save_workflow",
+  // One-tap cancel of the RUNNING render (the mobile queue monitor's stop
+  // button). User-initiated and narrowly scoped: the client passes the
+  // prompt_id it saw in `queue_status`, and cancel_job only interrupts when the
+  // running job still matches — it can never kill a job that started after the
+  // tap, and (without clear_pending, which the mobile client never sends) it
+  // never touches other pending jobs in a shared queue.
+  "cancel_job",
 ]);
 
 /** Lazily build ONE in-process MCP client wired to the full comfyui tool surface,
@@ -2102,6 +2113,10 @@ export async function runPanelOrchestrator(): Promise<void> {
       pushReadiness(panelTab);
       if (backend === "claude") pushCommands(panelTab);
       bridge.push({ type: "workflow_target", target: workflowTargets.get(panelTab) }, panelTab);
+      // Seed this tab's live queue monitor right away: queue_status broadcasts
+      // are change-only, so a tab connecting MID-render would otherwise wait for
+      // the next state transition to learn a job is already running.
+      bridge.push(buildQueueStatusFrame(QueueMonitor.snapshot()), panelTab);
       // Re-push the last usage so the context meter isn't blank after a reload.
       const lastStatus = manager.lastStatusFor(key);
       if (lastStatus) pushStatus(panelTab, lastStatus);
@@ -3084,6 +3099,20 @@ export async function runPanelOrchestrator(): Promise<void> {
   const downloadTimer = setInterval(pollDownloads, 700);
   downloadTimer.unref?.();
 
+  // ---- Queue-status watcher ----
+  // Live render/queue state for every connected tab (the mobile app's live
+  // queue monitor). Reuses the QueueMonitor watchdog's snapshot — which covers
+  // EVERY ComfyUI job, including browser-queued ones — and broadcasts a
+  // `queue_status` frame at most once per second, and ONLY when the state
+  // changed, so an idle rig costs the tabs nothing (see
+  // services/queue-status-broadcast.ts for the frame shape + throttle contract).
+  const queueStatusBroadcaster = createQueueStatusBroadcaster(
+    () => QueueMonitor.snapshot(),
+    (frame) => void bridge.push(frame),
+  );
+  const queueStatusTimer = setInterval(() => queueStatusBroadcaster.tick(), 1000);
+  queueStatusTimer.unref?.();
+
   // Keep the pod's stored bridge URL fresh so a ComfyUI RESTART self-heals fast.
   // The panel's advertised wss:// URL/token lives in the pod ComfyUI process's
   // MEMORY (the panel __init__'s advertise store). A restart — which the agent
@@ -3131,6 +3160,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     logger.info("[panel-orchestrator] shutting down — stopping agents…");
     selfRestarter?.stop();
     clearInterval(downloadTimer);
+    clearInterval(queueStatusTimer);
     if (readvertiseTimer) clearInterval(readvertiseTimer);
     QueueMonitor.stop();
     unsubscribeSecrets();

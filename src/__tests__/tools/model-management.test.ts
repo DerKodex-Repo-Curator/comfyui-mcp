@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const downloadModelMock = vi.fn();
+const listLocalModelsMock = vi.fn();
 vi.mock("../../services/model-resolver.js", async () => {
   const actual = await vi.importActual<typeof import("../../services/model-resolver.js")>(
     "../../services/model-resolver.js",
@@ -8,6 +9,7 @@ vi.mock("../../services/model-resolver.js", async () => {
   return {
     ...actual,
     downloadModel: (...a: unknown[]) => downloadModelMock(...a),
+    listLocalModels: (...a: unknown[]) => listLocalModelsMock(...a),
   };
 });
 
@@ -28,11 +30,13 @@ function makeServer() {
   registerModelManagementTools(server as never);
   return {
     downloadModel: handlers.get("download_model")!,
+    listLocalModels: handlers.get("list_local_models")!,
   };
 }
 
 beforeEach(() => {
   downloadModelMock.mockReset();
+  listLocalModelsMock.mockReset();
 });
 
 describe("download_model tool", () => {
@@ -59,5 +63,44 @@ describe("download_model tool", () => {
       auth,
     );
     expect(res.isError).toBeFalsy();
+  });
+});
+
+describe("list_local_models rendering", () => {
+  it("renders sidecar hints: trigger words + base, and the civitai provenance line", async () => {
+    listLocalModelsMock.mockResolvedValueOnce([
+      {
+        name: "detail.safetensors",
+        path: "loras/detail.safetensors",
+        size: 0,
+        modified: "",
+        type: "loras",
+        triggerWords: ["more detail", "hdr"],
+        baseModel: "SDXL 1.0",
+        civitaiUrl: "https://civitai.com/models/162967?modelVersionId=183635",
+      },
+      {
+        name: "plain.safetensors",
+        path: "loras/plain.safetensors",
+        size: 0,
+        modified: "",
+        type: "loras",
+      },
+    ]);
+
+    const { listLocalModels } = makeServer();
+    const res = await listLocalModels({ model_type: "loras" });
+    const text = res.content[0].text;
+
+    expect(res.isError).toBeFalsy();
+    expect(text).toContain("## loras (2)");
+    expect(text).toContain("- detail.safetensors");
+    expect(text).toContain("    trigger words: more detail, hdr  ·  base: SDXL 1.0");
+    expect(text).toContain(
+      "    civitai: https://civitai.com/models/162967?modelVersionId=183635",
+    );
+    // The un-enriched entry stays a bare name — no stray metadata lines.
+    expect(text).toContain("- plain.safetensors");
+    expect(text).not.toContain("plain.safetensors (");
   });
 });

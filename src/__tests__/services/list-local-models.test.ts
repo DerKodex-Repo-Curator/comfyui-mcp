@@ -15,12 +15,14 @@ vi.mock("../../comfyui/client.js", () => ({
   getClient: (...args: unknown[]) => getClient(...args),
 }));
 
-// Filesystem fallback hooks.
+// Filesystem fallback hooks (readFile feeds the CivitAI sidecar enrichment).
 const readdir = vi.fn();
 const stat = vi.fn();
+const readFile = vi.fn();
 vi.mock("node:fs/promises", () => ({
   readdir: (...a: unknown[]) => readdir(...a),
   stat: (...a: unknown[]) => stat(...a),
+  readFile: (...a: unknown[]) => readFile(...a),
   // Unused by listLocalModels but required by other functions in the module.
   copyFile: vi.fn(),
   link: vi.fn(),
@@ -38,6 +40,9 @@ beforeEach(() => {
   fetchApi.mockReset();
   readdir.mockReset();
   stat.mockReset();
+  readFile.mockReset();
+  // Default: no sidecar next to any model file (enrichment is best-effort).
+  readFile.mockRejectedValue(new Error("ENOENT"));
   config.comfyuiPath = "/comfy";
 });
 
@@ -87,6 +92,52 @@ describe("listLocalModels — HTTP-first with FS fallback", () => {
       size: 1024 * 1024 * 50,
       modified: "2026-06-01T12:00:00.000Z",
     });
+  });
+
+  it("enriches entries from the CivitAI sidecar: trigger words, base, and the source URL", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/models/loras"
+        ? new Response(JSON.stringify(["detail.safetensors"]), { status: 200 })
+        : new Response("[]", { status: 200 }),
+    );
+    readFile.mockResolvedValue(
+      JSON.stringify({
+        modelId: 162967,
+        versionId: 183635,
+        trainedWords: ["more detail"],
+        baseModel: "SDXL 1.0",
+        sourceUrl: "https://civitai.com/models/162967?modelVersionId=183635",
+      }),
+    );
+    const result = await listLocalModels("loras");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      name: "detail.safetensors",
+      triggerWords: ["more detail"],
+      baseModel: "SDXL 1.0",
+      civitaiUrl: "https://civitai.com/models/162967?modelVersionId=183635",
+    });
+  });
+
+  it("reconstructs the CivitAI URL from ids when the sidecar predates sourceUrl", async () => {
+    getClient.mockReturnValue({ fetchApi });
+    fetchApi.mockImplementation(async (path: string) =>
+      path === "/models/loras"
+        ? new Response(JSON.stringify(["a.safetensors", "b.safetensors"]), { status: 200 })
+        : new Response("[]", { status: 200 }),
+    );
+    // a: version-only sidecar (no modelId, no sourceUrl); b: both ids, no sourceUrl.
+    readFile.mockImplementation(async (p: string) =>
+      String(p).includes("a.safetensors")
+        ? JSON.stringify({ versionId: 28907 })
+        : JSON.stringify({ modelId: 211726, versionId: 3101597 }),
+    );
+    const result = await listLocalModels("loras");
+    expect(result.map((m) => m.civitaiUrl)).toEqual([
+      "https://civitai.com/model-versions/28907",
+      "https://civitai.com/models/211726?modelVersionId=3101597",
+    ]);
   });
 
   it("returns empty (no throw) in cloud mode when no comfyuiPath is set", async () => {

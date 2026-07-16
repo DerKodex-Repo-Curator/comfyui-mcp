@@ -117,6 +117,10 @@ export interface LocalModel {
   triggerWords?: string[];
   /** Base model from the CivitAI sidecar (e.g. "SDXL 1.0"), when present. */
   baseModel?: string;
+  /** Canonical CivitAI page URL from the sidecar (carries the modelId and the
+   *  INSTALLED modelVersionId) — provenance for humans and the anchor clients
+   *  use to check whether a newer version exists on CivitAI. */
+  civitaiUrl?: string;
 }
 
 /**
@@ -285,12 +289,27 @@ async function enrichWithCivitaiMetadata(models: LocalModel[]): Promise<void> {
         const j = JSON.parse(raw) as {
           trainedWords?: unknown;
           baseModel?: unknown;
+          modelId?: unknown;
+          versionId?: unknown;
+          sourceUrl?: unknown;
         };
         if (Array.isArray(j.trainedWords) && j.trainedWords.length > 0) {
           m.triggerWords = j.trainedWords.map(String);
         }
         if (typeof j.baseModel === "string" && j.baseModel) {
           m.baseModel = j.baseModel;
+        }
+        // Provenance: prefer the sidecar's canonical sourceUrl; reconstruct it
+        // from the ids for older sidecars that predate sourceUrl. Both shapes
+        // exist in the wild: /models/<id>?modelVersionId=<vid> (model known)
+        // and /model-versions/<vid> (version-only downloads).
+        if (typeof j.sourceUrl === "string" && isCivitaiUrl(j.sourceUrl)) {
+          m.civitaiUrl = j.sourceUrl;
+        } else if (typeof j.versionId === "number") {
+          m.civitaiUrl =
+            typeof j.modelId === "number"
+              ? `https://civitai.com/models/${j.modelId}?modelVersionId=${j.versionId}`
+              : `https://civitai.com/model-versions/${j.versionId}`;
         }
       } catch {
         // No sidecar (or unreadable) — leave the model un-enriched.

@@ -615,6 +615,10 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   "list_output_images",
   "get_image",
   "list_local_models",
+  // Read-only CivitAI lookups (creator-search feature): let a client browse
+  // models/creators through the rig without an agent turn.
+  "search_civitai_models",
+  "search_civitai_creators",
   "download_civitai_model",
   "download_model",
   "enqueue_workflow",

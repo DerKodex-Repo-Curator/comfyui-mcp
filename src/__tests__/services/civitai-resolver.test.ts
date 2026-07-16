@@ -10,6 +10,8 @@ import {
   resolveCivitaiModel,
   resolveCivitaiModelVersion,
   searchCivitaiModels,
+  searchCivitaiCreators,
+  fetchCivitaiTopCreators,
 } from "../../services/civitai-resolver.js";
 import { ModelError, ValidationError } from "../../utils/errors.js";
 
@@ -248,5 +250,161 @@ describe("searchCivitaiModels", () => {
     await searchCivitaiModels("y");
     const headers = (fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers;
     expect(headers["Authorization"]).toBe("Bearer civ_tok");
+  });
+
+  it("creator mode sends username INSTEAD of query (combined = empty page, live-verified quirk)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(SEARCH_BODY));
+    await searchCivitaiModels("", { creator: "jed" });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("username=jed");
+    expect(url).not.toContain("query=");
+  });
+
+  it("creator + keyword: over-fetches, filters client-side on name/tags, and respects limit", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          { id: 1, name: "Flux Detailer", modelVersions: [] },
+          { id: 2, name: "Anime Style", tags: ["style"], modelVersions: [] },
+          { id: 3, name: "Portrait Pack", tags: ["detail", "portrait"], modelVersions: [] },
+        ],
+      }),
+    );
+    const hits = await searchCivitaiModels("detail", { creator: "jed" });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("username=jed");
+    expect(url).not.toContain("query=");
+    expect(url).toContain("limit=100"); // over-fetch for the client-side filter
+    // "Flux Detailer" matches on name, "Portrait Pack" on the "detail" tag.
+    expect(hits.map((h) => h.model_id)).toEqual([1, 3]);
+  });
+
+  it("rejects an empty query with no creator", async () => {
+    await expect(searchCivitaiModels("  ")).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("searchCivitaiCreators", () => {
+  it("builds the /creators query and maps username/model_count/profile_url + total", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          { username: "jedikun", modelCount: 18, link: "https://civitai.com/api/v1/models?username=jedikun" },
+          { username: "techjedi", link: "https://civitai.com/api/v1/models?username=techjedi" },
+        ],
+        metadata: { totalItems: 6 },
+      }),
+    );
+    const { hits, total } = await searchCivitaiCreators("jed", { limit: 5 });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("/creators?");
+    expect(url).toContain("query=jed");
+    expect(url).toContain("limit=5");
+    expect(total).toBe(6);
+    expect(hits).toEqual([
+      {
+        username: "jedikun",
+        profile_url: "https://civitai.com/user/jedikun",
+        model_count: 18,
+      },
+      {
+        username: "techjedi",
+        profile_url: "https://civitai.com/user/techjedi",
+        model_count: 0, // API omits modelCount for creators with none visible
+      },
+    ]);
+  });
+
+  it("fails FAST when CIVITAI_ENABLED=0 (kill-switch, #127)", async () => {
+    process.env.CIVITAI_ENABLED = "0";
+    try {
+      await expect(searchCivitaiCreators("x")).rejects.toThrow(/disabled by config/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.CIVITAI_ENABLED;
+    }
+  });
+});
+
+describe("fetchCivitaiTopCreators", () => {
+  const BOARD_BODY = {
+    result: {
+      data: {
+        json: [
+          {
+            position: 1,
+            score: 81140,
+            user: { username: "alcaitiff", deletedAt: null },
+            metrics: [
+              { type: "downloadCount", value: 42294 },
+              { type: "entries", value: 13 },
+              { type: "thumbsUpCount", value: 2253 },
+              { type: "generationCount", value: 719 },
+            ],
+          },
+          {
+            position: 2,
+            score: 100,
+            user: { username: "ghost", deletedAt: "2026-01-01T00:00:00Z" },
+            metrics: [],
+          },
+          {
+            position: 3,
+            score: 75439,
+            user: { username: "circlestone_labs", deletedAt: null },
+            metrics: [{ type: "downloadCount", value: 39000 }],
+          },
+        ],
+      },
+    },
+  };
+
+  it("hits the tRPC leaderboard with browser-shaped headers (bot gate) and NO bearer token", async () => {
+    config.civitaiApiToken = "civ_tok";
+    fetchMock.mockResolvedValueOnce(jsonResponse(BOARD_BODY));
+    await fetchCivitaiTopCreators();
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("civitai.com/api/trpc/leaderboard.getLeaderboard");
+    expect(url).toContain(encodeURIComponent(JSON.stringify({ json: { id: "overall" } })));
+    const headers = (fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers;
+    expect(headers["User-Agent"]).toContain("Mozilla/5.0"); // bot gate 401s a plain fetch UA
+    expect(headers["Authorization"]).toBeUndefined(); // token stays on the v1 API surface
+  });
+
+  it("maps rank/score/metrics, skips deleted users, and respects limit + board", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(BOARD_BODY));
+    const hits = await fetchCivitaiTopCreators({ board: "new_creators", limit: 2 });
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      encodeURIComponent(JSON.stringify({ json: { id: "new_creators" } })),
+    );
+    expect(hits).toHaveLength(2); // deleted "ghost" is skipped, then limit applies
+    expect(hits[0]).toEqual({
+      username: "alcaitiff",
+      profile_url: "https://civitai.com/user/alcaitiff",
+      position: 1,
+      score: 81140,
+      downloads: 42294,
+      thumbs_up: 2253,
+      generations: 719,
+      entries: 13,
+    });
+    expect(hits[1].username).toBe("circlestone_labs");
+    expect(hits[1].thumbs_up).toBeUndefined();
+  });
+
+  it("throws ModelError on a bot-gate 401", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, 401));
+    await expect(fetchCivitaiTopCreators()).rejects.toBeInstanceOf(ModelError);
+  });
+
+  it("fails FAST when CIVITAI_ENABLED=0 (kill-switch, #127)", async () => {
+    process.env.CIVITAI_ENABLED = "0";
+    try {
+      await expect(fetchCivitaiTopCreators()).rejects.toThrow(/disabled by config/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.CIVITAI_ENABLED;
+    }
   });
 });

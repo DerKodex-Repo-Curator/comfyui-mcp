@@ -459,11 +459,14 @@ export async function searchCivitaiModels(
   const q = keyword.toLowerCase();
   const matches: CivitaiSearchItem[] = [];
   const seenIds = new Set<number>();
+  // Every cursor already followed — refuses ANY cycle (immediate repeat AND
+  // longer A→B→A loops), not just the previous cursor.
+  const seenCursors = new Set<string>();
   let scanned = 0;
   let cursor: string | undefined;
   // True when the scan stopped with pages plausibly unseen: the page cap was
   // hit with a next cursor remaining, or the API handed back a degenerate
-  // (repeated) cursor we refuse to follow.
+  // (cycling) cursor we refuse to follow.
   let stoppedEarly = false;
   for (let page = 0; page < CREATOR_SCAN_MAX_PAGES; page++) {
     if (cursor !== undefined) params.set("cursor", cursor);
@@ -481,12 +484,15 @@ export async function searchCivitaiModels(
       ),
     );
     // Falsy (missing OR empty-string) cursor → the catalog is exhausted; a
-    // REPEATED cursor would loop the same page forever → treat as stuck.
+    // cursor we ALREADY followed (immediate repeat or a longer cycle) would
+    // page in circles forever → treat as stuck.
     const next = data.metadata?.nextCursor || undefined;
-    if (!next || next === cursor) {
-      stoppedEarly = next !== undefined; // repeated cursor: pages may remain unseen
+    if (!next) break;
+    if (seenCursors.has(next)) {
+      stoppedEarly = true; // cycling cursor: pages may remain unseen
       break;
     }
+    seenCursors.add(next);
     cursor = next;
     if (matches.length >= limit) break;
     if (page === CREATOR_SCAN_MAX_PAGES - 1) stoppedEarly = true; // page cap, more remained

@@ -365,6 +365,35 @@ describe("searchCivitaiModels", () => {
     expect(scanCapped).toBe(true); // stuck mid-catalog → the miss is not definitive
   });
 
+  it("creator + keyword: a LONGER cursor cycle (A→B→A) breaks out and reports the cap", async () => {
+    // A two-cursor cycle: a previous-cursor-only check would follow A→B→A→B…
+    // until the page cap; the seen-cursors set refuses A the second time.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 1, name: "Unrelated 1", modelVersions: [] }],
+          metadata: { nextCursor: "A" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 2, name: "Unrelated 2", modelVersions: [] }],
+          metadata: { nextCursor: "B" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 3, name: "Unrelated 3", modelVersions: [] }],
+          metadata: { nextCursor: "A" }, // cycles back — already followed
+        }),
+      );
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
+    expect(fetchMock).toHaveBeenCalledTimes(3); // start → A → B, then A is refused
+    expect(hits).toEqual([]);
+    expect(scanned).toBe(3);
+    expect(scanCapped).toBe(true); // cycling mid-catalog → the miss is not definitive
+  });
+
   it("creator + keyword: duplicate model ids across pages are deduped (never fill limit twice)", async () => {
     fetchMock
       .mockResolvedValueOnce(

@@ -555,3 +555,102 @@ describe("UiBridge (multi-tab)", () => {
     }
   });
 });
+
+// ── Desktop-tab mirror: multi-viewer fanout (mobile remote control) ───────────
+function connectHeadless(tabId: string): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const sock = new WebSocket(`ws://127.0.0.1:${port}`);
+    sock.on("open", () => {
+      sock.send(JSON.stringify({ type: "hello", tab_id: tabId, title: "phone", headless: true }));
+      resolve(sock);
+    });
+    sock.on("error", reject);
+  });
+}
+
+function nextFrame(
+  sock: WebSocket,
+  match: (m: Record<string, unknown>) => boolean,
+  timeoutMs = 1500,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      sock.off("message", h);
+      reject(new Error("timeout waiting for frame"));
+    }, timeoutMs);
+    function h(buf: WebSocket.RawData) {
+      const m = JSON.parse(buf.toString());
+      if (match(m)) {
+        clearTimeout(t);
+        sock.off("message", h);
+        resolve(m);
+      }
+    }
+    sock.on("message", h);
+  });
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 60));
+
+describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
+  it("lists desktop tabs (excluding headless viewers), attaches, and fans push out to primary + viewer", async () => {
+    const desktop = await connectPanel("desktop-1", "My Graph");
+    const phone = await connectHeadless("phone-1");
+    await settle();
+
+    phone.send(JSON.stringify({ type: "list_tabs", cid: "c1" }));
+    const list = await nextFrame(phone, (m) => m.type === "tab_list" && m.cid === "c1");
+    const tabs = list.tabs as Array<{ tab_id: string; title: string }>;
+    expect(tabs.map((t) => t.tab_id)).toContain("desktop-1");
+    expect(tabs.find((t) => t.tab_id === "desktop-1")?.title).toBe("My Graph");
+    expect(tabs.some((t) => t.tab_id === "phone-1")).toBe(false); // headless not listed
+
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "c2", target_tab_id: "desktop-1" }));
+    const att = await nextFrame(phone, (m) => m.type === "tab_attached" && m.cid === "c2");
+    expect(att.ok).toBe(true);
+    expect(bridge.connected()).toBe(true); // attach did NOT evict the primary
+
+    const onDesktop = nextFrame(desktop, (m) => m.type === "say" && m.text === "hello");
+    const onPhone = nextFrame(phone, (m) => m.type === "say" && m.text === "hello");
+    bridge.push({ type: "say", text: "hello" }, "desktop-1");
+    await Promise.all([onDesktop, onPhone]); // both receive, or the test times out
+  });
+
+  it("canvas send() targets the primary only, never a mirror viewer", async () => {
+    const desktop = await connectPanel("desktop-2", "G");
+    autoReply(desktop, "desktop");
+    const phone = await connectHeadless("phone-2");
+    await settle();
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "desktop-2" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached");
+
+    let phoneGotCmd = false;
+    phone.on("message", (buf) => {
+      if (JSON.parse(buf.toString()).cmd) phoneGotCmd = true;
+    });
+    const res = (await bridge.send({ cmd: "graph_state" } as { cmd: string }, {
+      tabId: "desktop-2",
+    })) as { from?: string };
+    expect(res.from).toBe("desktop");
+    await settle();
+    expect(phoneGotCmd).toBe(false);
+  });
+
+  it("detach_tab stops the fanout", async () => {
+    await connectPanel("desktop-3", "G");
+    const phone = await connectHeadless("phone-3");
+    await settle();
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "desktop-3" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached");
+    phone.send(JSON.stringify({ type: "detach_tab" }));
+    await settle();
+
+    let phoneGotSay = false;
+    phone.on("message", (buf) => {
+      if (JSON.parse(buf.toString()).type === "say") phoneGotSay = true;
+    });
+    bridge.push({ type: "say", text: "after-detach" }, "desktop-3");
+    await settle();
+    expect(phoneGotSay).toBe(false);
+  });
+});

@@ -1597,6 +1597,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     // Report the SDK session id so the panel can persist it and resume on reload.
     onSession: (key, sessionId) => {
       bridge.push({ type: "session", session_id: sessionId }, panelTabOf(key));
+      bridge.broadcastTabList(); // a session started/changed → refresh mirror pickers
     },
     // Per-turn rewind anchor (assistant UUID) → the panel stores it so a later
     // "rewind conversation to here" can fork the session at that point.
@@ -1637,6 +1638,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Let refreshEnvCapabilities() feed a freshly-gathered env block into agents
   // spawned after a ComfyUI restart/reconnect.
   liveManager = manager;
+
+  // Flag the mobile mirror picker's "session attached" (green) dot from live agents.
+  bridge.setHasSessionPredicate((tabId) => manager.hasLiveAgent(agentKeyFor(tabId)));
 
   // ── Local-agent VRAM pause during generation ────────────────────────────
   // On a single-GPU box the local Ollama chat model and ComfyUI fight for VRAM:

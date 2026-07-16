@@ -36,6 +36,11 @@ import {
   type UsageStatus,
 } from "./panel-agent.js";
 import { createPanelMcpServer } from "./panel-tools.js";
+import {
+  optionsAckFrame,
+  optionsErrorAckFrame,
+  optionsRequestMeta,
+} from "./options-ack.js";
 import { readUserMcpServers } from "../services/user-mcp-config.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -1901,9 +1906,19 @@ export async function runPanelOrchestrator(): Promise<void> {
       .then((models) => {
         if (models.length) {
           // `backend` rides on the models frame so the panel's picker reflects the
-          // provider THIS tab selected (single-port multi-provider).
+          // provider THIS tab selected (single-port multi-provider). `current`
+          // reports the model this tab will ACTUALLY spawn with: the picker's
+          // per-tab override when one is set (set_options survives reconnects
+          // of the same tab id), else the backend's configured default —
+          // previously the default was always reported, so a reconnecting
+          // client's picker showed the wrong current model after a switch.
           bridge.push(
-            { type: "models", models, current: currentModelFor(backend), backend },
+            {
+              type: "models",
+              models,
+              current: manager.modelOverrideFor(agentKeyFor(panelTabId)) ?? currentModelFor(backend),
+              backend,
+            },
             panelTabId,
           );
         }
@@ -2642,9 +2657,17 @@ export async function runPanelOrchestrator(): Promise<void> {
 
     // Model / effort picker: apply and confirm. Model switches live; an effort
     // change restarts the session (resumed) so the conversation carries over.
+    //
+    // CORRELATION: this handler runs as a detached async task (model discovery
+    // + setOptions are awaited), so with several requests outstanding the acks
+    // can complete OUT OF ORDER — and used to carry no request identity. A
+    // client may stamp the request with an opaque `rid`; the ack echoes it
+    // verbatim (plus `requested_model`, the pre-guard id) so the client can
+    // resolve exactly the attempt each ack answers. See options-ack.ts.
     if (event.type === "set_options" && event.tab_id) {
       const tabId = event.tab_id;
-      const reqModel = typeof event.model === "string" ? event.model : undefined;
+      const meta = optionsRequestMeta(event as { rid?: unknown; model?: unknown });
+      const reqModel = meta.requestedModel;
       const nextEffort: Effort | null | undefined =
         event.effort === null
           ? null
@@ -2670,25 +2693,15 @@ export async function runPanelOrchestrator(): Promise<void> {
           void unloadAllLmstudio(LMSTUDIO_BASE_URL, nextModel);
         }
         const applied = await manager.setOptions(agentKeyFor(tabId), { model: nextModel, effort: nextEffort });
-        bridge.push(
-          {
-            type: "ack",
-            ok: true,
-            kind: "options",
-            model: applied.model,
-            effort: applied.effort ?? null,
-            restarted: applied.restarted,
-            // Effort changed mid-turn → it takes effect once the current turn ends
-            // (we never interrupt a live reply). The panel can note this.
-            deferred: applied.deferred,
-          },
-          tabId,
-        );
+        bridge.push(optionsAckFrame(applied, meta), tabId);
       })().catch((err) => {
-        bridge.push(
-          { type: "say", text: `⚠️ Could not change model/effort: ${err?.message ?? err}` },
-          tabId,
-        );
+        const message = `${err?.message ?? err}`;
+        // Legacy contract: old clients only understand the say. A rid-stamped
+        // request ALSO gets an ok:false options ack so the correlating client
+        // resolves the exact failed attempt instead of waiting out a timeout.
+        bridge.push({ type: "say", text: `⚠️ Could not change model/effort: ${message}` }, tabId);
+        const errorAck = optionsErrorAckFrame(message, meta);
+        if (errorAck) bridge.push(errorAck, tabId);
       });
       return;
     }

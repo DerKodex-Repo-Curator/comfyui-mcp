@@ -1105,6 +1105,14 @@ export class PanelAgentManager {
     return this.effortByKey.has(tabId) ? this.effortByKey.get(tabId) : this.effort;
   }
 
+  /** The picker's model OVERRIDE for this composite key (`tabId::backend`), if
+   *  any — undefined when the key runs the shared default. Lets the models
+   *  push report the model this tab will ACTUALLY spawn with as `current`,
+   *  instead of the backend default the override supersedes. */
+  modelOverrideFor(tabId: string): string | undefined {
+    return this.modelByKey.get(tabId);
+  }
+
   private makeAgent(tabId: string): PanelAgent {
     // Inject the toggle-selected backend (Codex) when provided; otherwise the
     // PanelAgent constructor defaults to ClaudeBackend (existing behavior).

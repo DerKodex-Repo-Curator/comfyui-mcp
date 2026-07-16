@@ -6,6 +6,22 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.36.0] - 2026-07-15
+
+### MCP
+
+#### Added
+- **cid-correlated `set_options` acks** — clients may stamp `set_options`
+  with an opaque `cid`; the options ack echoes it verbatim plus
+  `requested_model`, making model-switch acks exactly attributable (acks are
+  not FIFO — each handler is an independent async task). Failure now also
+  sends an `ok:false` ack for cid-stamped requests. Fully backward
+  compatible: cid-less requests get the byte-identical legacy ack. Note:
+  `cid`, not `rid` — the bridge consumes any frame carrying `rid` as a
+  canvas-command reply. The models frame's `current` now reports the per-tab
+  model override instead of the backend default (#228)
+
+
 ## [0.35.0] - 2026-07-15
 
 ### MCP

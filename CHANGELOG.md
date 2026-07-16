@@ -6,6 +6,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Added
+- **`list_local_models` CivitAI provenance line** — entries whose
+  `<file>.civitai.json` sidecar (written by `download_civitai_model`) carries
+  ids now render a `civitai: <page URL>` line (the sidecar's `sourceUrl`, or
+  reconstructed from `modelId`/`versionId` for older sidecars). The URL
+  carries the modelId + INSTALLED modelVersionId, so agents and clients (the
+  mobile LoRA hub) can link back to the source and check CivitAI for newer
+  versions. Purely additive; no whitelist change — `list_local_models` is
+  already mobile-callable.
+
 ## [0.36.0] - 2026-07-15
 
 ### MCP

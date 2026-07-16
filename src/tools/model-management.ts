@@ -138,7 +138,7 @@ export function registerModelManagementTools(server: McpServer): void {
 
   server.tool(
     "list_local_models",
-    "List model files available to the connected ComfyUI, grouped by type. Read-only. Queries ComfyUI's /models REST endpoint first (works with remote ComfyUI and respects extra_model_paths.yaml — symlinked / mounted dirs the install-path filesystem scan would miss), then falls back to a filesystem scan of COMFYUI_PATH/models/ when the REST endpoint is unavailable. Size and modified time are only available on the filesystem fallback path. Use to see which models are already available before generating or downloading; use search_models to discover new models on HuggingFace, then download_model to fetch them. For models fetched via download_civitai_model, any CivitAI trigger/activation words and base model are shown inline (read from the `<file>.civitai.json` sidecar) — apply those trigger words in your prompt when generating with that model.",
+    "List model files available to the connected ComfyUI, grouped by type. Read-only. Queries ComfyUI's /models REST endpoint first (works with remote ComfyUI and respects extra_model_paths.yaml — symlinked / mounted dirs the install-path filesystem scan would miss), then falls back to a filesystem scan of COMFYUI_PATH/models/ when the REST endpoint is unavailable. Size and modified time are only available on the filesystem fallback path. Use to see which models are already available before generating or downloading; use search_models to discover new models on HuggingFace, then download_model to fetch them. For models fetched via download_civitai_model, any CivitAI trigger/activation words and base model are shown inline (read from the `<file>.civitai.json` sidecar) — apply those trigger words in your prompt when generating with that model. A `civitai:` line under an entry is that model's CivitAI page URL (modelId + INSTALLED modelVersionId, from the same sidecar) — use it to reference the source or check for newer versions.",
     {
       model_type: modelTypeEnum
         .optional()
@@ -187,6 +187,12 @@ export function registerModelManagementTools(server: McpServer): void {
               );
             } else if (m.baseModel) {
               lines.push(`    base: ${m.baseModel}`);
+            }
+            // Provenance: the sidecar's CivitAI page URL carries the modelId
+            // and the INSTALLED modelVersionId — link back to the source, and
+            // let clients check whether a newer version exists on CivitAI.
+            if (m.civitaiUrl) {
+              lines.push(`    civitai: ${m.civitaiUrl}`);
             }
           }
           lines.push("");

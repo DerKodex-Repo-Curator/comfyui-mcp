@@ -374,19 +374,56 @@ export interface CivitaiSearchOptions {
   creator?: string;
 }
 
+type CivitaiSearchItem = CivitaiModel & {
+  nsfw?: boolean;
+  stats?: { downloadCount?: number; thumbsUpCount?: number };
+};
+
 interface CivitaiSearchResponse {
-  items?: Array<
-    CivitaiModel & {
-      nsfw?: boolean;
-      stats?: { downloadCount?: number; thumbsUpCount?: number };
-    }
-  >;
+  items?: CivitaiSearchItem[];
+  metadata?: { nextCursor?: string };
 }
+
+export interface CivitaiSearchResult {
+  hits: CivitaiSearchHit[];
+  /** Creator+keyword mode only: how many of the creator's models the
+   *  client-side keyword filter scanned. */
+  scanned?: number;
+  /** Creator+keyword mode only: true when the bounded scan stopped at the
+   *  page cap with pages left AND fewer than `limit` matches — matching
+   *  models past the cap may exist but were not seen. */
+  scanCapped?: boolean;
+}
+
+function toSearchHit(m: CivitaiSearchItem): CivitaiSearchHit {
+  const v = m.modelVersions?.[0];
+  const file = v ? pickFile(v) : undefined;
+  const sizeKb = (file as { sizeKB?: number } | undefined)?.sizeKB;
+  return {
+    model_id: m.id,
+    name: m.name ?? `model ${m.id}`,
+    type: m.type,
+    creator: m.creator?.username,
+    downloads: m.stats?.downloadCount,
+    thumbs_up: m.stats?.thumbsUpCount,
+    nsfw: m.nsfw,
+    version_id: v?.id,
+    version_name: v?.name,
+    base_model: v?.baseModel,
+    trained_words: v?.trainedWords?.slice(0, 6),
+    ...(sizeKb ? { size_mb: Math.round(sizeKb / 1024) } : {}),
+  };
+}
+
+/** Creator+keyword mode: pages of 100 scanned client-side, and how many pages
+ *  to follow before giving up (4 → up to 400 of the creator's models). */
+const CREATOR_SCAN_PAGE_SIZE = 100;
+const CREATOR_SCAN_MAX_PAGES = 4;
 
 export async function searchCivitaiModels(
   query: string,
   opts: CivitaiSearchOptions = {},
-): Promise<CivitaiSearchHit[]> {
+): Promise<CivitaiSearchResult> {
   const creator = opts.creator?.trim();
   const keyword = query.trim();
   if (!creator && !keyword) {
@@ -400,46 +437,49 @@ export async function searchCivitaiModels(
   params.set("nsfw", opts.nsfw ? "true" : "false");
   for (const t of opts.types ?? []) params.append("types", t);
   for (const b of opts.baseModels ?? []) params.append("baseModels", b);
-  if (creator) {
-    // Creator mode: `query` + `username` together return an EMPTY page
-    // (live-verified), so send only `username` and apply the keyword
-    // client-side. Over-fetch so the post-filter still fills `limit`.
-    params.set("username", creator);
-    params.set("limit", String(keyword ? 100 : limit));
-  } else {
-    params.set("query", keyword);
+
+  if (!creator || !keyword) {
+    // Single-page modes: a plain keyword search, or ALL of a creator's models.
+    if (creator) {
+      params.set("username", creator);
+    } else {
+      params.set("query", keyword);
+    }
     params.set("limit", String(limit));
+    const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
+    return { hits: (data.items ?? []).slice(0, limit).map(toSearchHit) };
   }
 
-  const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
-  let items = data.items ?? [];
-  if (creator && keyword) {
-    const q = keyword.toLowerCase();
-    items = items.filter(
-      (m) =>
-        (m.name ?? "").toLowerCase().includes(q) ||
-        (m.tags ?? []).some((t) => t.toLowerCase().includes(q)),
+  // Creator + keyword: `query` + `username` together return an EMPTY page
+  // (live-verified), so send only `username` and apply the keyword client-side
+  // — following cursor pagination (bounded) so a prolific creator's matching
+  // model past the first page is still found.
+  params.set("username", creator);
+  params.set("limit", String(CREATOR_SCAN_PAGE_SIZE));
+  const q = keyword.toLowerCase();
+  const matches: CivitaiSearchItem[] = [];
+  let scanned = 0;
+  let cursor: string | undefined;
+  for (let page = 0; page < CREATOR_SCAN_MAX_PAGES; page++) {
+    if (cursor !== undefined) params.set("cursor", cursor);
+    const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
+    const items = data.items ?? [];
+    scanned += items.length;
+    matches.push(
+      ...items.filter(
+        (m) =>
+          (m.name ?? "").toLowerCase().includes(q) ||
+          (m.tags ?? []).some((t) => t.toLowerCase().includes(q)),
+      ),
     );
+    cursor = data.metadata?.nextCursor;
+    if (cursor === undefined || matches.length >= limit) break;
   }
-  return items.slice(0, limit).map((m) => {
-    const v = m.modelVersions?.[0];
-    const file = v ? pickFile(v) : undefined;
-    const sizeKb = (file as { sizeKB?: number } | undefined)?.sizeKB;
-    return {
-      model_id: m.id,
-      name: m.name ?? `model ${m.id}`,
-      type: m.type,
-      creator: m.creator?.username,
-      downloads: m.stats?.downloadCount,
-      thumbs_up: m.stats?.thumbsUpCount,
-      nsfw: m.nsfw,
-      version_id: v?.id,
-      version_name: v?.name,
-      base_model: v?.baseModel,
-      trained_words: v?.trainedWords?.slice(0, 6),
-      ...(sizeKb ? { size_mb: Math.round(sizeKb / 1024) } : {}),
-    };
-  });
+  return {
+    hits: matches.slice(0, limit).map(toSearchHit),
+    scanned,
+    scanCapped: cursor !== undefined && matches.length < limit,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -206,7 +206,7 @@ describe("searchCivitaiModels", () => {
 
   it("builds the query (types/baseModels/sort/nsfw pinned) and maps the download handoff fields", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(SEARCH_BODY));
-    const hits = await searchCivitaiModels("flux detail", {
+    const { hits } = await searchCivitaiModels("flux detail", {
       types: ["LORA"],
       baseModels: ["Flux.1 D"],
     });
@@ -260,7 +260,7 @@ describe("searchCivitaiModels", () => {
     expect(url).not.toContain("query=");
   });
 
-  it("creator + keyword: over-fetches, filters client-side on name/tags, and respects limit", async () => {
+  it("creator + keyword: over-fetches, filters client-side on name/tags, no cap on a single page", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
         items: [
@@ -270,13 +270,78 @@ describe("searchCivitaiModels", () => {
         ],
       }),
     );
-    const hits = await searchCivitaiModels("detail", { creator: "jed" });
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
     const url = String(fetchMock.mock.calls[0][0]);
     expect(url).toContain("username=jed");
     expect(url).not.toContain("query=");
     expect(url).toContain("limit=100"); // over-fetch for the client-side filter
     // "Flux Detailer" matches on name, "Portrait Pack" on the "detail" tag.
     expect(hits.map((h) => h.model_id)).toEqual([1, 3]);
+    expect(scanned).toBe(3);
+    expect(scanCapped).toBe(false); // no nextCursor → the whole catalog was scanned
+  });
+
+  it("creator + keyword: follows cursor pagination so a match past page one is found", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 1, name: "Anime Style", modelVersions: [] }],
+          metadata: { nextCursor: "abc" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 2, name: "Detail Slider", modelVersions: [] }],
+        }),
+      );
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "prolific" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("cursor=abc");
+    expect(hits.map((h) => h.model_id)).toEqual([2]);
+    expect(scanned).toBe(2);
+    expect(scanCapped).toBe(false);
+  });
+
+  it("creator + keyword: stops at the page cap and reports scanCapped when short of limit", async () => {
+    // 4 pages (the cap), every page keeps offering a next cursor, zero matches.
+    for (let i = 0; i < 4; i++) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 100 + i, name: "Unrelated", modelVersions: [] }],
+          metadata: { nextCursor: `c${i}` },
+        }),
+      );
+    }
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "prolific" });
+    expect(fetchMock).toHaveBeenCalledTimes(4); // bounded — never a 5th page
+    expect(hits).toEqual([]);
+    expect(scanned).toBe(4);
+    expect(scanCapped).toBe(true); // pages remained unscanned → the miss is not definitive
+  });
+
+  it("creator + keyword: stops paging early once limit matches are found (no cap flag)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          { id: 1, name: "Detail A", modelVersions: [] },
+          { id: 2, name: "Detail B", modelVersions: [] },
+        ],
+        metadata: { nextCursor: "more" },
+      }),
+    );
+    const { hits, scanCapped } = await searchCivitaiModels("detail", {
+      creator: "prolific",
+      limit: 2,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // limit filled on page one
+    expect(hits).toHaveLength(2);
+    expect(scanCapped).toBe(false);
+  });
+
+  it("creator-only mode uses the caller's limit (no over-fetch)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [] }));
+    await searchCivitaiModels("", { creator: "jed", limit: 5 });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("limit=5");
   });
 
   it("rejects an empty query with no creator", async () => {

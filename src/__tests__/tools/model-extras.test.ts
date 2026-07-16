@@ -363,9 +363,11 @@ describe("search_civitai_models creator filter", () => {
   });
 
   it("passes creator through and labels the results with it", async () => {
-    searchCivitaiModelsMock.mockResolvedValueOnce([
-      { model_id: 1, name: "Detail Slider", type: "LORA", creator: "alcaitiff", version_id: 9 },
-    ]);
+    searchCivitaiModelsMock.mockResolvedValueOnce({
+      hits: [
+        { model_id: 1, name: "Detail Slider", type: "LORA", creator: "alcaitiff", version_id: 9 },
+      ],
+    });
     const { searchCivitai } = makeServer();
     const res = await searchCivitai({ creator: "alcaitiff" });
 
@@ -376,15 +378,30 @@ describe("search_civitai_models creator filter", () => {
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain("creator alcaitiff");
     expect(res.content[0].text).toContain("Detail Slider");
+    expect(res.content[0].text).not.toContain("scan cap");
   });
 
   it("no-hits message points at search_civitai_creators for a creator miss", async () => {
-    searchCivitaiModelsMock.mockResolvedValueOnce([]);
+    searchCivitaiModelsMock.mockResolvedValueOnce({ hits: [] });
     const { searchCivitai } = makeServer();
     const res = await searchCivitai({ creator: "nobody" });
 
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain("search_civitai_creators");
+  });
+
+  it("surfaces the bounded-scan cap so a capped miss is never presented as definitive", async () => {
+    searchCivitaiModelsMock.mockResolvedValueOnce({
+      hits: [],
+      scanned: 400,
+      scanCapped: true,
+    });
+    const { searchCivitai } = makeServer();
+    const res = await searchCivitai({ creator: "prolific", query: "detail" });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("No CivitAI models matched");
+    expect(res.content[0].text).toContain("first 400 models (scan cap)");
   });
 });
 

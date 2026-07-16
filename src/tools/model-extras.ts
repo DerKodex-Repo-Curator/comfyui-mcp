@@ -157,7 +157,7 @@ export function registerModelExtrasTools(server: McpServer): void {
             "Provide a query, a creator (exact username), or both.",
           );
         }
-        const hits = await searchCivitaiModels(args.query ?? "", {
+        const { hits, scanned, scanCapped } = await searchCivitaiModels(args.query ?? "", {
           types: args.types,
           baseModels: args.base_models,
           sort: args.sort,
@@ -165,6 +165,11 @@ export function registerModelExtrasTools(server: McpServer): void {
           limit: args.limit,
           creator: args.creator,
         });
+        // Creator+keyword scans are bounded (client-side keyword filter over
+        // paged results) — never present a capped miss as definitive.
+        const capNote = scanCapped
+          ? `\nNOTE: the keyword was matched client-side over only this creator's first ${scanned} models (scan cap) — matching models past that may exist. Narrow with types/base_models, or drop the query to list everything.`
+          : "";
         const what = [
           args.query?.trim() && `"${args.query}"`,
           args.creator?.trim() && `creator ${args.creator}`,
@@ -183,7 +188,8 @@ export function registerModelExtrasTools(server: McpServer): void {
                   (args.creator
                     ? `, check the exact username with search_civitai_creators (creators with only NSFW models need nsfw:true)`
                     : "") +
-                  `, or search HuggingFace with search_models.`,
+                  `, or search HuggingFace with search_models.` +
+                  capNote,
               },
             ],
           };
@@ -216,6 +222,7 @@ export function registerModelExtrasTools(server: McpServer): void {
               text:
                 `${hits.length} CivitAI result(s) for ${what}:\n\n${lines.join("\n\n")}\n\n` +
                 `Next: download_civitai_model {"model_version_id": <id>, "target_subfolder": "<loras|checkpoints|...>"} — then use the trigger words in the prompt.` +
+                capNote +
                 tokenNote,
             },
           ],

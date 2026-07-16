@@ -1,15 +1,18 @@
-// set_options ack correlation (`rid` echo + `requested_model`) and the
+// set_options ack correlation (`cid` echo + `requested_model`) and the
 // per-tab model override surfaced as the models frame's `current`.
 //
 // BUG CONTEXT: each set_options is handled in a detached async task, so acks
 // can arrive out of order AND carried no request identity — a client with more
 // than one attempt outstanding (a timed-out pick + a retry) could not tell
 // which ack answered which request (found by the mobile client, PR
-// comfyui-mcp-mobile#1). Clients now stamp requests with an opaque `rid`,
-// echoed verbatim, plus `requested_model` (pre-guard). Backward compatible:
-// rid-less requests produce the pre-existing ack shape, and the failure path
-// only ADDS an ok:false ack for rid-stamped requests (old panels keep seeing
-// just the `say`).
+// comfyui-mcp-mobile#1). Clients now stamp requests with an opaque `cid`,
+// echoed verbatim, plus `requested_model` (pre-guard). The field is `cid`, NOT
+// `rid`: the ui-bridge consumes any inbound `rid` as a canvas-command reply
+// before it reaches the orchestrator handler (verified live — a rid-stamped
+// set_options is silently dropped). Backward compatible: cid-less requests
+// produce the pre-existing ack shape, and the failure path only ADDS an
+// ok:false ack for cid-stamped requests (old panels keep seeing just the
+// `say`).
 
 import { describe, expect, it, beforeAll } from "vitest";
 import type {
@@ -59,26 +62,26 @@ function makeManager() {
 }
 
 describe("optionsRequestMeta", () => {
-  it("lifts rid + requested model off the raw event", () => {
-    expect(optionsRequestMeta({ rid: "r-1", model: "sonnet" })).toEqual({
-      rid: "r-1",
+  it("lifts cid + requested model off the raw event", () => {
+    expect(optionsRequestMeta({ cid: "opt-0-1", model: "sonnet" })).toEqual({
+      cid: "opt-0-1",
       requestedModel: "sonnet",
     });
   });
 
   it("omits absent/non-string fields (legacy panels send neither)", () => {
     expect(optionsRequestMeta({})).toEqual({});
-    expect(optionsRequestMeta({ rid: 42, model: null })).toEqual({});
-    expect(optionsRequestMeta({ rid: "", model: "" })).toEqual({});
+    expect(optionsRequestMeta({ cid: 42, model: null })).toEqual({});
+    expect(optionsRequestMeta({ cid: "", model: "" })).toEqual({});
   });
 });
 
 describe("optionsAckFrame", () => {
   const applied = { model: "sonnet", effort: null, restarted: false, deferred: false };
 
-  it("echoes rid verbatim and reports the PRE-guard requested model", () => {
+  it("echoes cid verbatim and reports the PRE-guard requested model", () => {
     const frame = optionsAckFrame(applied, {
-      rid: "mobile-7",
+      cid: "mobile-7",
       requestedModel: "not-a-real-model",
     });
     expect(frame).toMatchObject({
@@ -86,12 +89,12 @@ describe("optionsAckFrame", () => {
       ok: true,
       kind: "options",
       model: "sonnet",
-      rid: "mobile-7",
+      cid: "mobile-7",
       requested_model: "not-a-real-model",
     });
   });
 
-  it("without rid the ack keeps the exact legacy shape (no new keys)", () => {
+  it("without cid the ack keeps the exact legacy shape (no new keys)", () => {
     const frame = optionsAckFrame(applied, {});
     expect(frame).toEqual({
       type: "ack",
@@ -102,32 +105,32 @@ describe("optionsAckFrame", () => {
       restarted: false,
       deferred: false,
     });
-    expect("rid" in frame).toBe(false);
+    expect("cid" in frame).toBe(false);
     expect("requested_model" in frame).toBe(false);
   });
 
   it("effort-only requests (no model field) omit requested_model", () => {
-    const frame = optionsAckFrame(applied, { rid: "r-2" });
-    expect(frame).toMatchObject({ rid: "r-2" });
+    const frame = optionsAckFrame(applied, { cid: "opt-0-2" });
+    expect(frame).toMatchObject({ cid: "opt-0-2" });
     expect("requested_model" in frame).toBe(false);
   });
 });
 
 describe("optionsErrorAckFrame", () => {
-  it("is suppressed for rid-less (legacy) requests — say-only contract kept", () => {
+  it("is suppressed for cid-less (legacy) requests — say-only contract kept", () => {
     expect(optionsErrorAckFrame("boom", {})).toBeNull();
     expect(optionsErrorAckFrame("boom", { requestedModel: "sonnet" })).toBeNull();
   });
 
-  it("rid-stamped requests get an ok:false options ack with the rid echoed", () => {
+  it("cid-stamped requests get an ok:false options ack with the cid echoed", () => {
     expect(
-      optionsErrorAckFrame("boom", { rid: "r-9", requestedModel: "sonnet" }),
+      optionsErrorAckFrame("boom", { cid: "opt-0-9", requestedModel: "sonnet" }),
     ).toEqual({
       type: "ack",
       ok: false,
       kind: "options",
       message: "boom",
-      rid: "r-9",
+      cid: "opt-0-9",
       requested_model: "sonnet",
     });
   });

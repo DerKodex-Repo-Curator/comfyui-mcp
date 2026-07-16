@@ -5,16 +5,24 @@
 // and arrive at the client — OUT OF ORDER, and the ack itself used to carry no
 // request identity. A client with more than one attempt outstanding (e.g. a
 // timed-out pick followed by a retry) could not tell which ack answered which
-// request. Clients may now stamp the request with an opaque `rid`; we echo it
+// request. Clients may now stamp the request with an opaque `cid`; we echo it
 // verbatim on the ack, alongside `requested_model` (the id the client ASKED
 // for, pre-resolution/pre-guard), so correlation is exact.
 //
+// WHY `cid` AND NOT `rid`: `rid` is RESERVED on the client→server direction —
+// the ui-bridge consumes ANY inbound frame carrying a string `rid` as the
+// reply to a canvas command (ui-bridge.ts, the `pending` map) and it never
+// reaches the orchestrator's event handler. Verified live: a rid-stamped
+// set_options is silently dropped. `cid` is the established client→server
+// correlation field (call_tool, list_history, upload_media) and flows through
+// untouched.
+//
 // Backward compatible in both directions:
-//  • a request WITHOUT `rid` produces the exact ack shape shipped before
+//  • a request WITHOUT `cid` produces the exact ack shape shipped before
 //    (no new fields except `requested_model` when a model was requested,
 //    which old panels ignore);
 //  • the error path keeps the legacy `say` frame for old clients, and ONLY
-//    adds an ok:false options ack when the request carried a `rid` (so old
+//    adds an ok:false options ack when the request carried a `cid` (so old
 //    panels never see a failure ack they don't expect).
 
 /** What `manager.setOptions` reports it actually applied. */
@@ -28,18 +36,18 @@ export interface AppliedOptions {
 /** Correlation metadata lifted off the incoming `set_options` event. */
 export interface OptionsRequestMeta {
   /** Opaque client correlation id — echoed verbatim when present. */
-  rid?: string;
+  cid?: string;
   /** The model id the client requested, BEFORE the unknown-model guard. */
   requestedModel?: string;
 }
 
 /** Read the optional correlation fields off a raw `set_options` event. */
 export function optionsRequestMeta(event: {
-  rid?: unknown;
+  cid?: unknown;
   model?: unknown;
 }): OptionsRequestMeta {
   return {
-    ...(typeof event.rid === "string" && event.rid ? { rid: event.rid } : {}),
+    ...(typeof event.cid === "string" && event.cid ? { cid: event.cid } : {}),
     ...(typeof event.model === "string" && event.model
       ? { requestedModel: event.model }
       : {}),
@@ -61,7 +69,7 @@ export function optionsAckFrame(
     // Effort changed mid-turn → it takes effect once the current turn ends
     // (we never interrupt a live reply). The client can note this.
     deferred: applied.deferred,
-    ...(meta.rid !== undefined ? { rid: meta.rid } : {}),
+    ...(meta.cid !== undefined ? { cid: meta.cid } : {}),
     ...(meta.requestedModel !== undefined
       ? { requested_model: meta.requestedModel }
       : {}),
@@ -69,7 +77,7 @@ export function optionsAckFrame(
 }
 
 /**
- * The failure ack — ONLY for rid-stamped requests (returns null otherwise, so
+ * The failure ack — ONLY for cid-stamped requests (returns null otherwise, so
  * legacy clients keep seeing just the `say` and never a failure ack shape they
  * don't handle). Lets a correlating client resolve the exact attempt that
  * failed instead of waiting out a timeout.
@@ -78,13 +86,13 @@ export function optionsErrorAckFrame(
   message: string,
   meta: OptionsRequestMeta,
 ): Record<string, unknown> | null {
-  if (meta.rid === undefined) return null;
+  if (meta.cid === undefined) return null;
   return {
     type: "ack",
     ok: false,
     kind: "options",
     message,
-    rid: meta.rid,
+    cid: meta.cid,
     ...(meta.requestedModel !== undefined
       ? { requested_model: meta.requestedModel }
       : {}),

@@ -2661,12 +2661,14 @@ export async function runPanelOrchestrator(): Promise<void> {
     // CORRELATION: this handler runs as a detached async task (model discovery
     // + setOptions are awaited), so with several requests outstanding the acks
     // can complete OUT OF ORDER — and used to carry no request identity. A
-    // client may stamp the request with an opaque `rid`; the ack echoes it
-    // verbatim (plus `requested_model`, the pre-guard id) so the client can
-    // resolve exactly the attempt each ack answers. See options-ack.ts.
+    // client may stamp the request with an opaque `cid` (NOT `rid` — the
+    // ui-bridge consumes any inbound `rid` as a canvas-command reply before it
+    // reaches this handler); the ack echoes it verbatim (plus
+    // `requested_model`, the pre-guard id) so the client can resolve exactly
+    // the attempt each ack answers. See options-ack.ts.
     if (event.type === "set_options" && event.tab_id) {
       const tabId = event.tab_id;
-      const meta = optionsRequestMeta(event as { rid?: unknown; model?: unknown });
+      const meta = optionsRequestMeta(event as { cid?: unknown; model?: unknown });
       const reqModel = meta.requestedModel;
       const nextEffort: Effort | null | undefined =
         event.effort === null

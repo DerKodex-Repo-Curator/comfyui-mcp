@@ -367,24 +367,70 @@ export interface CivitaiSearchOptions {
   sort?: CivitaiSort;
   nsfw?: boolean;
   limit?: number;
+  /** Only models by this CivitAI creator (exact username). Sent as the API's
+   *  `username` param; any keyword query is applied client-side because the
+   *  API returns an empty page when `query` and `username` are combined
+   *  (live-verified quirk). */
+  creator?: string;
 }
 
+type CivitaiSearchItem = CivitaiModel & {
+  nsfw?: boolean;
+  stats?: { downloadCount?: number; thumbsUpCount?: number };
+};
+
 interface CivitaiSearchResponse {
-  items?: Array<
-    CivitaiModel & {
-      nsfw?: boolean;
-      stats?: { downloadCount?: number; thumbsUpCount?: number };
-    }
-  >;
+  items?: CivitaiSearchItem[];
+  metadata?: { nextCursor?: string };
 }
+
+export interface CivitaiSearchResult {
+  hits: CivitaiSearchHit[];
+  /** Creator+keyword mode only: how many of the creator's models the
+   *  client-side keyword filter scanned. */
+  scanned?: number;
+  /** Creator+keyword mode only: true when the bounded scan stopped at the
+   *  page cap with pages left AND fewer than `limit` matches — matching
+   *  models past the cap may exist but were not seen. */
+  scanCapped?: boolean;
+}
+
+function toSearchHit(m: CivitaiSearchItem): CivitaiSearchHit {
+  const v = m.modelVersions?.[0];
+  const file = v ? pickFile(v) : undefined;
+  const sizeKb = (file as { sizeKB?: number } | undefined)?.sizeKB;
+  return {
+    model_id: m.id,
+    name: m.name ?? `model ${m.id}`,
+    type: m.type,
+    creator: m.creator?.username,
+    downloads: m.stats?.downloadCount,
+    thumbs_up: m.stats?.thumbsUpCount,
+    nsfw: m.nsfw,
+    version_id: v?.id,
+    version_name: v?.name,
+    base_model: v?.baseModel,
+    trained_words: v?.trainedWords?.slice(0, 6),
+    ...(sizeKb ? { size_mb: Math.round(sizeKb / 1024) } : {}),
+  };
+}
+
+/** Creator+keyword mode: pages of 100 scanned client-side, and how many pages
+ *  to follow before giving up (4 → up to 400 of the creator's models). */
+const CREATOR_SCAN_PAGE_SIZE = 100;
+const CREATOR_SCAN_MAX_PAGES = 4;
 
 export async function searchCivitaiModels(
   query: string,
   opts: CivitaiSearchOptions = {},
-): Promise<CivitaiSearchHit[]> {
+): Promise<CivitaiSearchResult> {
+  const creator = opts.creator?.trim();
+  const keyword = query.trim();
+  if (!creator && !keyword) {
+    throw new ValidationError("Provide a query, a creator, or both.");
+  }
+  const limit = Math.min(Math.max(opts.limit ?? 10, 1), 25);
   const params = new URLSearchParams();
-  params.set("query", query);
-  params.set("limit", String(Math.min(Math.max(opts.limit ?? 10, 1), 25)));
   params.set("sort", opts.sort ?? "Highest Rated");
   // Civitai defaults to including NSFW for authed accounts — pin it explicitly
   // so results are SFW unless the caller opted in.
@@ -392,24 +438,203 @@ export async function searchCivitaiModels(
   for (const t of opts.types ?? []) params.append("types", t);
   for (const b of opts.baseModels ?? []) params.append("baseModels", b);
 
-  const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
-  return (data.items ?? []).map((m) => {
-    const v = m.modelVersions?.[0];
-    const file = v ? pickFile(v) : undefined;
-    const sizeKb = (file as { sizeKB?: number } | undefined)?.sizeKB;
-    return {
-      model_id: m.id,
-      name: m.name ?? `model ${m.id}`,
-      type: m.type,
-      creator: m.creator?.username,
-      downloads: m.stats?.downloadCount,
-      thumbs_up: m.stats?.thumbsUpCount,
-      nsfw: m.nsfw,
-      version_id: v?.id,
-      version_name: v?.name,
-      base_model: v?.baseModel,
-      trained_words: v?.trainedWords?.slice(0, 6),
-      ...(sizeKb ? { size_mb: Math.round(sizeKb / 1024) } : {}),
-    };
-  });
+  if (!creator || !keyword) {
+    // Single-page modes: a plain keyword search, or ALL of a creator's models.
+    if (creator) {
+      params.set("username", creator);
+    } else {
+      params.set("query", keyword);
+    }
+    params.set("limit", String(limit));
+    const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
+    return { hits: (data.items ?? []).slice(0, limit).map(toSearchHit) };
+  }
+
+  // Creator + keyword: `query` + `username` together return an EMPTY page
+  // (live-verified), so send only `username` and apply the keyword client-side
+  // — following cursor pagination (bounded) so a prolific creator's matching
+  // model past the first page is still found.
+  params.set("username", creator);
+  params.set("limit", String(CREATOR_SCAN_PAGE_SIZE));
+  const q = keyword.toLowerCase();
+  const matches: CivitaiSearchItem[] = [];
+  const seenIds = new Set<number>();
+  // Every cursor already followed — refuses ANY cycle (immediate repeat AND
+  // longer A→B→A loops), not just the previous cursor.
+  const seenCursors = new Set<string>();
+  let scanned = 0;
+  let cursor: string | undefined;
+  // True when the scan stopped with pages plausibly unseen: the page cap was
+  // hit with a next cursor remaining, or the API handed back a degenerate
+  // (cycling) cursor we refuse to follow.
+  let stoppedEarly = false;
+  for (let page = 0; page < CREATOR_SCAN_MAX_PAGES; page++) {
+    if (cursor !== undefined) params.set("cursor", cursor);
+    const data = await civitaiGet<CivitaiSearchResponse>(`/models?${params.toString()}`);
+    // Dedupe across pages by model id — a misbehaving cursor that replays a
+    // page must not double-count `scanned` or fill `limit` with duplicates.
+    const items = (data.items ?? []).filter((m) => !seenIds.has(m.id));
+    for (const m of items) seenIds.add(m.id);
+    scanned += items.length;
+    matches.push(
+      ...items.filter(
+        (m) =>
+          (m.name ?? "").toLowerCase().includes(q) ||
+          (m.tags ?? []).some((t) => t.toLowerCase().includes(q)),
+      ),
+    );
+    // Falsy (missing OR empty-string) cursor → the catalog is exhausted; a
+    // cursor we ALREADY followed (immediate repeat or a longer cycle) would
+    // page in circles forever → treat as stuck.
+    const next = data.metadata?.nextCursor || undefined;
+    if (!next) break;
+    if (seenCursors.has(next)) {
+      stoppedEarly = true; // cycling cursor: pages may remain unseen
+      break;
+    }
+    seenCursors.add(next);
+    cursor = next;
+    if (matches.length >= limit) break;
+    if (page === CREATOR_SCAN_MAX_PAGES - 1) stoppedEarly = true; // page cap, more remained
+  }
+  return {
+    hits: matches.slice(0, limit).map(toSearchHit),
+    scanned,
+    scanCapped: stoppedEarly && matches.length < limit,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Creator search + top-creators leaderboard. Field driver: a mobile-beta user
+// asked to "search posts by top creators, similar to the leaderboard on the
+// actual website" (Discord). Two backends, one hit shape:
+//   • GET /api/v1/creators           — username search (documented public API)
+//   • tRPC leaderboard.getLeaderboard — the website's ranked creator boards;
+//     the v1 API exposes NO leaderboard ordering (/creators is join-date
+//     ordered), so this mirrors the site's own request. Civitai's bot gate
+//     401s a plain fetch UA ("Please use the public API instead"), so the
+//     request carries browser-shaped headers — same approach the mobile app
+//     already uses for its tRPC calls.
+// ---------------------------------------------------------------------------
+
+export interface CivitaiCreatorHit {
+  username: string;
+  /** civitai.com profile page for the creator. */
+  profile_url: string;
+  /** Number of published models (username-search mode; API omits it for 0). */
+  model_count?: number;
+  /** Leaderboard rank, 1-based (top-creators mode only). */
+  position?: number;
+  /** Leaderboard score (top-creators mode only). */
+  score?: number;
+  downloads?: number;
+  thumbs_up?: number;
+  generations?: number;
+  /** Models counted into the leaderboard score (top-creators mode only). */
+  entries?: number;
+}
+
+const CIVITAI_LEADERBOARDS = [
+  "overall",
+  "overall_90",
+  "overall_nsfw",
+  "new_creators",
+] as const;
+export type CivitaiLeaderboard = (typeof CIVITAI_LEADERBOARDS)[number];
+
+function creatorProfileUrl(username: string): string {
+  return `https://civitai.com/user/${encodeURIComponent(username)}`;
+}
+
+interface CivitaiCreatorsResponse {
+  items?: Array<{ username?: string; modelCount?: number; link?: string }>;
+  metadata?: { totalItems?: number };
+}
+
+/**
+ * Search CivitAI creators by (partial) username via GET /api/v1/creators.
+ * Returns matching creators plus the API's total match count.
+ */
+export async function searchCivitaiCreators(
+  query: string,
+  opts: { limit?: number } = {},
+): Promise<{ hits: CivitaiCreatorHit[]; total?: number }> {
+  const params = new URLSearchParams();
+  params.set("query", query);
+  params.set("limit", String(Math.min(Math.max(opts.limit ?? 10, 1), 50)));
+  const data = await civitaiGet<CivitaiCreatorsResponse>(
+    `/creators?${params.toString()}`,
+  );
+  const hits = (data.items ?? [])
+    .filter((c): c is { username: string; modelCount?: number } => !!c.username)
+    .map((c) => ({
+      username: c.username,
+      profile_url: creatorProfileUrl(c.username),
+      model_count: c.modelCount ?? 0,
+    }));
+  return { hits, total: data.metadata?.totalItems };
+}
+
+/** Browser-shaped headers for the tRPC leaderboard request (see section note). */
+const TRPC_BROWSER_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  Referer: "https://civitai.com/",
+};
+
+interface CivitaiLeaderboardEntry {
+  position?: number;
+  score?: number;
+  user?: { username?: string; deletedAt?: string | null };
+  metrics?: Array<{ type?: string; value?: number }>;
+}
+
+/**
+ * Fetch a CivitAI creator leaderboard (the site's civitai.com/leaderboard
+ * ranking). `board` picks which one: "overall" (default), "overall_90",
+ * "overall_nsfw", or "new_creators".
+ */
+export async function fetchCivitaiTopCreators(
+  opts: { board?: CivitaiLeaderboard; limit?: number } = {},
+): Promise<CivitaiCreatorHit[]> {
+  if (civitaiDisabled()) {
+    throw new ModelError(CIVITAI_DISABLED_MESSAGE);
+  }
+  const board = opts.board ?? "overall";
+  const limit = Math.min(Math.max(opts.limit ?? 10, 1), 100);
+  const input = encodeURIComponent(JSON.stringify({ json: { id: board } }));
+  const url = `https://civitai.com/api/trpc/leaderboard.getLeaderboard?input=${input}`;
+  logger.debug("CivitAI leaderboard request", { url });
+
+  // No bearer token here: the leaderboard is public and the API token belongs
+  // to the documented v1 surface, not the site's tRPC endpoints.
+  const res = await fetch(url, { headers: TRPC_BROWSER_HEADERS });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new ModelError(`CivitAI leaderboard ${res.status}: ${res.statusText}`, {
+      url,
+      status: res.status,
+      body,
+    });
+  }
+  const data = (await res.json()) as {
+    result?: { data?: { json?: CivitaiLeaderboardEntry[] } };
+  };
+  const entries = data.result?.data?.json ?? [];
+  const metric = (e: CivitaiLeaderboardEntry, type: string) =>
+    e.metrics?.find((m) => m.type === type)?.value;
+  return entries
+    .filter((e) => e.user?.username && !e.user.deletedAt)
+    .slice(0, limit)
+    .map((e) => ({
+      username: e.user!.username!,
+      profile_url: creatorProfileUrl(e.user!.username!),
+      position: e.position,
+      score: e.score,
+      downloads: metric(e, "downloadCount"),
+      thumbs_up: metric(e, "thumbsUpCount"),
+      generations: metric(e, "generationCount"),
+      entries: metric(e, "entries"),
+    }));
 }

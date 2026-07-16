@@ -10,6 +10,8 @@ import {
   resolveCivitaiModel,
   resolveCivitaiModelVersion,
   searchCivitaiModels,
+  searchCivitaiCreators,
+  fetchCivitaiTopCreators,
 } from "../../services/civitai-resolver.js";
 import { ModelError, ValidationError } from "../../utils/errors.js";
 
@@ -204,7 +206,7 @@ describe("searchCivitaiModels", () => {
 
   it("builds the query (types/baseModels/sort/nsfw pinned) and maps the download handoff fields", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(SEARCH_BODY));
-    const hits = await searchCivitaiModels("flux detail", {
+    const { hits } = await searchCivitaiModels("flux detail", {
       types: ["LORA"],
       baseModels: ["Flux.1 D"],
     });
@@ -248,5 +250,311 @@ describe("searchCivitaiModels", () => {
     await searchCivitaiModels("y");
     const headers = (fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers;
     expect(headers["Authorization"]).toBe("Bearer civ_tok");
+  });
+
+  it("creator mode sends username INSTEAD of query (combined = empty page, live-verified quirk)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(SEARCH_BODY));
+    await searchCivitaiModels("", { creator: "jed" });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("username=jed");
+    expect(url).not.toContain("query=");
+  });
+
+  it("creator + keyword: over-fetches, filters client-side on name/tags, no cap on a single page", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          { id: 1, name: "Flux Detailer", modelVersions: [] },
+          { id: 2, name: "Anime Style", tags: ["style"], modelVersions: [] },
+          { id: 3, name: "Portrait Pack", tags: ["detail", "portrait"], modelVersions: [] },
+        ],
+      }),
+    );
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("username=jed");
+    expect(url).not.toContain("query=");
+    expect(url).toContain("limit=100"); // over-fetch for the client-side filter
+    // "Flux Detailer" matches on name, "Portrait Pack" on the "detail" tag.
+    expect(hits.map((h) => h.model_id)).toEqual([1, 3]);
+    expect(scanned).toBe(3);
+    expect(scanCapped).toBe(false); // no nextCursor → the whole catalog was scanned
+  });
+
+  it("creator + keyword: follows cursor pagination so a match past page one is found", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 1, name: "Anime Style", modelVersions: [] }],
+          metadata: { nextCursor: "abc" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 2, name: "Detail Slider", modelVersions: [] }],
+        }),
+      );
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "prolific" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toContain("cursor=abc");
+    expect(hits.map((h) => h.model_id)).toEqual([2]);
+    expect(scanned).toBe(2);
+    expect(scanCapped).toBe(false);
+  });
+
+  it("creator + keyword: stops at the page cap and reports scanCapped when short of limit", async () => {
+    // 4 pages (the cap), every page keeps offering a next cursor, zero matches.
+    for (let i = 0; i < 4; i++) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 100 + i, name: "Unrelated", modelVersions: [] }],
+          metadata: { nextCursor: `c${i}` },
+        }),
+      );
+    }
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "prolific" });
+    expect(fetchMock).toHaveBeenCalledTimes(4); // bounded — never a 5th page
+    expect(hits).toEqual([]);
+    expect(scanned).toBe(4);
+    expect(scanCapped).toBe(true); // pages remained unscanned → the miss is not definitive
+  });
+
+  it("creator + keyword: stops paging early once limit matches are found (no cap flag)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          { id: 1, name: "Detail A", modelVersions: [] },
+          { id: 2, name: "Detail B", modelVersions: [] },
+        ],
+        metadata: { nextCursor: "more" },
+      }),
+    );
+    const { hits, scanCapped } = await searchCivitaiModels("detail", {
+      creator: "prolific",
+      limit: 2,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // limit filled on page one
+    expect(hits).toHaveLength(2);
+    expect(scanCapped).toBe(false);
+  });
+
+  it("creator + keyword: an empty-string nextCursor terminates the scan (full scan, no cap)", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [{ id: 1, name: "Detail A", modelVersions: [] }],
+        metadata: { nextCursor: "" }, // degenerate: falsy, not just missing
+      }),
+    );
+    const { hits, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(hits).toHaveLength(1);
+    expect(scanCapped).toBe(false); // exhausted, not capped
+  });
+
+  it("creator + keyword: a REPEATED cursor breaks out instead of looping, and reports the cap", async () => {
+    // Page 1 → cursor "stuck"; page 2 replays the SAME items and the SAME cursor.
+    const page = {
+      items: [{ id: 1, name: "Unrelated", modelVersions: [] }],
+      metadata: { nextCursor: "stuck" },
+    };
+    fetchMock.mockResolvedValueOnce(jsonResponse(page)).mockResolvedValueOnce(jsonResponse(page));
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // followed "stuck" once, then refused the repeat
+    expect(hits).toEqual([]);
+    expect(scanned).toBe(1); // the replayed page is NOT double-counted
+    expect(scanCapped).toBe(true); // stuck mid-catalog → the miss is not definitive
+  });
+
+  it("creator + keyword: a LONGER cursor cycle (A→B→A) breaks out and reports the cap", async () => {
+    // A two-cursor cycle: a previous-cursor-only check would follow A→B→A→B…
+    // until the page cap; the seen-cursors set refuses A the second time.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 1, name: "Unrelated 1", modelVersions: [] }],
+          metadata: { nextCursor: "A" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 2, name: "Unrelated 2", modelVersions: [] }],
+          metadata: { nextCursor: "B" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: 3, name: "Unrelated 3", modelVersions: [] }],
+          metadata: { nextCursor: "A" }, // cycles back — already followed
+        }),
+      );
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", { creator: "jed" });
+    expect(fetchMock).toHaveBeenCalledTimes(3); // start → A → B, then A is refused
+    expect(hits).toEqual([]);
+    expect(scanned).toBe(3);
+    expect(scanCapped).toBe(true); // cycling mid-catalog → the miss is not definitive
+  });
+
+  it("creator + keyword: duplicate model ids across pages are deduped (never fill limit twice)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [
+            { id: 1, name: "Detail A", modelVersions: [] },
+            { id: 2, name: "Other", modelVersions: [] },
+          ],
+          metadata: { nextCursor: "p2" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          // id 1 replayed by a misbehaving cursor + one genuinely new match.
+          items: [
+            { id: 1, name: "Detail A", modelVersions: [] },
+            { id: 3, name: "Detail B", modelVersions: [] },
+          ],
+        }),
+      );
+    const { hits, scanned, scanCapped } = await searchCivitaiModels("detail", {
+      creator: "jed",
+      limit: 2,
+    });
+    expect(hits.map((h) => h.model_id)).toEqual([1, 3]); // no duplicate id 1
+    expect(scanned).toBe(3); // unique models only
+    expect(scanCapped).toBe(false);
+  });
+
+  it("creator-only mode uses the caller's limit (no over-fetch)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [] }));
+    await searchCivitaiModels("", { creator: "jed", limit: 5 });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("limit=5");
+  });
+
+  it("rejects an empty query with no creator", async () => {
+    await expect(searchCivitaiModels("  ")).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("searchCivitaiCreators", () => {
+  it("builds the /creators query and maps username/model_count/profile_url + total", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        items: [
+          { username: "jedikun", modelCount: 18, link: "https://civitai.com/api/v1/models?username=jedikun" },
+          { username: "techjedi", link: "https://civitai.com/api/v1/models?username=techjedi" },
+        ],
+        metadata: { totalItems: 6 },
+      }),
+    );
+    const { hits, total } = await searchCivitaiCreators("jed", { limit: 5 });
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("/creators?");
+    expect(url).toContain("query=jed");
+    expect(url).toContain("limit=5");
+    expect(total).toBe(6);
+    expect(hits).toEqual([
+      {
+        username: "jedikun",
+        profile_url: "https://civitai.com/user/jedikun",
+        model_count: 18,
+      },
+      {
+        username: "techjedi",
+        profile_url: "https://civitai.com/user/techjedi",
+        model_count: 0, // API omits modelCount for creators with none visible
+      },
+    ]);
+  });
+
+  it("fails FAST when CIVITAI_ENABLED=0 (kill-switch, #127)", async () => {
+    process.env.CIVITAI_ENABLED = "0";
+    try {
+      await expect(searchCivitaiCreators("x")).rejects.toThrow(/disabled by config/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.CIVITAI_ENABLED;
+    }
+  });
+});
+
+describe("fetchCivitaiTopCreators", () => {
+  const BOARD_BODY = {
+    result: {
+      data: {
+        json: [
+          {
+            position: 1,
+            score: 81140,
+            user: { username: "alcaitiff", deletedAt: null },
+            metrics: [
+              { type: "downloadCount", value: 42294 },
+              { type: "entries", value: 13 },
+              { type: "thumbsUpCount", value: 2253 },
+              { type: "generationCount", value: 719 },
+            ],
+          },
+          {
+            position: 2,
+            score: 100,
+            user: { username: "ghost", deletedAt: "2026-01-01T00:00:00Z" },
+            metrics: [],
+          },
+          {
+            position: 3,
+            score: 75439,
+            user: { username: "circlestone_labs", deletedAt: null },
+            metrics: [{ type: "downloadCount", value: 39000 }],
+          },
+        ],
+      },
+    },
+  };
+
+  it("hits the tRPC leaderboard with browser-shaped headers (bot gate) and NO bearer token", async () => {
+    config.civitaiApiToken = "civ_tok";
+    fetchMock.mockResolvedValueOnce(jsonResponse(BOARD_BODY));
+    await fetchCivitaiTopCreators();
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("civitai.com/api/trpc/leaderboard.getLeaderboard");
+    expect(url).toContain(encodeURIComponent(JSON.stringify({ json: { id: "overall" } })));
+    const headers = (fetchMock.mock.calls[0][1] as { headers: Record<string, string> }).headers;
+    expect(headers["User-Agent"]).toContain("Mozilla/5.0"); // bot gate 401s a plain fetch UA
+    expect(headers["Authorization"]).toBeUndefined(); // token stays on the v1 API surface
+  });
+
+  it("maps rank/score/metrics, skips deleted users, and respects limit + board", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(BOARD_BODY));
+    const hits = await fetchCivitaiTopCreators({ board: "new_creators", limit: 2 });
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      encodeURIComponent(JSON.stringify({ json: { id: "new_creators" } })),
+    );
+    expect(hits).toHaveLength(2); // deleted "ghost" is skipped, then limit applies
+    expect(hits[0]).toEqual({
+      username: "alcaitiff",
+      profile_url: "https://civitai.com/user/alcaitiff",
+      position: 1,
+      score: 81140,
+      downloads: 42294,
+      thumbs_up: 2253,
+      generations: 719,
+      entries: 13,
+    });
+    expect(hits[1].username).toBe("circlestone_labs");
+    expect(hits[1].thumbs_up).toBeUndefined();
+  });
+
+  it("throws ModelError on a bot-gate 401", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, 401));
+    await expect(fetchCivitaiTopCreators()).rejects.toBeInstanceOf(ModelError);
+  });
+
+  it("fails FAST when CIVITAI_ENABLED=0 (kill-switch, #127)", async () => {
+    process.env.CIVITAI_ENABLED = "0";
+    try {
+      await expect(fetchCivitaiTopCreators()).rejects.toThrow(/disabled by config/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.CIVITAI_ENABLED;
+    }
   });
 });

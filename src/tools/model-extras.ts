@@ -13,6 +13,8 @@ import {
   resolveCivitaiModelVersion,
   buildCivitaiMarkdown,
   searchCivitaiModels,
+  searchCivitaiCreators,
+  fetchCivitaiTopCreators,
   type CivitaiMetadata,
 } from "../services/civitai-resolver.js";
 import { ValidationError, errorToToolResult } from "../utils/errors.js";
@@ -113,10 +115,26 @@ export function registerModelExtrasTools(server: McpServer): void {
       "the user's checkpoint family is known, so results actually fit their setup. Each hit returns the " +
       "model_id and version_id that download_civitai_model takes directly, plus trigger words to use in the " +
       "prompt after installing. Flow: search_civitai_models → pick a hit → download_civitai_model " +
-      "{model_version_id, target_subfolder} → wire/prompt with the trained words. SFW-only by default. " +
-      "For HuggingFace search use search_models.",
+      "{model_version_id, target_subfolder} → wire/prompt with the trained words. Pass `creator` (exact " +
+      "username, e.g. from search_civitai_creators) to list ONE creator's models — with or without a query. " +
+      "SFW-only by default. For HuggingFace search use search_models.",
     {
-      query: z.string().min(1).describe("Keyword search (e.g. 'detail enhancer', 'anime style', a character name)"),
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Keyword search (e.g. 'detail enhancer', 'anime style', a character name). " +
+            "Optional when creator is given (then it narrows that creator's models).",
+        ),
+      creator: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Only models by this CivitAI creator (EXACT username — find it with " +
+            "search_civitai_creators). At least one of query/creator is required.",
+        ),
       types: z
         .array(z.enum(["Checkpoint", "LORA", "LoCon", "DoRA", "TextualInversion", "VAE", "Controlnet", "Upscaler", "MotionModule", "Workflows"]))
         .optional()
@@ -134,22 +152,44 @@ export function registerModelExtrasTools(server: McpServer): void {
     },
     async (args) => {
       try {
-        const hits = await searchCivitaiModels(args.query, {
+        if (!args.query?.trim() && !args.creator?.trim()) {
+          throw new ValidationError(
+            "Provide a query, a creator (exact username), or both.",
+          );
+        }
+        const { hits, scanned, scanCapped } = await searchCivitaiModels(args.query ?? "", {
           types: args.types,
           baseModels: args.base_models,
           sort: args.sort,
           nsfw: args.nsfw,
           limit: args.limit,
+          creator: args.creator,
         });
+        // Creator+keyword scans are bounded (client-side keyword filter over
+        // paged results) — never present a capped miss as definitive.
+        const capNote = scanCapped
+          ? `\nNOTE: the keyword was matched client-side over only this creator's first ${scanned} models (scan cap) — matching models past that may exist. Narrow with types/base_models, or drop the query to list everything.`
+          : "";
+        const what = [
+          args.query?.trim() && `"${args.query}"`,
+          args.creator?.trim() && `creator ${args.creator}`,
+        ]
+          .filter(Boolean)
+          .join(" by ");
         if (hits.length === 0) {
           return {
             content: [
               {
                 type: "text",
                 text:
-                  `No CivitAI models matched "${args.query}"` +
+                  `No CivitAI models matched ${what}` +
                   (args.base_models?.length ? ` for base ${args.base_models.join("/")}` : "") +
-                  `. Try a broader query, drop the filters, or search HuggingFace with search_models.`,
+                  `. Try a broader query, drop the filters` +
+                  (args.creator
+                    ? `, check the exact username with search_civitai_creators (creators with only NSFW models need nsfw:true)`
+                    : "") +
+                  `, or search HuggingFace with search_models.` +
+                  capNote,
               },
             ],
           };
@@ -180,9 +220,111 @@ export function registerModelExtrasTools(server: McpServer): void {
             {
               type: "text",
               text:
-                `${hits.length} CivitAI result(s) for "${args.query}":\n\n${lines.join("\n\n")}\n\n` +
+                `${hits.length} CivitAI result(s) for ${what}:\n\n${lines.join("\n\n")}\n\n` +
                 `Next: download_civitai_model {"model_version_id": <id>, "target_subfolder": "<loras|checkpoints|...>"} — then use the trigger words in the prompt.` +
+                capNote +
                 tokenNote,
+            },
+          ],
+        };
+      } catch (err) {
+        return errorToToolResult(err);
+      }
+    },
+  );
+
+  server.tool(
+    "search_civitai_creators",
+    "Find CivitAI CREATORS — THE tool for 'who are the top creators on Civitai' and 'find creator <name>'. " +
+      "Read-only and network-only (no token or running ComfyUI required). Two modes: with NO query it returns " +
+      "the site's creator LEADERBOARD (civitai.com/leaderboard — rank, score, downloads, likes; pick a `board`: " +
+      "'overall' [default], 'overall_90' [last 90 days], 'overall_nsfw' [mature], 'new_creators' [first model " +
+      "<30 days ago]); with a `query` it searches usernames (public /api/v1/creators; partial match, returns " +
+      "model counts, NOT ranked). Each hit's username feeds search_civitai_models {creator: <username>} " +
+      "directly. Flow: search_civitai_creators → pick a creator → search_civitai_models {creator, types?} → " +
+      "download_civitai_model.",
+    {
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Username search (partial match, e.g. 'alcait'). Omit to get the top-creators leaderboard instead.",
+        ),
+      board: z
+        .enum(["overall", "overall_90", "overall_nsfw", "new_creators"])
+        .optional()
+        .describe(
+          "Leaderboard to rank by when no query is given (default 'overall'). Ignored with a query.",
+        ),
+      limit: z.number().int().min(1).max(50).optional().describe("Max results (default 10)."),
+    },
+    async (args) => {
+      try {
+        if (args.query?.trim()) {
+          const { hits, total } = await searchCivitaiCreators(args.query, {
+            limit: args.limit,
+          });
+          if (hits.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `No CivitAI creators matched "${args.query}". Usernames match on substrings — ` +
+                    `try a shorter fragment, or omit the query for the top-creators leaderboard.`,
+                },
+              ],
+            };
+          }
+          const lines = hits.map(
+            (h, i) =>
+              `${i + 1}. **${h.username}** — ${h.model_count ?? 0} model(s) · ${h.profile_url}`,
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `${hits.length} CivitAI creator(s) for "${args.query}"` +
+                  (total != null ? ` (${total.toLocaleString()} total match${total === 1 ? "" : "es"})` : "") +
+                  `:\n\n${lines.join("\n")}\n\n` +
+                  `Next: search_civitai_models {"creator": "<username>"} to list a creator's models.`,
+              },
+            ],
+          };
+        }
+
+        const board = args.board ?? "overall";
+        const hits = await fetchCivitaiTopCreators({ board, limit: args.limit });
+        if (hits.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `CivitAI returned an empty "${board}" leaderboard. Try again later or search by name with a query.`,
+              },
+            ],
+          };
+        }
+        const lines = hits.map((h) => {
+          const stats = [
+            h.score != null && `score ${h.score.toLocaleString()}`,
+            h.downloads != null && `${h.downloads.toLocaleString()} downloads`,
+            h.thumbs_up != null && `${h.thumbs_up.toLocaleString()} 👍`,
+            h.entries != null && `${h.entries} model(s) counted`,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          return `${h.position ?? "?"}. **${h.username}** — ${stats}\n   ${h.profile_url}`;
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Top ${hits.length} CivitAI creators ("${board}" leaderboard):\n\n${lines.join("\n\n")}\n\n` +
+                `Next: search_civitai_models {"creator": "<username>"} to list a creator's models, then download_civitai_model.`,
             },
           ],
         };

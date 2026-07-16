@@ -9,6 +9,17 @@ All notable changes to this project are documented here. This project adheres to
 ### MCP
 
 #### Added
+- **search_civitai_creators** — CivitAI creator discovery: with no query it
+  returns the site's creator leaderboard (rank, score, downloads, likes;
+  boards: `overall`, `overall_90`, `overall_nsfw`, `new_creators`), with a
+  query it searches usernames via the public `/api/v1/creators`. Each hit
+  feeds `search_civitai_models {creator}` directly, so "show me top creators
+  → their models → download" works end-to-end (Discord mobile-beta request)
+- **search_civitai_models `creator` filter** — list one creator's models by
+  exact username, with or without a keyword (the keyword is applied
+  client-side because CivitAI returns an empty page when `query` and
+  `username` are combined). Both CivitAI search tools are now whitelisted on
+  the mobile `call_tool` channel (read-only)
 - **panel_flatten_workflow** — one-call, formatting-preserving flatten of the
   live canvas: Get/Set buses, Reroutes, and cg-use-everywhere broadcasts
   resolve to direct real links and the virtual nodes are deleted, while kept

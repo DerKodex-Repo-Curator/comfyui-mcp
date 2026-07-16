@@ -44,6 +44,9 @@ vi.mock("../../services/model-resolver.js", async () => {
 
 const resolveCivitaiModelMock = vi.fn();
 const resolveCivitaiModelVersionMock = vi.fn();
+const searchCivitaiModelsMock = vi.fn();
+const searchCivitaiCreatorsMock = vi.fn();
+const fetchCivitaiTopCreatorsMock = vi.fn();
 vi.mock("../../services/civitai-resolver.js", async () => {
   const actual = await vi.importActual<
     typeof import("../../services/civitai-resolver.js")
@@ -53,6 +56,9 @@ vi.mock("../../services/civitai-resolver.js", async () => {
     resolveCivitaiModel: (...a: unknown[]) => resolveCivitaiModelMock(...a),
     resolveCivitaiModelVersion: (...a: unknown[]) =>
       resolveCivitaiModelVersionMock(...a),
+    searchCivitaiModels: (...a: unknown[]) => searchCivitaiModelsMock(...a),
+    searchCivitaiCreators: (...a: unknown[]) => searchCivitaiCreatorsMock(...a),
+    fetchCivitaiTopCreators: (...a: unknown[]) => fetchCivitaiTopCreatorsMock(...a),
   };
 });
 
@@ -88,6 +94,8 @@ function makeServer() {
   return {
     removeModel: handlers.get("remove_model")!,
     downloadCivitai: handlers.get("download_civitai_model")!,
+    searchCivitai: handlers.get("search_civitai_models")!,
+    searchCreators: handlers.get("search_civitai_creators")!,
   };
 }
 
@@ -99,6 +107,9 @@ beforeEach(() => {
   downloadModelMock.mockReset();
   resolveCivitaiModelMock.mockReset();
   resolveCivitaiModelVersionMock.mockReset();
+  searchCivitaiModelsMock.mockReset();
+  searchCivitaiCreatorsMock.mockReset();
+  fetchCivitaiTopCreatorsMock.mockReset();
   config.comfyuiPath = "/comfy";
   config.civitaiApiToken = undefined;
 });
@@ -338,5 +349,114 @@ describe("download_civitai_model", () => {
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain("model_id");
     expect(downloadModelMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("search_civitai_models creator filter", () => {
+  it("errors when neither query nor creator is given", async () => {
+    const { searchCivitai } = makeServer();
+    const res = await searchCivitai({});
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("VALIDATION_ERROR");
+    expect(searchCivitaiModelsMock).not.toHaveBeenCalled();
+  });
+
+  it("passes creator through and labels the results with it", async () => {
+    searchCivitaiModelsMock.mockResolvedValueOnce({
+      hits: [
+        { model_id: 1, name: "Detail Slider", type: "LORA", creator: "alcaitiff", version_id: 9 },
+      ],
+    });
+    const { searchCivitai } = makeServer();
+    const res = await searchCivitai({ creator: "alcaitiff" });
+
+    expect(searchCivitaiModelsMock).toHaveBeenCalledWith(
+      "",
+      expect.objectContaining({ creator: "alcaitiff" }),
+    );
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("creator alcaitiff");
+    expect(res.content[0].text).toContain("Detail Slider");
+    expect(res.content[0].text).not.toContain("scan cap");
+  });
+
+  it("no-hits message points at search_civitai_creators for a creator miss", async () => {
+    searchCivitaiModelsMock.mockResolvedValueOnce({ hits: [] });
+    const { searchCivitai } = makeServer();
+    const res = await searchCivitai({ creator: "nobody" });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("search_civitai_creators");
+  });
+
+  it("surfaces the bounded-scan cap so a capped miss is never presented as definitive", async () => {
+    searchCivitaiModelsMock.mockResolvedValueOnce({
+      hits: [],
+      scanned: 400,
+      scanCapped: true,
+    });
+    const { searchCivitai } = makeServer();
+    const res = await searchCivitai({ creator: "prolific", query: "detail" });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("No CivitAI models matched");
+    expect(res.content[0].text).toContain("first 400 models (scan cap)");
+  });
+});
+
+describe("search_civitai_creators", () => {
+  it("no query → leaderboard mode (default 'overall'), ranked lines + models hand-off", async () => {
+    fetchCivitaiTopCreatorsMock.mockResolvedValueOnce([
+      {
+        username: "alcaitiff",
+        profile_url: "https://civitai.com/user/alcaitiff",
+        position: 1,
+        score: 81140,
+        downloads: 42294,
+        thumbs_up: 2253,
+        entries: 13,
+      },
+    ]);
+    const { searchCreators } = makeServer();
+    const res = await searchCreators({});
+
+    expect(fetchCivitaiTopCreatorsMock).toHaveBeenCalledWith({
+      board: "overall",
+      limit: undefined,
+    });
+    expect(searchCivitaiCreatorsMock).not.toHaveBeenCalled();
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('"overall" leaderboard');
+    expect(res.content[0].text).toContain("1. **alcaitiff**");
+    expect(res.content[0].text).toContain("https://civitai.com/user/alcaitiff");
+    expect(res.content[0].text).toContain('search_civitai_models {"creator"');
+  });
+
+  it("query → username-search mode with model counts", async () => {
+    searchCivitaiCreatorsMock.mockResolvedValueOnce({
+      hits: [
+        { username: "jedikun", profile_url: "https://civitai.com/user/jedikun", model_count: 18 },
+      ],
+      total: 6,
+    });
+    const { searchCreators } = makeServer();
+    const res = await searchCreators({ query: "jed", limit: 5 });
+
+    expect(searchCivitaiCreatorsMock).toHaveBeenCalledWith("jed", { limit: 5 });
+    expect(fetchCivitaiTopCreatorsMock).not.toHaveBeenCalled();
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("jedikun");
+    expect(res.content[0].text).toContain("18 model(s)");
+    expect(res.content[0].text).toContain("6 total matches");
+  });
+
+  it("query with no matches suggests the leaderboard", async () => {
+    searchCivitaiCreatorsMock.mockResolvedValueOnce({ hits: [], total: 0 });
+    const { searchCreators } = makeServer();
+    const res = await searchCreators({ query: "zzz" });
+
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain("No CivitAI creators matched");
   });
 });

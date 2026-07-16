@@ -509,6 +509,30 @@ export function getApiKey(): string {
   return config.comfyuiApiKey;
 }
 
+/**
+ * Retarget the shared `config` (and thus getComfyUIApiHost()/getClient()) to a new
+ * ComfyUI URL at runtime. The panel orchestrator calls this from applyComfyuiUrl when
+ * the desktop `hello` points at a different ComfyUI, so the orchestrator's OWN
+ * in-process client — the direct call_tool path used by the mobile app (list_workflows,
+ * get_image, …) — follows the retarget instead of staying pinned to the process-start
+ * ComfyUI. Callers MUST resetClient() afterwards so the cached client rebuilds against
+ * the new host. Returns false on a malformed URL (target left unchanged).
+ */
+export function setComfyuiTarget(url: string): boolean {
+  let t: ComfyUITarget;
+  try {
+    t = parseComfyUIUrl(url);
+  } catch {
+    return false;
+  }
+  config.comfyuiHost = t.host;
+  config.comfyuiPort = t.port;
+  config.resolvedPort = t.port;
+  config.comfyuiSsl = t.ssl;
+  config.comfyuiBasePath = t.basePath;
+  return true;
+}
+
 export function getComfyUIApiHost(): string {
   return `${config.comfyuiHost}:${config.resolvedPort}`;
 }

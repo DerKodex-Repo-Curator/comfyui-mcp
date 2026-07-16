@@ -23,7 +23,7 @@ import { detectInstallMode } from "../services/self-update.js";
 import { SelfRestarter } from "../services/self-restart.js";
 import { SessionStore } from "./session-store.js";
 import { listSessions, loadTranscript } from "./history.js";
-import { uploadImageHttp } from "../comfyui/client.js";
+import { uploadImageHttp, resetClient } from "../comfyui/client.js";
 import { logger } from "../utils/logger.js";
 import {
   PanelAgentManager,
@@ -41,7 +41,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAllTools } from "../tools/index.js";
-import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath } from "../config.js";
+import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget } from "../config.js";
 import {
   buildComfyuiMcpEnv,
   comfyuiSecretKeys,
@@ -1718,6 +1718,14 @@ export async function runPanelOrchestrator(): Promise<void> {
     const prev = comfyuiUrl;
     comfyuiUrl = next;
     comfyuiPath = localPathForTarget(next);
+    // Retarget the orchestrator's OWN in-process ComfyUI client too — the direct
+    // call_tool path the mobile app uses (list_workflows, get_image, …) goes through
+    // getClient(), which caches against the process-start host. Without this, a
+    // retargeted orchestrator keeps that client pinned to the old ComfyUI, so mobile
+    // list_workflows silently reads the wrong (often empty) library. resetClient()
+    // forces getClient() to rebuild against the new host on its next use.
+    setComfyuiTarget(next);
+    resetClient();
     // Point every provider at the new target: Claude via its rebuilt MCP env, the
     // manager's image-fetch URL, then respawn active agents so the live comfyui MCP
     // subprocess is recreated with the new COMFYUI_URL (no-op if none are running —

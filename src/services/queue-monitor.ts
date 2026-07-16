@@ -151,6 +151,11 @@ class QueueMonitorImpl {
       /* ignore */
     }
     this.ws = null;
+    // Clear the flag here rather than relying on the old socket's `close`: once
+    // we null `this.ws`, that socket's now-superseded close handler early-returns
+    // (this.ws !== ws) and would otherwise leave `connected` stuck true — through
+    // a retarget's stop()+start() gap, or indefinitely if the reconnect fails.
+    this.state.connected = false;
   }
 
   private wsUrl(): string {

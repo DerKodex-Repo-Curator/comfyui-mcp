@@ -23,7 +23,7 @@ import { detectInstallMode } from "../services/self-update.js";
 import { SelfRestarter } from "../services/self-restart.js";
 import { SessionStore } from "./session-store.js";
 import { listSessions, loadTranscript } from "./history.js";
-import { uploadImageHttp } from "../comfyui/client.js";
+import { uploadImageHttp, resetClient } from "../comfyui/client.js";
 import { logger } from "../utils/logger.js";
 import {
   PanelAgentManager,
@@ -41,7 +41,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAllTools } from "../tools/index.js";
-import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath } from "../config.js";
+import { isForceRemoteFlagSet, isLoopbackHost, detectLocalComfyUIPath, setComfyuiTarget } from "../config.js";
 import {
   buildComfyuiMcpEnv,
   comfyuiSecretKeys,
@@ -1601,6 +1601,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     // Report the SDK session id so the panel can persist it and resume on reload.
     onSession: (key, sessionId) => {
       bridge.push({ type: "session", session_id: sessionId }, panelTabOf(key));
+      bridge.broadcastTabList(); // a session started/changed → refresh mirror pickers
     },
     // Per-turn rewind anchor (assistant UUID) → the panel stores it so a later
     // "rewind conversation to here" can fork the session at that point.
@@ -1641,6 +1642,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // Let refreshEnvCapabilities() feed a freshly-gathered env block into agents
   // spawned after a ComfyUI restart/reconnect.
   liveManager = manager;
+
+  // Flag the mobile mirror picker's "session attached" (green) dot from live agents.
+  bridge.setHasSessionPredicate((tabId) => manager.hasLiveAgent(agentKeyFor(tabId)));
 
   // ── Local-agent VRAM pause during generation ────────────────────────────
   // On a single-GPU box the local Ollama chat model and ComfyUI fight for VRAM:
@@ -1722,6 +1726,14 @@ export async function runPanelOrchestrator(): Promise<void> {
     const prev = comfyuiUrl;
     comfyuiUrl = next;
     comfyuiPath = localPathForTarget(next);
+    // Retarget the orchestrator's OWN in-process ComfyUI client too — the direct
+    // call_tool path the mobile app uses (list_workflows, get_image, …) goes through
+    // getClient(), which caches against the process-start host. Without this, a
+    // retargeted orchestrator keeps that client pinned to the old ComfyUI, so mobile
+    // list_workflows silently reads the wrong (often empty) library. resetClient()
+    // forces getClient() to rebuild against the new host on its next use.
+    setComfyuiTarget(next);
+    resetClient();
     // Point every provider at the new target: Claude via its rebuilt MCP env, the
     // manager's image-fetch URL, then respawn active agents so the live comfyui MCP
     // subprocess is recreated with the new COMFYUI_URL (no-op if none are running —
@@ -2053,6 +2065,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // doesn't linger. The new provider starts a FRESH session (the panel
         // replays the transcript as context on its first message to seed it).
         manager.reset(panelTab + AGENT_KEY_SEP + prev);
+        bridge.broadcastTabList(); // live agent dropped on backend switch → refresh dot
       }
       tabBackends.set(panelTab, backend);
       // A headless client (mobile/remote pseudo-panel, no browser canvas) advertises
@@ -2274,7 +2287,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         return;
       }
       const prev = tabBackends.get(panelTab) ?? defaultBackend;
-      if (prev !== reqBackend) manager.reset(panelTab + AGENT_KEY_SEP + prev);
+      if (prev !== reqBackend) {
+        manager.reset(panelTab + AGENT_KEY_SEP + prev);
+        bridge.broadcastTabList(); // live agent dropped on backend switch → refresh dot
+      }
       tabBackends.set(panelTab, reqBackend);
       // Leaving a LOCAL provider frees its VRAM (no other tab still on it) —
       // the point of switching to Claude/hosted is usually reclaiming the GPU.
@@ -2753,6 +2769,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       manager.reset(agentKeyFor(tabId));
       bridge.push({ type: "session", session_id: null }, tabId);
       bridge.push({ type: "ack", ok: true, kind: "new_session" }, tabId);
+      bridge.broadcastTabList(); // session cleared → mirror pickers' green dot off
       return;
     }
 
@@ -2791,6 +2808,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       manager.reset(key);
       if (sid) manager.setResume(key, sid);
       bridge.push({ type: "ack", ok: true, kind: "resume_session" }, tabId);
+      bridge.broadcastTabList(); // live agent dropped → refresh mirror pickers
       return;
     }
 

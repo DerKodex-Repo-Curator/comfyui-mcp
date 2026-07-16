@@ -386,7 +386,9 @@ const urlOverride = resolveUrlOverride();
 const cloudApiKey = process.env.COMFYUI_API_KEY?.trim() || undefined;
 const cloudActive = Boolean(cloudApiKey);
 const forceRemote = resolveForceRemote();
-const remoteUrlActive =
+// Mutable: setComfyuiTarget() re-classifies this on a runtime retarget so
+// isRemoteMode()/isLocalMode() track the new host instead of the startup one.
+let remoteUrlActive =
   Boolean(urlOverride) && (forceRemote || !isLoopbackHost(urlOverride?.host));
 
 if (cloudActive) {
@@ -507,6 +509,43 @@ export function getApiKey(): string {
     throw new Error("Comfy Cloud API key not configured (COMFYUI_API_KEY).");
   }
   return config.comfyuiApiKey;
+}
+
+/**
+ * Retarget the shared `config` (and thus getComfyUIApiHost()/getClient()) to a new
+ * ComfyUI URL at runtime. The panel orchestrator calls this from applyComfyuiUrl when
+ * the desktop `hello` points at a different ComfyUI, so the orchestrator's OWN
+ * in-process client — the direct call_tool path used by the mobile app (list_workflows,
+ * get_image, …) — follows the retarget instead of staying pinned to the process-start
+ * ComfyUI. Callers MUST resetClient() afterwards so the cached client rebuilds against
+ * the new host. Returns false on a malformed URL (target left unchanged).
+ */
+export function setComfyuiTarget(url: string): boolean {
+  let t: ComfyUITarget;
+  try {
+    t = parseComfyUIUrl(url);
+  } catch {
+    return false;
+  }
+  config.comfyuiHost = t.host;
+  config.comfyuiPort = t.port;
+  config.resolvedPort = t.port;
+  config.comfyuiSsl = t.ssl;
+  config.comfyuiBasePath = t.basePath;
+  // Re-classify local vs remote so isRemoteMode()/isLocalMode() follow the new
+  // target — they read this module-level flag, not the host on each call, so a
+  // retarget that crosses the loopback boundary would otherwise stay misclassed.
+  remoteUrlActive = forceRemote || !isLoopbackHost(t.host);
+  // Keep comfyuiPath consistent with the mode: a remote target has no local FS
+  // (local-FS tools must throw), a loopback target re-resolves the local path
+  // (honoring COMFYUI_PATH). Without this, remote→local leaves path undefined and
+  // local→remote leaves a stale local path that FS tools would wrongly trust.
+  config.comfyuiPath = resolveComfyUIPath(process.env.COMFYUI_PATH, {
+    remoteUrl: remoteUrlActive,
+    cloud: isCloudMode(),
+    remoteHost: t.host,
+  });
+  return true;
 }
 
 export function getComfyUIApiHost(): string {

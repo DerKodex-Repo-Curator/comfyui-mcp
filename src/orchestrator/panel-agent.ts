@@ -1168,6 +1168,12 @@ export class PanelAgentManager {
     this.opts.comfyuiUrl = comfyuiUrl;
   }
 
+  /** Whether a live agent (session) exists for this composite key — used to flag
+   *  the mobile mirror picker's "session attached" dot. */
+  hasLiveAgent(key: string): boolean {
+    return this.agents.has(key);
+  }
+
   /** Respawn every active tab's agent (resume + carry-over) so the live comfyui
    *  MCP subprocess is recreated with the updated env. Deferred to each tab's
    *  next idle so the turn that SAVED the secret finishes first (we never

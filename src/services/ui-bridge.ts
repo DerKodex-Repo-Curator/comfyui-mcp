@@ -75,6 +75,28 @@ export interface BridgeCommand {
   [key: string]: unknown;
 }
 
+/**
+ * Frame `type`s that are safe to MIRROR to a tab's viewers — genuine shared-session
+ * activity a remote-control phone should see. This is an ALLOWLIST (default-deny):
+ * a `cid`-based denylist leaked cid-less correlated replies (pair_url, secret_saved,
+ * OAuth acks, and history replies to a no-cid request). Anything not listed here —
+ * acks, model/backend config, pairing/secret frames, correlated replies — stays with
+ * the primary and the ONE socket that asked. New frame types are non-mirroring until
+ * explicitly added, so a future secret-bearing frame can't leak by default.
+ */
+const MIRROR_SAFE_FRAME_TYPES: ReadonlySet<string> = new Set([
+  "say",
+  "stream",
+  "thinking",
+  "echo",
+  "turn",
+  "turn_anchor",
+  "session",
+  "agent_status",
+  "action",
+  "download_progress",
+]);
+
 export class UiBridge {
   /** Max EADDRINUSE retries before degrading to "panel unavailable". */
   private static readonly MAX_BIND_ATTEMPTS = 5;
@@ -96,7 +118,23 @@ export class UiBridge {
    *  through the same tab/rid logic as the primary bridge; the primary loopback
    *  listener stays token-less so the local browser panel is unaffected. */
   private readonly extraServers: WebSocketServer[] = [];
-  private conns = new Map<string, Conn>(); // tabId -> connection
+  private conns = new Map<string, Conn>(); // tabId -> connection (canvas-owning primary)
+  /** Mobile "mirror" viewers subscribed to a tab's live output (remote control):
+   *  push()-path frames for a tabId fan out to these IN ADDITION to the primary,
+   *  so a phone sees the desktop tab's agent activity/renders. They NEVER receive
+   *  canvas send()-commands (owner-only) and their own correlated replies are
+   *  socket-scoped. Keyed by the mirrored (primary) tabId. Empty in the normal
+   *  case → zero effect on existing panel behavior. */
+  private subscribers = new Map<string, Set<BridgeSocket>>();
+  /** A mirroring viewer's socket → the desktop tab it drives. While attached, the
+   *  viewer's INBOUND events (user_message, interrupt, new_session, …) are routed
+   *  to THIS tab's shared session instead of the viewer's own — that's what makes
+   *  it remote control rather than a passive view. Cleared on detach/disconnect. */
+  private mirrorViewers = new Map<BridgeSocket, string>();
+  /** Injected by the orchestrator: does this tabId have a live agent session?
+   *  (SessionStore/PanelAgentManager live there.) Flags desktopTabs() for the
+   *  mobile mirror picker's green "session attached" dot. */
+  private hasSessionPredicate: ((tabId: string) => boolean) | null = null;
   /**
    * Tab-id migrations (oldTabId → newTabId). When a panel socket re-hellos under
    * a NEW tab id (e.g. after a panel update that changed the id scheme from
@@ -401,6 +439,11 @@ export class UiBridge {
   private handleConnection(sock: BridgeSocket): void {
     // The connection is anonymous until its hello frame names a tab id.
     let tabId: string | null = null;
+    // A socket's KIND (canvas-owning panel vs headless viewer) is pinned on its
+    // FIRST hello and is authoritative thereafter. The `headless` flag on later
+    // hellos is client-controlled, so a headless viewer could otherwise flip it to
+    // `false` to pass the same-kind takeover check and seize a desktop tab's id.
+    let socketHeadless: boolean | null = null;
 
     sock.on("message", (buf: unknown) => {
       const raw = String(buf);
@@ -441,10 +484,48 @@ export class UiBridge {
           // re-hello — the ONLY safe rebind trigger; title matching is not).
           (msg as Record<string, unknown>).migrated_from = tabId;
           this.conns.delete(tabId);
+          // Move mirror subscribers to the migrated tab id so viewers keep this
+          // tab's live feed across a same-socket re-hello.
+          const migSubs = this.subscribers.get(tabId);
+          if (migSubs) {
+            this.subscribers.delete(tabId);
+            const dest = this.subscribers.get(msg.tab_id as string) ?? new Set<BridgeSocket>();
+            for (const s of migSubs) dest.add(s);
+            this.subscribers.set(msg.tab_id as string, dest);
+          }
+          // Re-point any viewers driving the OLD id at the new one so their input
+          // keeps reaching this tab's session across the re-hello.
+          for (const [s, drivenTab] of this.mirrorViewers) {
+            if (drivenTab === tabId) this.mirrorViewers.set(s, msg.tab_id as string);
+          }
         }
         tabId = msg.tab_id;
+        // Pin the socket's kind on its first hello; ignore any later flip so the
+        // takeover guard below can't be bypassed with a forged `headless` value.
+        if (socketHeadless === null) {
+          socketHeadless = (msg as { headless?: unknown }).headless === true;
+        }
+        const incomingHeadless = socketHeadless;
         const existing = this.conns.get(tabId);
         if (existing && existing.sock !== sock) {
+          // SECURITY: a viewer must not hello-hijack another client's tab id. The
+          // reconnect-supersede path evicts the current holder, so without this a
+          // headless phone could re-hello under a DESKTOP's id, kill its socket, and
+          // register as that tab — bypassing attach_tab's authoritative stamping and
+          // driving the tab it never attached to. Only same-kind reconnects (a real
+          // reload: desktop→desktop, phone→phone) may supersede. Cross-kind is refused.
+          if (existing.headless !== incomingHeadless) {
+            logger.warn(
+              `[ui-bridge] refused cross-kind hello takeover of tab ${tabId.slice(0, 8)} ` +
+              `(existing headless=${existing.headless}, incoming headless=${incomingHeadless})`,
+            );
+            try {
+              sock.close();
+            } catch {
+              // Already gone.
+            }
+            return;
+          }
           // Same tab reconnected (reload) — supersede the stale socket.
           try {
             existing.sock.close();
@@ -457,9 +538,10 @@ export class UiBridge {
           tabId,
           title: typeof msg.title === "string" && msg.title ? msg.title : "untitled",
           connectedAt: existing?.connectedAt ?? new Date().toISOString(),
-          headless: (msg as { headless?: unknown }).headless === true,
+          headless: incomingHeadless,
         });
-        if ((msg as { headless?: unknown }).headless === true) this.headlessSeen.add(tabId);
+        if (incomingHeadless) this.headlessSeen.add(tabId);
+        this.broadcastTabList(); // a tab connected/reconnected — refresh mirror pickers
         // Log a real connect ONCE per tab id. A reconnect/ping-pong loop (a new
         // socket every couple seconds — e.g. two browser contexts sharing one tab
         // id) would otherwise spam this; dedup by tab id so churn stays at debug.
@@ -513,15 +595,76 @@ export class UiBridge {
       if (msg.type === "title" && tabId) {
         const conn = this.conns.get(tabId);
         if (conn && typeof msg.title === "string" && msg.title) conn.title = msg.title;
+        this.broadcastTabList(); // a title changed — refresh mirror pickers
         return;
       }
 
-      // Panel-initiated event. Stamp the tab and track activity.
+      // Desktop-tab mirroring (mobile remote control). Handled HERE (we hold the
+      // requesting socket) so the replies are socket-scoped — never fanned out to
+      // other viewers or the primary. Additive: unknown to the desktop panel.
+      if (msg.type === "list_tabs") {
+        try {
+          sock.send(JSON.stringify({ type: "tab_list", cid: msg.cid, tabs: this.desktopTabs() }));
+        } catch {
+          /* socket died — the caller times out */
+        }
+        return;
+      }
+      if (msg.type === "attach_tab" && typeof msg.target_tab_id === "string") {
+        const target = msg.target_tab_id;
+        // Only allow mirroring a real, non-headless desktop tab — reject stale ids
+        // and prevent subscribing to another headless (mobile) client.
+        const valid = this.conns.has(target) && !this.headlessSeen.has(target);
+        if (valid) {
+          // A viewer mirrors ONE tab at a time — drop any prior subscription first so
+          // re-attaching (A→B) doesn't keep streaming A's activity alongside B's.
+          for (const [tid, s] of this.subscribers) {
+            if (s.delete(sock) && s.size === 0) this.subscribers.delete(tid);
+          }
+          let set = this.subscribers.get(target);
+          if (!set) {
+            set = new Set();
+            this.subscribers.set(target, set);
+          }
+          set.add(sock);
+          // Route this viewer's inbound events to the mirrored tab (remote control).
+          this.mirrorViewers.set(sock, target);
+        }
+        try {
+          sock.send(
+            JSON.stringify({
+              type: "tab_attached",
+              cid: msg.cid,
+              tab_id: target,
+              ok: valid,
+              ...(valid ? {} : { error: "no such desktop tab" }),
+            }),
+          );
+        } catch {
+          /* socket died */
+        }
+        return;
+      }
+      if (msg.type === "detach_tab") {
+        for (const [tid, set] of this.subscribers) {
+          if (set.delete(sock) && set.size === 0) this.subscribers.delete(tid);
+        }
+        this.mirrorViewers.delete(sock); // stop routing its input to the mirrored tab
+        return;
+      }
+
+      // Panel-initiated event. Stamp the tab and track activity. A mirroring viewer
+      // (phone attached to a desktop tab) DRIVES that tab's shared session, so its
+      // events route to the mirrored tab id — not the viewer's own — which is what
+      // turns the mirror into remote control. Stamping is server-authoritative here
+      // (it overwrites any client-supplied tab_id), so a viewer can't target a tab
+      // it hasn't attached to.
       if (typeof msg.type === "string") {
-        if (tabId) {
-          msg.tab_id = tabId;
-          msg.title = this.conns.get(tabId)?.title;
-          if (msg.type === "user_message") this.lastActiveTabId = tabId;
+        const effectiveTab = this.mirrorViewers.get(sock) ?? tabId;
+        if (effectiveTab) {
+          msg.tab_id = effectiveTab;
+          msg.title = this.conns.get(effectiveTab)?.title;
+          if (msg.type === "user_message") this.lastActiveTabId = effectiveTab;
         }
         this.onPanelMessage?.(msg as PanelEvent);
       }
@@ -534,13 +677,28 @@ export class UiBridge {
       for (const [from, entry] of this.tabMigrations) {
         if (entry.sock === sock) this.tabMigrations.delete(from);
       }
+      // Drop this socket from any mirror subscriptions (it was a viewer).
+      for (const [tid, set] of this.subscribers) {
+        if (set.delete(sock) && set.size === 0) this.subscribers.delete(tid);
+      }
+      this.mirrorViewers.delete(sock);
+      let wasPrimary = false;
       if (tabId && this.conns.get(tabId)?.sock === sock) {
+        wasPrimary = true;
         this.conns.delete(tabId);
         if (this.lastActiveTabId === tabId) this.lastActiveTabId = null;
+        // The mirrored desktop tab is gone — detach its viewers so their input
+        // reverts to their OWN session instead of routing into a dead id (and its
+        // output isn't silently buffered forever). They can re-attach if it returns.
+        for (const [s, drivenTab] of this.mirrorViewers) {
+          if (drivenTab === tabId) this.mirrorViewers.delete(s);
+        }
+        this.subscribers.delete(tabId);
         logger.info(
           `[ui-bridge] panel tab disconnected: ${tabId.slice(0, 8)} — ${this.conns.size} tab(s) remain`,
         );
       }
+      if (wasPrimary) this.broadcastTabList(); // a desktop tab left — refresh pickers
       // Reject any in-flight commands that were bound to this socket.
       for (const [rid, p] of this.pending) {
         if ((p as Pending & { sock?: BridgeSocket }).sock === sock) {
@@ -725,6 +883,45 @@ export class UiBridge {
    *  Truly fire-and-forget: if the target tab has gone, this no-ops (returns 0)
    *  rather than throwing — a throw here becomes an unhandled rejection in the
    *  async push call sites and would crash the orchestrator. */
+  /** Inject the "does this tab have a live session?" predicate (SessionStore lives
+   *  in the orchestrator). */
+  setHasSessionPredicate(fn: (tabId: string) => boolean): void {
+    this.hasSessionPredicate = fn;
+  }
+
+  /** The open DESKTOP tabs (non-headless primaries) for the mobile mirror picker. */
+  desktopTabs(): Array<{ tab_id: string; title: string; has_session: boolean }> {
+    const out: Array<{ tab_id: string; title: string; has_session: boolean }> = [];
+    for (const [tabId, conn] of this.conns) {
+      if (this.headlessSeen.has(tabId)) continue; // skip mobile/remote viewers
+      out.push({
+        tab_id: tabId,
+        title: conn.title ?? "",
+        has_session: this.hasSessionPredicate ? this.hasSessionPredicate(tabId) : false,
+      });
+    }
+    return out;
+  }
+
+  /** Push the current desktop-tab list to every mirror subscriber — call when the
+   *  connected-tab set or a session's live state changes so phones stay in sync. */
+  broadcastTabList(): void {
+    if (this.subscribers.size === 0) return;
+    const frame = JSON.stringify({ type: "tab_list", tabs: this.desktopTabs() });
+    const seen = new Set<BridgeSocket>();
+    for (const set of this.subscribers.values()) {
+      for (const sock of set) {
+        if (seen.has(sock) || sock.readyState !== WebSocket.OPEN) continue;
+        seen.add(sock);
+        try {
+          sock.send(frame);
+        } catch {
+          /* socket mid-disconnect — drop */
+        }
+      }
+    }
+  }
+
   push(frame: Record<string, unknown>, tabId?: string): number {
     let sent = 0;
     let targets: Conn[];
@@ -744,13 +941,40 @@ export class UiBridge {
     } else {
       targets = Array.from(this.conns.values());
     }
+    const payload = JSON.stringify(frame);
     for (const conn of targets) {
       if (conn.sock.readyState !== WebSocket.OPEN) continue;
       try {
-        conn.sock.send(JSON.stringify(frame));
+        conn.sock.send(payload);
         sent += 1;
       } catch {
         // Tab mid-disconnect — drop.
+      }
+    }
+    // Mirror fan-out: also deliver a tab-scoped frame to any phones mirroring this
+    // tab (remote control). No-op when nothing is subscribed → existing panel
+    // behavior unchanged. The primary is already in `targets`, so skip it here.
+    // ONLY shared-session activity frames mirror (allowlist, default-deny) — this
+    // is what keeps correlated/secret frames (acks, pair_url, secret_saved, OAuth,
+    // history replies, tool_result) with the ONE socket that asked.
+    if (tabId && typeof frame.type === "string" && MIRROR_SAFE_FRAME_TYPES.has(frame.type)) {
+      // Look subscribers up under the RESOLVED (canonical) tab id: after a
+      // migration, agents keep pushing under a tab's ORIGINAL id while its
+      // subscribers moved to the new id, so `targets[0]` (the resolved primary)
+      // holds the id the viewers are actually keyed under.
+      const canonicalId = targets.length === 1 ? targets[0].tabId : tabId;
+      const subs = this.subscribers.get(canonicalId);
+      if (subs) {
+        const primarySock = targets[0]?.sock;
+        for (const sock of subs) {
+          if (sock === primarySock || sock.readyState !== WebSocket.OPEN) continue;
+          try {
+            sock.send(payload);
+            sent += 1;
+          } catch {
+            /* viewer mid-disconnect — drop */
+          }
+        }
       }
     }
     return sent;

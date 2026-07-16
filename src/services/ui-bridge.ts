@@ -439,6 +439,11 @@ export class UiBridge {
   private handleConnection(sock: BridgeSocket): void {
     // The connection is anonymous until its hello frame names a tab id.
     let tabId: string | null = null;
+    // A socket's KIND (canvas-owning panel vs headless viewer) is pinned on its
+    // FIRST hello and is authoritative thereafter. The `headless` flag on later
+    // hellos is client-controlled, so a headless viewer could otherwise flip it to
+    // `false` to pass the same-kind takeover check and seize a desktop tab's id.
+    let socketHeadless: boolean | null = null;
 
     sock.on("message", (buf: unknown) => {
       const raw = String(buf);
@@ -495,7 +500,12 @@ export class UiBridge {
           }
         }
         tabId = msg.tab_id;
-        const incomingHeadless = (msg as { headless?: unknown }).headless === true;
+        // Pin the socket's kind on its first hello; ignore any later flip so the
+        // takeover guard below can't be bypassed with a forged `headless` value.
+        if (socketHeadless === null) {
+          socketHeadless = (msg as { headless?: unknown }).headless === true;
+        }
+        const incomingHeadless = socketHeadless;
         const existing = this.conns.get(tabId);
         if (existing && existing.sock !== sock) {
           // SECURITY: a viewer must not hello-hijack another client's tab id. The
@@ -528,9 +538,9 @@ export class UiBridge {
           tabId,
           title: typeof msg.title === "string" && msg.title ? msg.title : "untitled",
           connectedAt: existing?.connectedAt ?? new Date().toISOString(),
-          headless: (msg as { headless?: unknown }).headless === true,
+          headless: incomingHeadless,
         });
-        if ((msg as { headless?: unknown }).headless === true) this.headlessSeen.add(tabId);
+        if (incomingHeadless) this.headlessSeen.add(tabId);
         this.broadcastTabList(); // a tab connected/reconnected — refresh mirror pickers
         // Log a real connect ONCE per tab id. A reconnect/ping-pong loop (a new
         // socket every couple seconds — e.g. two browser contexts sharing one tab

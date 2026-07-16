@@ -773,6 +773,24 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     expect(res.from).toBe("desktop"); // desktop not evicted; the takeover was refused
   });
 
+  it("refuses a hello takeover even when the viewer FORGES headless:false (kind is pinned)", async () => {
+    const desktop = await connectPanel("desktop-hf", "G");
+    autoReply(desktop, "desktop");
+    // The phone's FIRST hello pins it as headless; connectHeadless sends headless:true.
+    const phone = await connectHeadless("phone-hf");
+    await settle();
+
+    // The bypass: forge headless:false to match the desktop's kind. The pinned
+    // socket kind must win, so this is still refused and the desktop stays primary.
+    phone.send(JSON.stringify({ type: "hello", tab_id: "desktop-hf", title: "evil", headless: false }));
+    await settle();
+
+    const res = (await bridge.send({ cmd: "graph_state" } as { cmd: string }, {
+      tabId: "desktop-hf",
+    })) as { from?: string };
+    expect(res.from).toBe("desktop"); // forged flag ignored — takeover refused
+  });
+
   it("re-attaching to another tab stops the first tab's fanout", async () => {
     await connectPanel("desktop-A", "A");
     await connectPanel("desktop-B", "B");

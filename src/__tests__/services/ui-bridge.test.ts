@@ -674,6 +674,60 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     expect(phoneGotResult).toBe(false);
   });
 
+  it("mirrors only allowlisted activity frames — never secret/correlated ones (cid-less too)", async () => {
+    await connectPanel("desktop-8", "G");
+    const phone = await connectHeadless("phone-8");
+    await settle();
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "desktop-8" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached");
+
+    const leaked: string[] = [];
+    phone.on("message", (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.type && m.type !== "tab_attached" && m.type !== "tab_list") leaked.push(m.type);
+    });
+    // cid-LESS correlated/secret frames that a denylist-by-cid would have leaked.
+    bridge.push({ type: "pair_url", url: "https://pair.example/secret" }, "desktop-8");
+    bridge.push({ type: "secret_saved", key: "CIVITAI_API_TOKEN" }, "desktop-8");
+    bridge.push({ type: "ack", ok: true, kind: "new_session" }, "desktop-8");
+    bridge.push({ type: "backends", backends: [] }, "desktop-8");
+    // history_list reply to a NO-cid request → cid:undefined, would slip a cid guard.
+    bridge.push({ type: "history_list", cid: undefined, sessions: [] }, "desktop-8");
+    await settle();
+    expect(leaked).toEqual([]); // nothing off the allowlist reached the viewer
+
+    // …but a genuine activity frame still mirrors.
+    const onPhone = nextFrame(phone, (m) => m.type === "say" && m.text === "hi");
+    bridge.push({ type: "say", text: "hi" }, "desktop-8");
+    await onPhone;
+  });
+
+  it("routes an attached viewer's input to the mirrored tab's session (remote control)", async () => {
+    await connectPanel("desktop-9", "G");
+    const phone = await connectHeadless("phone-9");
+    await settle();
+    const seen: Array<{ type?: string; tab_id?: string; text?: string }> = [];
+    bridge.onPanelMessage = (e) => seen.push(e as { type?: string; tab_id?: string; text?: string });
+
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "desktop-9" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached");
+
+    // The phone sends a chat message (no tab_id — the server stamps it). While
+    // attached it must drive desktop-9's session, NOT the phone's own tab.
+    phone.send(JSON.stringify({ type: "user_message", text: "drive it", context: {} }));
+    await settle();
+    const drove = seen.find((e) => e.type === "user_message" && e.text === "drive it");
+    expect(drove?.tab_id).toBe("desktop-9");
+
+    // After detach, the phone's input reverts to its own tab.
+    phone.send(JSON.stringify({ type: "detach_tab" }));
+    await settle();
+    phone.send(JSON.stringify({ type: "user_message", text: "my own", context: {} }));
+    await settle();
+    const own = seen.find((e) => e.type === "user_message" && e.text === "my own");
+    expect(own?.tab_id).toBe("phone-9");
+  });
+
   it("rejects attach to a non-existent desktop tab", async () => {
     const phone = await connectHeadless("phone-5");
     await settle();

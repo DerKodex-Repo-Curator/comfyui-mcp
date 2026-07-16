@@ -75,6 +75,28 @@ export interface BridgeCommand {
   [key: string]: unknown;
 }
 
+/**
+ * Frame `type`s that are safe to MIRROR to a tab's viewers — genuine shared-session
+ * activity a remote-control phone should see. This is an ALLOWLIST (default-deny):
+ * a `cid`-based denylist leaked cid-less correlated replies (pair_url, secret_saved,
+ * OAuth acks, and history replies to a no-cid request). Anything not listed here —
+ * acks, model/backend config, pairing/secret frames, correlated replies — stays with
+ * the primary and the ONE socket that asked. New frame types are non-mirroring until
+ * explicitly added, so a future secret-bearing frame can't leak by default.
+ */
+const MIRROR_SAFE_FRAME_TYPES: ReadonlySet<string> = new Set([
+  "say",
+  "stream",
+  "thinking",
+  "echo",
+  "turn",
+  "turn_anchor",
+  "session",
+  "agent_status",
+  "action",
+  "download_progress",
+]);
+
 export class UiBridge {
   /** Max EADDRINUSE retries before degrading to "panel unavailable". */
   private static readonly MAX_BIND_ATTEMPTS = 5;
@@ -104,6 +126,11 @@ export class UiBridge {
    *  socket-scoped. Keyed by the mirrored (primary) tabId. Empty in the normal
    *  case → zero effect on existing panel behavior. */
   private subscribers = new Map<string, Set<BridgeSocket>>();
+  /** A mirroring viewer's socket → the desktop tab it drives. While attached, the
+   *  viewer's INBOUND events (user_message, interrupt, new_session, …) are routed
+   *  to THIS tab's shared session instead of the viewer's own — that's what makes
+   *  it remote control rather than a passive view. Cleared on detach/disconnect. */
+  private mirrorViewers = new Map<BridgeSocket, string>();
   /** Injected by the orchestrator: does this tabId have a live agent session?
    *  (SessionStore/PanelAgentManager live there.) Flags desktopTabs() for the
    *  mobile mirror picker's green "session attached" dot. */
@@ -461,6 +488,11 @@ export class UiBridge {
             for (const s of migSubs) dest.add(s);
             this.subscribers.set(msg.tab_id as string, dest);
           }
+          // Re-point any viewers driving the OLD id at the new one so their input
+          // keeps reaching this tab's session across the re-hello.
+          for (const [s, drivenTab] of this.mirrorViewers) {
+            if (drivenTab === tabId) this.mirrorViewers.set(s, msg.tab_id as string);
+          }
         }
         tabId = msg.tab_id;
         const existing = this.conns.get(tabId);
@@ -561,6 +593,8 @@ export class UiBridge {
             this.subscribers.set(target, set);
           }
           set.add(sock);
+          // Route this viewer's inbound events to the mirrored tab (remote control).
+          this.mirrorViewers.set(sock, target);
         }
         try {
           sock.send(
@@ -581,15 +615,22 @@ export class UiBridge {
         for (const [tid, set] of this.subscribers) {
           if (set.delete(sock) && set.size === 0) this.subscribers.delete(tid);
         }
+        this.mirrorViewers.delete(sock); // stop routing its input to the mirrored tab
         return;
       }
 
-      // Panel-initiated event. Stamp the tab and track activity.
+      // Panel-initiated event. Stamp the tab and track activity. A mirroring viewer
+      // (phone attached to a desktop tab) DRIVES that tab's shared session, so its
+      // events route to the mirrored tab id — not the viewer's own — which is what
+      // turns the mirror into remote control. Stamping is server-authoritative here
+      // (it overwrites any client-supplied tab_id), so a viewer can't target a tab
+      // it hasn't attached to.
       if (typeof msg.type === "string") {
-        if (tabId) {
-          msg.tab_id = tabId;
-          msg.title = this.conns.get(tabId)?.title;
-          if (msg.type === "user_message") this.lastActiveTabId = tabId;
+        const effectiveTab = this.mirrorViewers.get(sock) ?? tabId;
+        if (effectiveTab) {
+          msg.tab_id = effectiveTab;
+          msg.title = this.conns.get(effectiveTab)?.title;
+          if (msg.type === "user_message") this.lastActiveTabId = effectiveTab;
         }
         this.onPanelMessage?.(msg as PanelEvent);
       }
@@ -606,6 +647,7 @@ export class UiBridge {
       for (const [tid, set] of this.subscribers) {
         if (set.delete(sock) && set.size === 0) this.subscribers.delete(tid);
       }
+      this.mirrorViewers.delete(sock);
       let wasPrimary = false;
       if (tabId && this.conns.get(tabId)?.sock === sock) {
         wasPrimary = true;
@@ -871,17 +913,10 @@ export class UiBridge {
     // Mirror fan-out: also deliver a tab-scoped frame to any phones mirroring this
     // tab (remote control). No-op when nothing is subscribed → existing panel
     // behavior unchanged. The primary is already in `targets`, so skip it here.
-    // NEVER fan out a correlated reply — those carry a `cid` and belong to the ONE
-    // socket that made the request (e.g. tool_result); mirroring them would leak
-    // another client's result to viewers. `pair_url`/`pair_error` are correlated
-    // too but carry no cid, so exclude them by type — a pairing URL is meant for
-    // the ONE panel that asked, never for a mirroring phone.
-    if (
-      tabId &&
-      frame.cid === undefined &&
-      frame.type !== "pair_url" &&
-      frame.type !== "pair_error"
-    ) {
+    // ONLY shared-session activity frames mirror (allowlist, default-deny) — this
+    // is what keeps correlated/secret frames (acks, pair_url, secret_saved, OAuth,
+    // history replies, tool_result) with the ONE socket that asked.
+    if (tabId && typeof frame.type === "string" && MIRROR_SAFE_FRAME_TYPES.has(frame.type)) {
       // Look subscribers up under the RESOLVED (canonical) tab id: after a
       // migration, agents keep pushing under a tab's ORIGINAL id while its
       // subscribers moved to the new id, so `targets[0]` (the resolved primary)

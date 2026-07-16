@@ -2061,6 +2061,7 @@ export async function runPanelOrchestrator(): Promise<void> {
         // doesn't linger. The new provider starts a FRESH session (the panel
         // replays the transcript as context on its first message to seed it).
         manager.reset(panelTab + AGENT_KEY_SEP + prev);
+        bridge.broadcastTabList(); // live agent dropped on backend switch → refresh dot
       }
       tabBackends.set(panelTab, backend);
       // A headless client (mobile/remote pseudo-panel, no browser canvas) advertises
@@ -2282,7 +2283,10 @@ export async function runPanelOrchestrator(): Promise<void> {
         return;
       }
       const prev = tabBackends.get(panelTab) ?? defaultBackend;
-      if (prev !== reqBackend) manager.reset(panelTab + AGENT_KEY_SEP + prev);
+      if (prev !== reqBackend) {
+        manager.reset(panelTab + AGENT_KEY_SEP + prev);
+        bridge.broadcastTabList(); // live agent dropped on backend switch → refresh dot
+      }
       tabBackends.set(panelTab, reqBackend);
       // Leaving a LOCAL provider frees its VRAM (no other tab still on it) —
       // the point of switching to Claude/hosted is usually reclaiming the GPU.

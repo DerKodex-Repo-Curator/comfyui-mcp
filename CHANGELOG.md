@@ -29,6 +29,18 @@ All notable changes to this project are documented here. This project adheres to
   passes the `prompt_id` it observed, cancel_job only interrupts a still-matching
   running job, and pending jobs are never touched
 
+#### Fixed
+- **QueueMonitor stayed disconnected after a ComfyUI retarget** — the watchdog
+  WS never reconnected once the orchestrator retargeted ComfyUI (e.g. the
+  `127.0.0.1`→`localhost` swap on a local panel `hello`), because `start()`
+  early-returned on the stale URL after the retarget's `stop()`. That left
+  `queue_status` permanently `connected:false` (so the mobile queue bar never
+  appeared) and silently disabled the local-Ollama VRAM pause. `start()` now
+  reconnects on a URL change or after `stop()`, and the WS handlers are guarded
+  against a superseded socket so the retarget's async close can't null the new
+  connection. Latent since the watchdog landed (2026-06-27); surfaced by the
+  `queue_status` broadcast above
+
 #### Docs
 - mobile app (beta) page — Android (Firebase App Distribution) + iOS
   (TestFlight) beta-tester links, pairing walkthrough, wired into the docs nav

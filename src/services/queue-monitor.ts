@@ -91,9 +91,14 @@ class QueueMonitorImpl {
     lastActivityTs: null,
   };
 
-  /** Open the watchdog WS to ComfyUI. Idempotent; best-effort (never throws). */
+  /** Open the watchdog WS to ComfyUI. Idempotent per-URL; best-effort (never
+   *  throws). A retarget (new URL) or a prior stop() must re-open the socket:
+   *  the orchestrator calls stop()+start(newUrl) when ComfyUI is retargeted
+   *  (e.g. 127.0.0.1→localhost from a panel hello), so a stale `this.url` must
+   *  NOT early-return — that left the watchdog permanently disconnected. */
   start(comfyuiUrl: string): void {
-    if (this.url) return; // already started
+    if (this.url === comfyuiUrl && !this.stopped) return; // already live on this URL
+    this.stop(); // tear down any prior socket/reconnect timer (also on URL change)
     this.url = comfyuiUrl;
     this.stopped = false;
     this.connect();
@@ -146,6 +151,11 @@ class QueueMonitorImpl {
       /* ignore */
     }
     this.ws = null;
+    // Clear the flag here rather than relying on the old socket's `close`: once
+    // we null `this.ws`, that socket's now-superseded close handler early-returns
+    // (this.ws !== ws) and would otherwise leave `connected` stuck true — through
+    // a retarget's stop()+start() gap, or indefinitely if the reconnect fails.
+    this.state.connected = false;
   }
 
   private wsUrl(): string {
@@ -165,15 +175,22 @@ class QueueMonitorImpl {
       return;
     }
     this.ws = ws;
+    // Guard every handler against a superseded socket: on retarget, stop()+start()
+    // opens a new socket while the old one is still async-closing. Without the
+    // `this.ws !== ws` check the old socket's late `close` would null out the NEW
+    // socket and schedule a spurious reconnect.
     ws.on("open", () => {
+      if (this.ws !== ws) return;
       this.state.connected = true;
       logger.debug("[queue-monitor] watchdog WS connected");
     });
     ws.on("message", (raw: WebSocket.RawData, isBinary: boolean) => {
+      if (this.ws !== ws) return;
       if (isBinary) return; // preview image frames — ignore
       this.onMessage(raw.toString());
     });
     ws.on("close", () => {
+      if (this.ws !== ws) return; // a superseded socket closing — ignore
       this.state.connected = false;
       this.ws = null;
       this.scheduleReconnect();

@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.35.0] - 2026-07-15
+
 ### MCP
 
 #### Added
@@ -27,6 +29,15 @@ All notable changes to this project are documented here. This project adheres to
   restores). UE broadcasts materialize from the pack's own computed
   `extra.ue_links`; real executable nodes (rgthree Context, Seed Everywhere)
   are kept
+
+### MCP
+
+#### Added
+- mobile workflows-over-tunnel fix + desktop-tab mirror (remote control) (#227)
+- creator search — search_civitai_creators + search_civitai_models creator filter (#226)
+- panel_open_civitai tool — agent opens the CivitAI browser pre-seeded (#225)
+- panel_flatten_workflow — in-place UE + Get/Set flatten that preserves the author's layout (#224)
+
 
 ## [0.34.0] - 2026-07-14
 

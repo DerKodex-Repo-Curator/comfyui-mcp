@@ -873,11 +873,23 @@ export class UiBridge {
     // behavior unchanged. The primary is already in `targets`, so skip it here.
     // NEVER fan out a correlated reply — those carry a `cid` and belong to the ONE
     // socket that made the request (e.g. tool_result); mirroring them would leak
-    // another client's result to viewers.
-    if (tabId && frame.cid === undefined) {
-      const subs = this.subscribers.get(tabId);
+    // another client's result to viewers. `pair_url`/`pair_error` are correlated
+    // too but carry no cid, so exclude them by type — a pairing URL is meant for
+    // the ONE panel that asked, never for a mirroring phone.
+    if (
+      tabId &&
+      frame.cid === undefined &&
+      frame.type !== "pair_url" &&
+      frame.type !== "pair_error"
+    ) {
+      // Look subscribers up under the RESOLVED (canonical) tab id: after a
+      // migration, agents keep pushing under a tab's ORIGINAL id while its
+      // subscribers moved to the new id, so `targets[0]` (the resolved primary)
+      // holds the id the viewers are actually keyed under.
+      const canonicalId = targets.length === 1 ? targets[0].tabId : tabId;
+      const subs = this.subscribers.get(canonicalId);
       if (subs) {
-        const primarySock = this.conns.get(tabId)?.sock;
+        const primarySock = targets[0]?.sock;
         for (const sock of subs) {
           if (sock === primarySock || sock.readyState !== WebSocket.OPEN) continue;
           try {

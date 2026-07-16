@@ -693,9 +693,12 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     desktop.send(JSON.stringify({ type: "hello", tab_id: "new-id", title: "G" }));
     await settle();
 
-    // A push to the NEW id must still reach the phone (subscriber set moved).
+    // The real scenario: the tab's AGENT keeps pushing under the ORIGINAL id
+    // ("old-id") after the migration — the fan-out must resolve that through the
+    // migration map to the moved subscriber set (keyed under the canonical id).
+    // Pushing under the new id would mask the bug (codex review).
     const onPhone = nextFrame(phone, (m) => m.type === "say" && m.text === "post-migrate");
-    bridge.push({ type: "say", text: "post-migrate" }, "new-id");
+    bridge.push({ type: "say", text: "post-migrate" }, "old-id");
     await onPhone; // resolves, or the test times out (fan-out broke)
   });
 });

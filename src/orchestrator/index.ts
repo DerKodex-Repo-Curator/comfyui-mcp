@@ -2761,6 +2761,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       manager.reset(agentKeyFor(tabId));
       bridge.push({ type: "session", session_id: null }, tabId);
       bridge.push({ type: "ack", ok: true, kind: "new_session" }, tabId);
+      bridge.broadcastTabList(); // session cleared → mirror pickers' green dot off
       return;
     }
 
@@ -2799,6 +2800,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       manager.reset(key);
       if (sid) manager.setResume(key, sid);
       bridge.push({ type: "ack", ok: true, kind: "resume_session" }, tabId);
+      bridge.broadcastTabList(); // live agent dropped → refresh mirror pickers
       return;
     }
 

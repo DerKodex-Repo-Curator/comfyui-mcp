@@ -386,7 +386,9 @@ const urlOverride = resolveUrlOverride();
 const cloudApiKey = process.env.COMFYUI_API_KEY?.trim() || undefined;
 const cloudActive = Boolean(cloudApiKey);
 const forceRemote = resolveForceRemote();
-const remoteUrlActive =
+// Mutable: setComfyuiTarget() re-classifies this on a runtime retarget so
+// isRemoteMode()/isLocalMode() track the new host instead of the startup one.
+let remoteUrlActive =
   Boolean(urlOverride) && (forceRemote || !isLoopbackHost(urlOverride?.host));
 
 if (cloudActive) {
@@ -530,6 +532,19 @@ export function setComfyuiTarget(url: string): boolean {
   config.resolvedPort = t.port;
   config.comfyuiSsl = t.ssl;
   config.comfyuiBasePath = t.basePath;
+  // Re-classify local vs remote so isRemoteMode()/isLocalMode() follow the new
+  // target — they read this module-level flag, not the host on each call, so a
+  // retarget that crosses the loopback boundary would otherwise stay misclassed.
+  remoteUrlActive = forceRemote || !isLoopbackHost(t.host);
+  // Keep comfyuiPath consistent with the mode: a remote target has no local FS
+  // (local-FS tools must throw), a loopback target re-resolves the local path
+  // (honoring COMFYUI_PATH). Without this, remote→local leaves path undefined and
+  // local→remote leaves a stale local path that FS tools would wrongly trust.
+  config.comfyuiPath = resolveComfyUIPath(process.env.COMFYUI_PATH, {
+    remoteUrl: remoteUrlActive,
+    cloud: isCloudMode(),
+    remoteHost: t.host,
+  });
   return true;
 }
 

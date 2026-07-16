@@ -551,15 +551,26 @@ export class UiBridge {
       }
       if (msg.type === "attach_tab" && typeof msg.target_tab_id === "string") {
         const target = msg.target_tab_id;
-        let set = this.subscribers.get(target);
-        if (!set) {
-          set = new Set();
-          this.subscribers.set(target, set);
+        // Only allow mirroring a real, non-headless desktop tab — reject stale ids
+        // and prevent subscribing to another headless (mobile) client.
+        const valid = this.conns.has(target) && !this.headlessSeen.has(target);
+        if (valid) {
+          let set = this.subscribers.get(target);
+          if (!set) {
+            set = new Set();
+            this.subscribers.set(target, set);
+          }
+          set.add(sock);
         }
-        set.add(sock);
         try {
           sock.send(
-            JSON.stringify({ type: "tab_attached", cid: msg.cid, tab_id: target, ok: true }),
+            JSON.stringify({
+              type: "tab_attached",
+              cid: msg.cid,
+              tab_id: target,
+              ok: valid,
+              ...(valid ? {} : { error: "no such desktop tab" }),
+            }),
           );
         } catch {
           /* socket died */
@@ -567,7 +578,9 @@ export class UiBridge {
         return;
       }
       if (msg.type === "detach_tab") {
-        for (const set of this.subscribers.values()) set.delete(sock);
+        for (const [tid, set] of this.subscribers) {
+          if (set.delete(sock) && set.size === 0) this.subscribers.delete(tid);
+        }
         return;
       }
 
@@ -858,7 +871,10 @@ export class UiBridge {
     // Mirror fan-out: also deliver a tab-scoped frame to any phones mirroring this
     // tab (remote control). No-op when nothing is subscribed → existing panel
     // behavior unchanged. The primary is already in `targets`, so skip it here.
-    if (tabId) {
+    // NEVER fan out a correlated reply — those carry a `cid` and belong to the ONE
+    // socket that made the request (e.g. tool_result); mirroring them would leak
+    // another client's result to viewers.
+    if (tabId && frame.cid === undefined) {
       const subs = this.subscribers.get(tabId);
       if (subs) {
         const primarySock = this.conns.get(tabId)?.sock;

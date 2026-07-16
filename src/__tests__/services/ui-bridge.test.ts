@@ -653,4 +653,49 @@ describe("UiBridge — desktop-tab mirror (multi-viewer fanout)", () => {
     await settle();
     expect(phoneGotSay).toBe(false);
   });
+
+  it("never fans out a correlated reply (cid-bearing) to mirror viewers", async () => {
+    await connectPanel("desktop-4", "G");
+    const phone = await connectHeadless("phone-4");
+    await settle();
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "desktop-4" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached");
+
+    let phoneGotResult = false;
+    phone.on("message", (buf) => {
+      if (JSON.parse(buf.toString()).type === "tool_result") phoneGotResult = true;
+    });
+    // A tool_result for the desktop tab must NOT leak to the mirror viewer.
+    bridge.push(
+      { type: "tool_result", cid: "x", tool: "list_workflows", ok: true, result: [] },
+      "desktop-4",
+    );
+    await settle();
+    expect(phoneGotResult).toBe(false);
+  });
+
+  it("rejects attach to a non-existent desktop tab", async () => {
+    const phone = await connectHeadless("phone-5");
+    await settle();
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "ghost" }));
+    const att = await nextFrame(phone, (m) => m.type === "tab_attached");
+    expect(att.ok).toBe(false);
+  });
+
+  it("keeps mirroring across a same-socket tab-id migration", async () => {
+    const desktop = await connectPanel("old-id", "G");
+    const phone = await connectHeadless("phone-6");
+    await settle();
+    phone.send(JSON.stringify({ type: "attach_tab", cid: "a", target_tab_id: "old-id" }));
+    await nextFrame(phone, (m) => m.type === "tab_attached");
+
+    // Desktop re-hellos under a NEW id on the SAME socket (the migration path).
+    desktop.send(JSON.stringify({ type: "hello", tab_id: "new-id", title: "G" }));
+    await settle();
+
+    // A push to the NEW id must still reach the phone (subscriber set moved).
+    const onPhone = nextFrame(phone, (m) => m.type === "say" && m.text === "post-migrate");
+    bridge.push({ type: "say", text: "post-migrate" }, "new-id");
+    await onPhone; // resolves, or the test times out (fan-out broke)
+  });
 });

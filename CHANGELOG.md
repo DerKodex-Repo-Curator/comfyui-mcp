@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.37.0] - 2026-07-16
+
 ### MCP
 
 #### Added
@@ -44,6 +46,16 @@ All notable changes to this project are documented here. This project adheres to
 #### Docs
 - mobile app (beta) page — Android (Firebase App Distribution) + iOS
   (TestFlight) beta-tester links, pairing walkthrough, wired into the docs nav
+
+### MCP
+
+#### Added
+- live queue_status broadcast + mobile one-tap render cancel (#229)
+- surface CivitAI provenance (page URL w/ model+version ids) in list_local_models (#231)
+
+#### Fixed
+- reconnect watchdog WS after ComfyUI retarget (#232)
+
 
 ## [0.36.0] - 2026-07-15
 

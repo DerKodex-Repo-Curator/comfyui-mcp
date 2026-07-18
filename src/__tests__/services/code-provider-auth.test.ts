@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   resolveGlmCodeCredentials,
   resolveKimiCodeOAuth,
+  resolveMoonshotCredentials,
   resolveOpenAICodexOAuth,
   __testing,
 } from "../../services/code-provider-auth.js";
@@ -26,6 +27,30 @@ describe("resolveGlmCodeCredentials", () => {
 
   it("throws when no GLM key is set", () => {
     expect(() => resolveGlmCodeCredentials()).toThrow(/ZAI_API_KEY/);
+  });
+});
+
+describe("resolveMoonshotCredentials", () => {
+  afterEach(() => {
+    delete process.env.MOONSHOT_API_KEY;
+    delete process.env.COMFYUI_MCP_MOONSHOT_BASE_URL;
+  });
+
+  it("reads MOONSHOT_API_KEY and default base URL", () => {
+    process.env.MOONSHOT_API_KEY = "sk-moonshot-test";
+    const creds = resolveMoonshotCredentials();
+    expect(creds.apiKey).toBe("sk-moonshot-test");
+    expect(creds.baseUrl).toBe(__testing.MOONSHOT_DEFAULT_BASE);
+  });
+
+  it("honors a base URL override (trailing slash stripped)", () => {
+    process.env.MOONSHOT_API_KEY = "sk-moonshot-test";
+    process.env.COMFYUI_MCP_MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1/";
+    expect(resolveMoonshotCredentials().baseUrl).toBe("https://api.moonshot.cn/v1");
+  });
+
+  it("throws when MOONSHOT_API_KEY is not set", () => {
+    expect(() => resolveMoonshotCredentials()).toThrow(/MOONSHOT_API_KEY/);
   });
 });
 

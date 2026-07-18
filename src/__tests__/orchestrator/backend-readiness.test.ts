@@ -118,6 +118,18 @@ describe("backendReadiness", () => {
     delete process.env.KIMI_SHARE_DIR;
   });
 
+  it("moonshot: ready when MOONSHOT_API_KEY is set (distinct from kimi)", () => {
+    const real = process.env.MOONSHOT_API_KEY;
+    delete process.env.MOONSHOT_API_KEY;
+    expect(backendReadiness("moonshot", { home: tmp }).ready).toBe(false);
+    process.env.MOONSHOT_API_KEY = "sk-moonshot-test";
+    const r = backendReadiness("moonshot", { home: tmp });
+    expect(r.auth).toBe(true);
+    expect(r.ready).toBe(true);
+    if (real === undefined) delete process.env.MOONSHOT_API_KEY;
+    else process.env.MOONSHOT_API_KEY = real;
+  });
+
   it("unknown backend is never ready", () => {
     expect(backendReadiness("bogus").ready).toBe(false);
   });

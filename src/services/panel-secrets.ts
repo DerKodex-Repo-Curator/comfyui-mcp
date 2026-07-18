@@ -90,6 +90,7 @@ export const AGENT_SECRET_ENV_ALLOWLIST = [
   "ZHIPUAI_API_KEY",
   "ZAI_API_KEY",
   "KIMI_API_KEY",
+  "MOONSHOT_API_KEY",
 ] as const;
 const AGENT_ALLOWLIST_SET = new Set<string>(AGENT_SECRET_ENV_ALLOWLIST);
 
@@ -352,6 +353,7 @@ export const CREDENTIAL_SLOTS: CredentialSlot[] = [
   { id: "openrouter", label: "OpenRouter", envKeys: ["OPENROUTER_API_KEY"], store: "agent", help: "Hosted models (MiMo, MiniMax, GPT, Claude…)" },
   { id: "glm", label: "GLM / Zhipu", envKeys: ["GLM_API_KEY", "ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "ZAI_API_KEY"], store: "agent", help: "GLM provider" },
   { id: "kimi", label: "Kimi (API)", envKeys: ["KIMI_API_KEY"], store: "agent", help: "Kimi via API key (vs its OAuth)" },
+  { id: "moonshot", label: "Kimi K3 (Moonshot)", envKeys: ["MOONSHOT_API_KEY"], store: "agent", help: "Kimi K3 via the Moonshot platform API key" },
   { id: "civitai", label: "Civitai", envKeys: ["CIVITAI_API_TOKEN"], store: "comfyui", help: "Model downloads" },
   { id: "huggingface", label: "HuggingFace", envKeys: ["HF_TOKEN", "HUGGINGFACE_TOKEN"], store: "comfyui", help: "Model downloads" },
   { id: "google", label: "Google / Gemini", envKeys: ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"], store: "comfyui", help: "Nano Banana concept images" },

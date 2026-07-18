@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 describe("panel-secrets credential slots", () => {
   beforeEach(() => {
     process.env.COMFYUI_MCP_PANEL_SECRETS = join(tmpdir(), `secrets-${randomUUID()}.json`);
-    for (const k of ["OPENROUTER_API_KEY","XAI_API_KEY","GEMINI_API_KEY","GOOGLE_API_KEY","GOOGLE_GENERATIVE_AI_API_KEY","HF_TOKEN","HUGGINGFACE_TOKEN","GLM_API_KEY","ZHIPU_API_KEY","ZHIPUAI_API_KEY","ZAI_API_KEY","KIMI_API_KEY","RUNCOMFY_API_KEY","REGISTRY_ACCESS_TOKEN","CIVITAI_API_TOKEN"]) delete process.env[k];
+    for (const k of ["OPENROUTER_API_KEY","XAI_API_KEY","GEMINI_API_KEY","GOOGLE_API_KEY","GOOGLE_GENERATIVE_AI_API_KEY","HF_TOKEN","HUGGINGFACE_TOKEN","GLM_API_KEY","ZHIPU_API_KEY","ZHIPUAI_API_KEY","ZAI_API_KEY","KIMI_API_KEY","MOONSHOT_API_KEY","RUNCOMFY_API_KEY","REGISTRY_ACCESS_TOKEN","CIVITAI_API_TOKEN"]) delete process.env[k];
   });
 
   it("fans a slot out to all its env keys in the right store file", async () => {
@@ -24,6 +24,14 @@ describe("panel-secrets credential slots", () => {
     const file = JSON.parse(readFileSync(process.env.COMFYUI_MCP_PANEL_SECRETS!, "utf-8"));
     expect(file.agentEnv.GLM_API_KEY).toBe("glm-secret-xyz789");
     expect(process.env.GLM_API_KEY).toBe("glm-secret-xyz789");
+  });
+
+  it("routes the moonshot slot to MOONSHOT_API_KEY in the agent store", async () => {
+    const m = await import("../../services/panel-secrets.js");
+    m.setPanelSecret("moonshot", "sk-moonshot-abc123");
+    const file = JSON.parse(readFileSync(process.env.COMFYUI_MCP_PANEL_SECRETS!, "utf-8"));
+    expect(file.agentEnv.MOONSHOT_API_KEY).toBe("sk-moonshot-abc123");
+    expect(process.env.MOONSHOT_API_KEY).toBe("sk-moonshot-abc123");
   });
 
   it("rejects an unknown slot", async () => {

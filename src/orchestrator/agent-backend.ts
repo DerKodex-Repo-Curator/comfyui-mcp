@@ -17,6 +17,7 @@ export type BackendId =
   | "grok"
   | "glm"
   | "kimi"
+  | "moonshot"
   | "ollama"
   | "openrouter"
   | "copilot";
@@ -290,6 +291,13 @@ export const GLM_CAPABILITIES: AgentCapabilities = {
 
 /** Kimi Code subscription OAuth or KIMI_API_KEY — OpenAI-compatible coding API. */
 export const KIMI_CAPABILITIES: AgentCapabilities = {
+  ...OLLAMA_CAPABILITIES,
+};
+
+/** Moonshot platform API (Kimi K3) — MOONSHOT_API_KEY, OpenAI-compatible
+ *  /v1/chat/completions. Distinct from the `kimi` backend (Kimi Code coding
+ *  subscription): a general pay-per-token platform key, its own host + model. */
+export const MOONSHOT_CAPABILITIES: AgentCapabilities = {
   ...OLLAMA_CAPABILITIES,
 };
 

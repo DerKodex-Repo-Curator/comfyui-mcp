@@ -186,6 +186,13 @@ export function backendReadiness(
     const auth = !!apiKey || oauth;
     return { backend: "kimi", cli: true, auth, ready: auth };
   }
+  if (b === "moonshot") {
+    // Moonshot platform (Kimi K3) — hosted, no CLI. Readiness = MOONSHOT_API_KEY
+    // in the orchestrator's env (a bad key still surfaces via the connect ack's
+    // model probe → degraded). Distinct from `kimi` (Kimi Code subscription).
+    const auth = !!process.env.MOONSHOT_API_KEY?.trim();
+    return { backend: "moonshot", cli: true, auth, ready: auth };
+  }
   if (b === "gemini") {
     const cli = onPath(CLI_NAMES.gemini);
     // The gemini CLI caches its Google OAuth at <home>/.gemini/oauth_creds.json

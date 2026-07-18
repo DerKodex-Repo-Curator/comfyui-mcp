@@ -20,6 +20,7 @@ const KIMI_OAUTH_TOKEN_URL = "https://api.kimi.com/oauth/token";
 
 export const GLM_CODE_DEFAULT_BASE = "https://api.z.ai/api/coding/paas/v4";
 export const KIMI_CODE_DEFAULT_BASE = "https://api.kimi.com/coding/v1";
+export const MOONSHOT_DEFAULT_BASE = "https://api.moonshot.ai/v1";
 
 const TOKEN_REFRESH_SKEW_MS = 120_000;
 
@@ -36,6 +37,11 @@ export type OpenAICodexOAuthCredentials = {
 };
 
 export type GlmCodeCredentials = {
+  apiKey: string;
+  baseUrl: string;
+};
+
+export type MoonshotCredentials = {
   apiKey: string;
   baseUrl: string;
 };
@@ -474,6 +480,23 @@ export function resolveGlmCodeCredentials(): GlmCodeCredentials {
 }
 
 /**
+ * Moonshot platform API key (Kimi K3). Env: MOONSHOT_API_KEY. This is the
+ * general Moonshot/Kimi PLATFORM key (api.moonshot.ai), distinct from the
+ * Kimi Code coding subscription resolved by `resolveKimiCodeOAuth` above.
+ */
+export function resolveMoonshotCredentials(): MoonshotCredentials {
+  const apiKey = process.env.MOONSHOT_API_KEY?.trim();
+  if (!apiKey) {
+    throw new ValidationError(
+      "Moonshot (Kimi K3) requires MOONSHOT_API_KEY from platform.kimi.ai (https://platform.kimi.ai/console/api-keys).",
+    );
+  }
+  const baseUrl =
+    process.env.COMFYUI_MCP_MOONSHOT_BASE_URL?.trim().replace(/\/$/, "") || MOONSHOT_DEFAULT_BASE;
+  return { apiKey, baseUrl };
+}
+
+/**
  * Resolve Kimi Code subscription OAuth from ~/.kimi/credentials/kimi-code.json.
  * Falls back to KIMI_API_KEY when set (pay-per-token / CI).
  */
@@ -699,6 +722,7 @@ export const __testing = {
   KIMI_CODE_CLIENT_ID,
   GLM_CODE_DEFAULT_BASE,
   KIMI_CODE_DEFAULT_BASE,
+  MOONSHOT_DEFAULT_BASE,
   codexAuthPath,
   kimiCodeAuthPath,
   grokAuthPath,

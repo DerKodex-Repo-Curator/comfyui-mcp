@@ -64,6 +64,7 @@ import { OllamaBackend, OLLAMA_SYSTEM_PROMPT } from "./ollama-backend.js";
 import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
 import { GlmBackend, GLM_DEFAULT_MODEL } from "./glm-backend.js";
 import { KimiBackend, KIMI_DEFAULT_MODEL } from "./kimi-backend.js";
+import { MoonshotBackend, MOONSHOT_DEFAULT_MODEL } from "./moonshot-backend.js";
 import { CopilotBackend, COPILOT_DEFAULT_MODEL } from "./copilot-backend.js";
 import { SYSTEM as MODEL_CARD_SYSTEM } from "./ai-proposer.js";
 import { resolvePrompt, registerPrompt, onPromptsChanged } from "../services/prompt-overrides.js";
@@ -1086,7 +1087,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     const hydrated = new Set(hydratedSecrets);
     const src = (k: string) => (process.env[k] ? (hydrated.has(k) ? "store" : "env") : "none");
     logger.info(
-      `[panel-orchestrator] keyed providers: openrouter=${src("OPENROUTER_API_KEY")}, glm=${src("GLM_API_KEY")}, kimi=${src("KIMI_API_KEY")}`,
+      `[panel-orchestrator] keyed providers: openrouter=${src("OPENROUTER_API_KEY")}, glm=${src("GLM_API_KEY")}, kimi=${src("KIMI_API_KEY")}, moonshot=${src("MOONSHOT_API_KEY")}`,
     );
   }
   const persistedAgent = getAgentSettings();
@@ -1095,6 +1096,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   const chatgptModel = process.env.COMFYUI_MCP_CHATGPT_MODEL ?? CHATGPT_DEFAULT_MODEL;
   const glmModel = process.env.COMFYUI_MCP_GLM_MODEL ?? GLM_DEFAULT_MODEL;
   const kimiModel = process.env.COMFYUI_MCP_KIMI_MODEL ?? KIMI_DEFAULT_MODEL;
+  const moonshotModel = process.env.COMFYUI_MCP_MOONSHOT_MODEL ?? MOONSHOT_DEFAULT_MODEL;
   // EXPERIMENTAL (ToS risk) — off by default, only reachable once the user has
   // signed in via the panel's experimental row (oauth-bridge.ts's
   // allow_experimental gate); never the defaultBackend/auto-pick.
@@ -1194,6 +1196,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     "grok",
     "glm",
     "kimi",
+    "moonshot",
     "ollama",
     "openrouter",
     "lmstudio",
@@ -1490,6 +1493,15 @@ export async function runPanelOrchestrator(): Promise<void> {
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
     }
+    if (backend === "moonshot") {
+      return new MoonshotBackend({
+        cwd: comfyuiPath ?? process.cwd(),
+        model: moonshotModel,
+        systemAppend: panelSystemAppend,
+        comfyuiUrl,
+        mcpServers: makeHttpBackendMcpServers(panelTabId),
+      });
+    }
     if (backend === "copilot") {
       // EXPERIMENTAL (ToS risk) — prepare() throws a clear re-sign-in error if
       // no ~/.comfyui-mcp/copilot-auth.json exists yet (resolveCopilotOAuth),
@@ -1534,6 +1546,8 @@ export async function runPanelOrchestrator(): Promise<void> {
             ? new GlmBackend({ cwd: comfyuiPath ?? process.cwd(), model: glmModel })
           : backend === "kimi"
             ? new KimiBackend({ cwd: comfyuiPath ?? process.cwd(), model: kimiModel })
+          : backend === "moonshot"
+            ? new MoonshotBackend({ cwd: comfyuiPath ?? process.cwd(), model: moonshotModel })
           : backend === "ollama"
             ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: ollamaModel, ...ollamaDeps() })
             : backend === "grok"
@@ -1798,9 +1812,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   // without a reconnect.
   const unsubscribeAgentSecrets = onAgentSecretsChanged(() => {
     hydrateAgentSecretsIntoEnv();
-    // A key change can affect either keyed endpoint provider — drop both
-    // caches so the next probe carries the fresh credentials.
-    for (const b of ["openrouter", "custom"]) {
+    // A key change can affect ANY keyed provider (OpenRouter/Custom endpoints and
+    // the hosted API-key backends GLM / Kimi / Moonshot) — drop each one's cached
+    // probe backend + model list so the next probe carries the fresh credentials
+    // (and a revoked key immediately stops reading as "ready" from a stale cache).
+    for (const b of ["openrouter", "custom", "glm", "kimi", "moonshot"]) {
       modelsByBackend.delete(b);
       const pb = probeBackends.get(b);
       if (pb?.close) void pb.close().catch(() => {});
@@ -1920,6 +1936,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     if (backend === "chatgpt") return chatgptModel;
     if (backend === "glm") return glmModel;
     if (backend === "kimi") return kimiModel;
+    if (backend === "moonshot") return moonshotModel;
     if (backend === "copilot") return copilotModel;
     return model;
   }
@@ -2129,6 +2146,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isGk = backend === "grok";
       const isGl = backend === "glm";
       const isKm = backend === "kimi";
+      const isMs = backend === "moonshot";
       const isOl = backend === "ollama";
       const isOr = backend === "openrouter";
       const isLs = backend === "lmstudio";
@@ -2190,6 +2208,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? (glmModel ?? (models[0] as { value?: string }).value ?? "GLM")
                 : isKm
                   ? (kimiModel ?? (models[0] as { value?: string }).value ?? "Kimi")
+                : isMs
+                  ? (moonshotModel ?? (models[0] as { value?: string }).value ?? "Kimi K3")
                 : isOl
                   ? (ollamaModel ?? (models[0] as { value?: string }).value ?? "Ollama")
                   : isLs
@@ -2250,6 +2270,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Z.AI GLM Coding Plan. Ask away.`
                   : isKm
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Kimi Code subscription. Ask away.`
+                  : isMs
+                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Moonshot platform (Kimi K3) API key. Ask away.`
                   : isOl
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} running locally via Ollama (no account, no API key). Small local models are slower and simpler than frontier ones — expect fewer frills. Ask away.`
                     : isLs
@@ -2280,6 +2302,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? "⚠️ The background agent isn't responding — GLM Code API couldn't start. Set ZAI_API_KEY (Z.AI Coding Plan), then Disconnect → Connect to retry."
                 : isKm
                   ? "⚠️ The background agent isn't responding — Kimi Code couldn't start. Run Kimi Code login (~/.kimi/credentials/kimi-code.json) or set KIMI_API_KEY, then Disconnect → Connect to retry."
+                : isMs
+                  ? "⚠️ The background agent isn't responding — Moonshot (Kimi K3) couldn't start. Set MOONSHOT_API_KEY from platform.kimi.ai, then Disconnect → Connect to retry."
                 : isOl
                   ? "⚠️ The background agent isn't responding — Ollama isn't reachable. Start it with `ollama serve` and pull our fine-tuned model (`ollama pull artokun/gemma4-comfyui-mcp:e4b` — gemma4 trained on the comfyui-mcp tool suite — arena-best local model; `:12b` for ~8 GB VRAM), then Disconnect → Connect to retry."
                   : isLs

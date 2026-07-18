@@ -50,6 +50,12 @@ placeholder follows the active backend ("Ask Claude…" / "Ask Ollama…").
   offered too.
 - **GLM** — set `ZAI_API_KEY` (Z.AI Coding Plan; `GLM_API_KEY` /
   `ZHIPUAI_API_KEY` also accepted). No CLI.
+- **Kimi K3 (Moonshot)** — set `MOONSHOT_API_KEY` from
+  [platform.kimi.ai](https://platform.kimi.ai/console/api-keys). No CLI. This is
+  the Moonshot **platform** key (default model `kimi-k3`, base
+  `https://api.moonshot.ai/v1`) — distinct from the **Kimi** provider above,
+  which is the Kimi Code coding subscription. Override the model with
+  `COMFYUI_MCP_MOONSHOT_MODEL` and the base with `COMFYUI_MCP_MOONSHOT_BASE_URL`.
 - **Copilot (experimental)** — sign in from the panel's experimental provider
   row. Off by default; enable experimental backends in Settings first.
 - **Ollama (local)** — no sign-in. Install Ollama and pull a tool-calling

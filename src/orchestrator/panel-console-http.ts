@@ -22,6 +22,7 @@ const KNOWN_BACKENDS = [
   "grok",
   "glm",
   "kimi",
+  "moonshot",
   "ollama",
   "copilot", // EXPERIMENTAL — see orchestrator/index.ts's copilotModel comment
 ] as const;

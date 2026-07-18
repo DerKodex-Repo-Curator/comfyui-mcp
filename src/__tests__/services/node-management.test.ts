@@ -1095,6 +1095,24 @@ describe("node-management service", () => {
       expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
     });
 
+    it("git-URL installs use the 3.x URL-carrying body (version:'unknown', files:[url])", async () => {
+      // codex review on #235: v2-batch runs the 3.x handlers, so a git URL
+      // must NOT take v4's registry-first shape (which resolves ids against
+      // the registry DB and silently no-ops on a full URL).
+      const { calls } = stubBatchFetch({
+        installedBody: { bar: { ver: "unknown", cnr_id: "bar", enabled: true, aux_id: "foo/bar" } },
+      });
+      await installCustomNode({ id: "https://github.com/foo/bar" }).catch(() => {});
+      const batch = calls.find((c) => c.url.includes("/v2/manager/queue/batch"));
+      expect(batch).toBeDefined();
+      const payload = batch!.body as Record<string, Array<Record<string, unknown>>>;
+      expect(payload.install[0]).toMatchObject({
+        version: "unknown",
+        selected_version: "unknown",
+        files: ["https://github.com/foo/bar"],
+      });
+    });
+
     it("surfaces a batch-reported failure with the legacy-UI hint", async () => {
       stubBatchFetch({
         failed: ["comfyui-impact-pack"],

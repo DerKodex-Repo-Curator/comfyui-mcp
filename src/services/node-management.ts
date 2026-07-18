@@ -1029,10 +1029,12 @@ export async function installCustomNode(
   if (source === "git") {
     const repoName = gitCheckoutDir(gitId);
     let status: QueueStatus;
-    if ((await detectManagerApi()) === "legacy") {
-      // Released Manager 3.x accepts a REAL git URL natively:
-      // { version:'unknown', files:[url] } clones it as an unregistered pack.
-      // (Gated server-side by security_level + the allow_git_url_install
+    if ((await detectManagerApi()) !== "v2") {
+      // 3.x SEMANTICS (both the custom-node Manager AND pip Manager in
+      // legacy-UI mode, whose /v2 batch runs the same 3.x handlers — codex
+      // review on #235): a REAL git URL installs natively via
+      // { version:'unknown', files:[url] }, cloning it as an unregistered
+      // pack. (Gated server-side by security_level + allow_git_url_install
       // config — a rejection surfaces as a 403/404 from the queue route.)
       status = await queueManagerTask("install", {
         id: repoName,

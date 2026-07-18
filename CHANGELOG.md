@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Fixed
+- custom-node/model operations no longer 405 against pip ComfyUI-Manager
+  running in legacy-UI mode (`--enable-manager-legacy-ui` — hardcoded by e.g.
+  yanwk/comfyui-boot images): that mode swaps in Manager's bundled 3.x server
+  under the /v2 prefix, which has no `queue/task` route — comfyui-mcp now
+  detects the mode (`/v2/manager/is_legacy_manager_ui`) and speaks its
+  `queue/batch` dialect; Manager detection also validates the probe payload so
+  an SPA 200 can't masquerade as a Manager API (#235)
+
 ## [0.38.0] - 2026-07-17
 
 ### MCP

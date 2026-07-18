@@ -192,7 +192,20 @@ function sleep(ms: number): Promise<void> {
 // routes and different body shapes. Probe once per target and adapt.
 // ---------------------------------------------------------------------------
 
-type ManagerApi = "v2" | "legacy";
+// Three dialects in the wild (issue #116 found the second; #235 the third):
+//   "v2"       pip comfyui_manager (Manager v4) in its NORMAL mode — the
+//              unified POST /v2/manager/queue/task envelope.
+//   "v2-batch" pip comfyui_manager started with --enable-manager-legacy-ui
+//              (what e.g. the yanwk/comfyui-boot images hardcode): the pip
+//              package loads its BUNDLED 3.x server under the /v2 prefix.
+//              GET /v2/manager/queue/status exists, but POST .../task does NOT
+//              — mutations go through POST /v2/manager/queue/batch with 3.x
+//              body shapes ({install:[body], uninstall:[body], ...}). And
+//              because ComfyUI's frontend catchall matches every path for GET,
+//              an unregistered POST returns 405 (never 404) — the exact
+//              symptom of #235.
+//   "legacy"   the 3.x custom-node Manager: per-operation /manager/queue/*.
+type ManagerApi = "v2" | "v2-batch" | "legacy";
 
 let managerApiCache: { base: string; api: ManagerApi } | null = null;
 
@@ -201,29 +214,54 @@ export function resetManagerApiCacheForTests(api?: ManagerApi): void {
   managerApiCache = api ? { base: managerBaseUrl(), api } : null;
 }
 
+/** A real queue/status payload — guards detection against servers that answer
+ *  200 with HTML/junk for unknown GETs (SPA fallbacks, index catchalls). */
+function looksLikeQueueStatus(s: unknown): boolean {
+  return (
+    !!s &&
+    typeof s === "object" &&
+    (typeof (s as QueueStatus).total_count === "number" ||
+      typeof (s as QueueStatus).is_processing === "boolean")
+  );
+}
+
 async function detectManagerApi(): Promise<ManagerApi> {
   const base = managerBaseUrl();
   if (managerApiCache?.base === base) return managerApiCache.api;
   const v2 = await managerFetch<QueueStatus>("/v2/manager/queue/status", { soft: true });
-  if (v2 !== undefined) {
-    managerApiCache = { base, api: "v2" };
-    return "v2";
+  if (looksLikeQueueStatus(v2)) {
+    // Same /v2 surface, two servers: the pip package in legacy-UI mode swaps
+    // in its bundled 3.x server (no task route). Both register
+    // GET /v2/manager/is_legacy_manager_ui and answer truthfully; a missing
+    // route (older pip) means the normal v4 server → task dialect.
+    const legacyUi = await managerFetch<{ is_legacy_manager_ui?: boolean }>(
+      "/v2/manager/is_legacy_manager_ui",
+      { soft: true },
+    );
+    const api: ManagerApi =
+      legacyUi && typeof legacyUi === "object" && legacyUi.is_legacy_manager_ui === true
+        ? "v2-batch"
+        : "v2";
+    managerApiCache = { base, api };
+    return api;
   }
   const legacy = await managerFetch<QueueStatus>("/manager/queue/status", { soft: true });
-  if (legacy !== undefined) {
+  if (looksLikeQueueStatus(legacy)) {
     managerApiCache = { base, api: "legacy" };
     return "legacy";
   }
   throw new NodeManagementError(
     "ComfyUI-Manager's queue API is not reachable (neither /v2/manager/queue/status " +
-      "nor /manager/queue/status answered). Is ComfyUI-Manager installed and enabled " +
-      "on the connected ComfyUI?",
+      "nor /manager/queue/status answered with a queue status). Is ComfyUI-Manager " +
+      "installed and enabled on the connected ComfyUI? The pip comfyui_manager " +
+      "package only activates when ComfyUI is started with --enable-manager.",
   );
 }
 
-/** Queue route prefix for the detected generation. */
+/** Queue route prefix for the detected generation ("v2-batch" serves
+ *  status/start under the /v2 prefix too — only the mutation routes differ). */
 async function managerQueuePrefix(): Promise<string> {
-  return (await detectManagerApi()) === "v2" ? "/v2/manager/queue" : "/manager/queue";
+  return (await detectManagerApi()) === "legacy" ? "/manager/queue" : "/v2/manager/queue";
 }
 
 /** Appended to every legacy-Manager operation failure so users know they're on
@@ -236,15 +274,28 @@ const MANAGER_UPGRADE_HINT =
   "custom_nodes/ComfyUI-Manager clone and restart. " +
   "See https://comfyui-mcp.artokun.io/docs/troubleshooting";
 
+/** Appended to v2-batch (pip Manager in legacy-UI mode) failures. */
+const MANAGER_LEGACY_UI_HINT =
+  "NOTE: this ComfyUI runs Manager v4 (pip comfyui_manager) in LEGACY-UI mode " +
+  "(--enable-manager-legacy-ui), which serves the older 3.x API — some operations " +
+  "degrade (notably arbitrary-URL model downloads, which the 3.x code whitelist-gates). " +
+  "For the full v4 API, start ComfyUI without --enable-manager-legacy-ui (for " +
+  "yanwk/comfyui-boot images that flag is hardcoded in the entrypoint). " +
+  "See https://comfyui-mcp.artokun.io/docs/troubleshooting";
+
 /** Wrap a legacy-Manager failure with the upgrade guidance (keeps details). */
-function annotateLegacyError(err: unknown, kind: ManagerTaskKind): NodeManagementError {
+function annotateLegacyError(
+  err: unknown,
+  kind: ManagerTaskKind,
+  hint: string = MANAGER_UPGRADE_HINT,
+): NodeManagementError {
   const base = err instanceof Error ? err.message : String(err);
   const extra =
     kind === "install-model"
       ? " Arbitrary-URL model installs REQUIRE Manager v4+ (3.x only accepts whitelisted catalog models)."
       : "";
   return new NodeManagementError(
-    `${base}${extra}\n${MANAGER_UPGRADE_HINT}`,
+    `${base}${extra}\n${hint}`,
     err instanceof NodeManagementError ? err.details : undefined,
   );
 }
@@ -393,7 +444,8 @@ async function queueManagerTask(
   params: Record<string, unknown>,
 ): Promise<QueueStatus> {
   const uiId = randomUUID();
-  if ((await detectManagerApi()) === "legacy") {
+  const api = await detectManagerApi();
+  if (api === "legacy") {
     // Released Manager 3.x: per-operation routes + different body shapes
     // (issue #116 — the unified /v2 task route 405s there).
     const { path, body } = legacyTaskRequest(kind, params, uiId);
@@ -401,6 +453,39 @@ async function queueManagerTask(
       await managerFetch(path, { method: "POST", body });
     } catch (err) {
       throw annotateLegacyError(err, kind);
+    }
+    return runManagerQueue();
+  }
+  if (api === "v2-batch") {
+    // pip Manager in legacy-UI mode (issue #235): the /v2 prefix serves the
+    // BUNDLED 3.x server — no task route (POST there 405s via the frontend
+    // catchall). Mutations take 3.x body shapes, wrapped in the batch
+    // envelope {<op>: [body, ...]}; the batch runs its items synchronously
+    // and reports failures as {failed: [id, ...]}. install-model keeps its
+    // dedicated route (same path as v4, 3.x whitelist semantics).
+    const { path, body } = legacyTaskRequest(kind, params, uiId);
+    try {
+      if (kind === "install-model") {
+        await managerFetch("/v2/manager/queue/install_model", { method: "POST", body });
+      } else {
+        // legacyTaskRequest's path is "/manager/queue/<op>"; the batch key is
+        // that trailing op ("enable" maps to an install body → key "install").
+        const op = path.split("/").pop() as string;
+        const res = await managerFetch<{ failed?: unknown[] }>("/v2/manager/queue/batch", {
+          method: "POST",
+          body: { [op]: [body] },
+        });
+        const failed = Array.isArray(res?.failed) ? res.failed : [];
+        if (failed.length && (body.id === undefined || failed.includes(body.id))) {
+          throw new NodeManagementError(
+            `ComfyUI-Manager batch reported the ${op} of "${String(body.id ?? "?")}" as failed ` +
+              "(check the ComfyUI server log for the underlying error — security_level " +
+              "gating is a common cause).",
+          );
+        }
+      }
+    } catch (err) {
+      throw annotateLegacyError(err, kind, MANAGER_LEGACY_UI_HINT);
     }
     return runManagerQueue();
   }
@@ -1198,7 +1283,9 @@ export async function listInstalledNodes(
     }));
   }
 
-  const prefix = (await detectManagerApi()) === "v2" ? "/v2" : "";
+  // Both pip-Manager modes serve /v2/customnode/installed (the legacy-UI
+  // module registers it too); only the 3.x custom-node Manager lacks /v2.
+  const prefix = (await detectManagerApi()) === "legacy" ? "" : "/v2";
   const raw = await managerFetch<unknown>(
     `${prefix}/customnode/installed?mode=${encodeURIComponent(mode)}`,
   );

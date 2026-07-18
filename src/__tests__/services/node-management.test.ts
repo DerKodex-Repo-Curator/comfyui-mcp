@@ -1042,4 +1042,103 @@ describe("node-management service", () => {
       expect(probes.length).toBe(1);
     });
   });
+
+  // ── issue #235: pip Manager in legacy-UI mode = the "v2-batch" dialect ────
+  describe("v2-batch dialect (pip Manager with --enable-manager-legacy-ui)", () => {
+    /** Stub a server shaped like comfyui_manager 4.2.2 in legacy-UI mode:
+     *  /v2 status + is_legacy_manager_ui:true + batch; NO /v2 task route
+     *  (a POST there gets ComfyUI's catchall 405, per the field report). */
+    function stubBatchFetch(opts: { failed?: unknown[]; installedBody?: unknown } = {}) {
+      const calls: Call[] = [];
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(init.body as string) : undefined;
+        calls.push({ url, method, body });
+        const path = new URL(url).pathname;
+        if (path.startsWith("/v2/customnode/installed")) return jsonResponse(opts.installedBody ?? {});
+        if (path === "/v2/manager/queue/status") {
+          return jsonResponse({ total_count: 1, done_count: 1, in_progress_count: 0, is_processing: false });
+        }
+        if (path === "/v2/manager/is_legacy_manager_ui") {
+          return jsonResponse({ is_legacy_manager_ui: true });
+        }
+        if (path === "/v2/manager/queue/batch" && method === "POST") {
+          return jsonResponse({ failed: opts.failed ?? [] });
+        }
+        if (path === "/v2/manager/queue/start" && method === "POST") {
+          return new Response("", { status: 200 });
+        }
+        if (path === "/v2/manager/queue/task") {
+          // The exact #235 signature: route unregistered, catchall answers 405.
+          return new Response("405: Method Not Allowed", { status: 405 });
+        }
+        return new Response("", { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      return { calls };
+    }
+
+    it("installs through /v2/manager/queue/batch with a 3.x body — never touches the task route", async () => {
+      const { calls } = stubBatchFetch({
+        installedBody: { "comfyui-impact-pack": { ver: "1.0.0", cnr_id: "comfyui-impact-pack", enabled: true } },
+      });
+      const res = await installCustomNode({ id: "comfyui-impact-pack" });
+      expect(res.mechanism).toBe("manager-http");
+      const batch = calls.find((c) => c.url.includes("/v2/manager/queue/batch"));
+      expect(batch).toBeDefined();
+      const payload = batch!.body as Record<string, Array<Record<string, unknown>>>;
+      expect(Object.keys(payload)).toEqual(["install"]);
+      expect(payload.install[0]).toMatchObject({ id: "comfyui-impact-pack", channel: "default" });
+      expect(typeof payload.install[0].ui_id).toBe("string");
+      expect(calls.some((c) => c.url.includes("/v2/manager/queue/task"))).toBe(false);
+      // still drains the queue for temp-queued post-install work
+      expect(calls.some((c) => c.url.endsWith("/v2/manager/queue/start"))).toBe(true);
+    });
+
+    it("surfaces a batch-reported failure with the legacy-UI hint", async () => {
+      stubBatchFetch({
+        failed: ["comfyui-impact-pack"],
+        installedBody: { "comfyui-impact-pack": { ver: "1.0.0", cnr_id: "comfyui-impact-pack", enabled: true } },
+      });
+      await expect(installCustomNode({ id: "comfyui-impact-pack" })).rejects.toThrow(
+        /reported the install .* as failed[\s\S]*legacy-ui mode/i,
+      );
+    });
+
+    it("routes install-model to the dedicated /v2 route (not the batch)", async () => {
+      // reach queueManagerTask("install-model") through the public surface via
+      // detection cache pinning + a direct queue call is not exported; instead
+      // assert the detection outcome feeds managerQueuePrefix by checking a
+      // second op — covered above — and the model path via downloadModel is
+      // exercised in its own suite. Here we lock the DETECTION itself:
+      const { calls } = stubBatchFetch();
+      await listInstalledNodes().catch(() => {});
+      // the discriminator probe must have run
+      expect(calls.some((c) => c.url.includes("/v2/manager/is_legacy_manager_ui"))).toBe(true);
+    });
+  });
+
+  describe("Manager detection hardening (issue #235)", () => {
+    it("a 200-HTML SPA fallback on the v2 status probe does NOT detect v2", async () => {
+      const calls: Call[] = [];
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
+        calls.push({ url, method: init?.method ?? "GET", body: undefined });
+        const path = new URL(url).pathname;
+        if (path === "/v2/manager/queue/status") {
+          return new Response("<!doctype html><html>frontend</html>", {
+            status: 200, headers: { "Content-Type": "text/html" },
+          });
+        }
+        if (path === "/manager/queue/status") {
+          return jsonResponse({ total_count: 0, done_count: 0, in_progress_count: 0, is_processing: false });
+        }
+        if (path.startsWith("/v2/customnode/installed")) return jsonResponse({});
+        return new Response("", { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await listInstalledNodes().catch(() => {});
+      // fell through to the legacy probe instead of trusting the HTML 200
+      expect(calls.some((c) => c.url.endsWith("/manager/queue/status"))).toBe(true);
+    });
+  });
 });

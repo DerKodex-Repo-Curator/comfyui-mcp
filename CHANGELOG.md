@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.38.0] - 2026-07-17
+
+### MCP
+
+#### Added
+- add Moonshot (Kimi K3) as a first-class provider (#233)
+
+
 ## [0.37.0] - 2026-07-16
 
 ### MCP

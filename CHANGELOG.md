@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.38.1] - 2026-07-18
+
 ### MCP
 
 #### Fixed
@@ -16,6 +18,12 @@ All notable changes to this project are documented here. This project adheres to
   detects the mode (`/v2/manager/is_legacy_manager_ui`) and speaks its
   `queue/batch` dialect; Manager detection also validates the probe payload so
   an SPA 200 can't masquerade as a Manager API (#235)
+
+### MCP
+
+#### Fixed
+- speak pip Manager's legacy-UI dialect — queue/batch, not queue/task (fixes #235) (#236)
+
 
 ## [0.38.0] - 2026-07-17
 

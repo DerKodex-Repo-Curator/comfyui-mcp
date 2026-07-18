@@ -1801,9 +1801,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   // without a reconnect.
   const unsubscribeAgentSecrets = onAgentSecretsChanged(() => {
     hydrateAgentSecretsIntoEnv();
-    // A key change can affect either keyed endpoint provider — drop both
-    // caches so the next probe carries the fresh credentials.
-    for (const b of ["openrouter", "custom"]) {
+    // A key change can affect ANY keyed provider (OpenRouter/Custom endpoints and
+    // the hosted API-key backends GLM / Kimi / Moonshot) — drop each one's cached
+    // probe backend + model list so the next probe carries the fresh credentials
+    // (and a revoked key immediately stops reading as "ready" from a stale cache).
+    for (const b of ["openrouter", "custom", "glm", "kimi", "moonshot"]) {
       modelsByBackend.delete(b);
       const pb = probeBackends.get(b);
       if (pb?.close) void pb.close().catch(() => {});

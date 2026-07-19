@@ -644,6 +644,10 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   // tap, and (without clear_pending, which the mobile client never sends) it
   // never touches other pending jobs in a shared queue.
   "cancel_job",
+  // Read-only training surface: flow/model discovery + progress polling for the
+  // mobile Training tab (train_start/cancel stay agent-side for now).
+  "train_list_flows",
+  "train_status",
 ]);
 
 /** Lazily build ONE in-process MCP client wired to the full comfyui tool surface,

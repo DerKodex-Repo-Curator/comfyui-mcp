@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.39.0] - 2026-07-19
+
+### MCP
+
+#### Added
+- expose view_selected / viewport / errored-node tools (#238)
+
+
 ## [0.38.1] - 2026-07-18
 
 ### MCP

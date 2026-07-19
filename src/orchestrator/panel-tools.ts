@@ -418,6 +418,24 @@ export function buildPanelToolDefs(): PanelToolDef[] {
       async (_args, ctx) => ctx.call({ cmd: "graph_outline" }),
     ),
     def(
+      "panel_view_selected",
+      "What the user has SELECTED on the canvas right now. Call this FIRST whenever they say \"this node\", \"the selected one\", \"the highlighted node\", \"where did I get this from\", or otherwise point at something without giving an id — the selection IS the answer, and reading it costs one call instead of scanning the graph. Returns the full detail summary (id, type, title, widgets, inputs with sources, outputs, mode) for each selected node, plus `selected_count` and any selected groups/reroutes. If `selected_count` is 0, nothing is selected — ask the user to click the node rather than guessing. NEVER dump the whole graph to work out which node they mean. Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_view_selected" }),
+    ),
+    def(
+      "panel_view_nodes_in_viewport",
+      "The nodes the user can actually SEE — everything intersecting the current viewport (pan+zoom) of the canvas they're looking at. Use this to SCOPE your work to what's on their screen instead of reading a whole graph: when they say \"these nodes\", \"the ones here\", \"what am I looking at\", or when a graph is large and you only need the region in front of them. Returns the viewport rect in graph coordinates (x, y, width, height, zoom), `node_count` (whole graph) vs `in_view_count`, and the detail summary of each visible node. A node counts as visible if any part of it overlaps the viewport. On a big canvas this is dramatically cheaper than panel_graph_outline / panel_query_graph — prefer it when the user's framing is visual. Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_view_nodes_in_viewport" }),
+    ),
+    def(
+      "panel_view_errored_nodes",
+      "WHY IS THAT NODE RED? Returns every node flagged with an error on the live canvas AND the reason, which LiteGraph itself does not show — a red outline is just a boolean, so users legitimately see \"red node, no error message\". Each node comes back with its detail summary plus `reasons[]`: `missing_model` (the exact missing file, its models directory, the widget holding it, and a download URL when known), `validation` (per-input errors from the last run attempt), and `execution` (the last runtime failure). Also returns graph-level `missing_models`, `missing_node_types` (packs this install lacks), and `last_execution_error`. Call this whenever the user mentions a red/highlighted/erroring node, a failed run, or \"required models are missing\" — instead of guessing from widget values. If a node is flagged but no source explains it, that is reported too (it may be stale — re-running refreshes it). Read-only.",
+      {},
+      async (_args, ctx) => ctx.call({ cmd: "graph_view_errored_nodes" }),
+    ),
+    def(
       "panel_audit_prompt_director",
       "Audit Prompt Director on the LIVE canvas without changing it. Correlates Prompt Director/Producer/Auto/Context/Reference/Critic widget values and wiring with detected model-loader filenames, every LoRA loader's actual model/CLIP strengths, and Prompt Director's latest sanitized runtime edit plan, resolved Model Explorer metadata, warnings, exact final prompt, and critic verdict. Returns observations plus proposed panel_set_widget changes with requires_confirmation=true. Call this when Prompt Director nodes are present, before saying the model/LoRA setup is correct, or when an edit prompt is ignored. READ-ONLY: present useful findings to the user and ask before applying any recommendation unless they already explicitly asked you to fix it.",
       {},

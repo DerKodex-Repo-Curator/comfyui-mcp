@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.40.0] - 2026-07-19
+
 ### MCP
 
 #### Removed
@@ -31,6 +33,12 @@ All notable changes to this project are documented here. This project adheres to
   (`red_outline: false`).
 - docs: the panel's Read-tools table now lists `panel_view_selected` and
   `panel_view_nodes_in_viewport`, and describes the merged `panel_get_errors`.
+
+### MCP
+
+#### Changed
+- merge panel_view_errored_nodes into panel_get_errors (#240)
+
 
 ## [0.39.0] - 2026-07-19
 

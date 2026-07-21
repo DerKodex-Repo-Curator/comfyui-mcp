@@ -14,6 +14,7 @@ export type BackendId =
   | "codex"
   | "chatgpt"
   | "gemini"
+  | "antigravity"
   | "grok"
   | "glm"
   | "kimi"
@@ -231,6 +232,26 @@ export const GEMINI_CAPABILITIES: AgentCapabilities = {
   slashCommands: false,
   hooks: false,
   vision: true, // gemini-2.5 sees images; delivered as inline base64 image ContentBlocks
+};
+
+/** Capability descriptor for the Antigravity CLI backend (`agy`, issue #262) —
+ *  Google's official replacement for the individual-tier Gemini CLI subscription
+ *  path (Google AI Pro/Ultra). `agy` exposes no machine-readable event protocol,
+ *  only plain-text `-p` print mode + `--continue` conversation continuity — so
+ *  this is a spawn-per-turn adapter with honestly reduced capabilities:
+ *  streamingDeltas=true is the CLI's own progressive stdout (final answer text
+ *  only, no structured tool events), and vision=false (no documented -p image
+ *  input). Models come LIVE from `agy models` (no static catalog). */
+export const ANTIGRAVITY_CAPABILITIES: AgentCapabilities = {
+  persistentChannel: true, // spawn-per-turn, continuity via `agy --continue`
+  streamingDeltas: true, // progressive stdout of the final answer
+  interruptMidTurn: true, // kill the in-flight child tree; next turn continues
+  forkAtAnchor: false, // agy owns conversation storage; no per-turn anchor
+  inProcessMcp: false, // workspace .agents/mcp_config.json only
+  modelEnumeration: true, // `agy models` (live account catalog)
+  slashCommands: false,
+  hooks: false,
+  vision: false, // no documented image input in -p mode
 };
 
 /** Capability descriptor for the Grok CLI ACP backend (xAI / Grok Build).

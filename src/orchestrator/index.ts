@@ -59,6 +59,7 @@ import {
 } from "../services/panel-secrets.js";
 import { CodexBackend } from "./codex-backend.js";
 import { GeminiBackend, GEMINI_DEFAULT_MODEL } from "./gemini-backend.js";
+import { AntigravityBackend } from "./antigravity-backend.js";
 import { GrokBackend, GROK_DEFAULT_MODEL } from "./grok-backend.js";
 import { OllamaBackend, OLLAMA_SYSTEM_PROMPT, type OllamaBackendDeps } from "./ollama-backend.js";
 import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
@@ -1104,6 +1105,9 @@ export async function runPanelOrchestrator(): Promise<void> {
   // COMFYUI_MCP_GEMINI_MODEL (default gemini-2.5-pro). The model is applied at spawn
   // via the CLI `--model` flag (ACP exposes no per-session model setter).
   const geminiModel = process.env.COMFYUI_MCP_GEMINI_MODEL ?? GEMINI_DEFAULT_MODEL;
+  // Antigravity (`agy`, issue #262): no default on purpose — unset means the
+  // account's own default model; the live catalog comes from `agy models`.
+  const antigravityModel = process.env.COMFYUI_MCP_ANTIGRAVITY_MODEL;
   const grokModel = process.env.COMFYUI_MCP_GROK_MODEL ?? GROK_DEFAULT_MODEL;
   // Ollama (local LLMs, issue #97): the model is a local tag applied PER
   // REQUEST — switching live is free. Default = OUR FINE-TUNE,
@@ -1244,6 +1248,7 @@ export async function runPanelOrchestrator(): Promise<void> {
     "codex",
     "chatgpt",
     "gemini",
+    "antigravity",
     "grok",
     // Simple api-key providers (glm/kimi/moonshot) come from the registry.
     ...OPENAI_KEY_PROVIDER_IDS,
@@ -1490,6 +1495,14 @@ export async function runPanelOrchestrator(): Promise<void> {
         mcpServers: makeHttpBackendMcpServers(panelTabId),
       });
     }
+    if (backend === "antigravity") {
+      return new AntigravityBackend({
+        cwd: comfyuiPath ?? process.cwd(),
+        ...(antigravityModel ? { model: antigravityModel } : {}),
+        systemAppend: panelSystemAppend,
+        mcpServers: makeHttpBackendMcpServers(panelTabId),
+      });
+    }
     if (backend === "grok") {
       return new GrokBackend({
         cwd: comfyuiPath ?? process.cwd(),
@@ -1622,7 +1635,12 @@ export async function runPanelOrchestrator(): Promise<void> {
             ? new KimiBackend({ cwd: comfyuiPath ?? process.cwd(), model: kimiModel })
           : backend === "ollama"
             ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: ollamaModel, ...ollamaDeps() })
-            : backend === "grok"
+            : backend === "antigravity"
+            ? new AntigravityBackend({
+                cwd: comfyuiPath ?? process.cwd(),
+                ...(antigravityModel ? { model: antigravityModel } : {}),
+              })
+          : backend === "grok"
               ? new GrokBackend({ cwd: comfyuiPath ?? process.cwd(), model: grokModel })
               : backend === "openrouter"
                 ? new OllamaBackend({ cwd: comfyuiPath ?? process.cwd(), model: openrouterModel, ...openrouterDeps() })
@@ -2029,6 +2047,7 @@ export async function runPanelOrchestrator(): Promise<void> {
   function currentModelFor(backend: string): string | undefined {
     if (backend === "codex") return codexModel;
     if (backend === "gemini") return geminiModel;
+    if (backend === "antigravity") return antigravityModel;
     if (backend === "grok") return grokModel;
     if (backend === "ollama") return ollamaModel;
     if (backend === "openrouter") return openrouterModel;
@@ -2272,6 +2291,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       const isCx = backend === "codex";
       const isCg = backend === "chatgpt";
       const isGm = backend === "gemini";
+      const isAg = backend === "antigravity";
       const isGk = backend === "grok";
       // glm/kimi/moonshot share one registry-driven ack (label + ready + degraded).
       const reg = openAiKeyProvider(backend);
@@ -2332,6 +2352,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                 ? (chatgptModel ?? (models[0] as { value?: string }).value ?? "ChatGPT")
               : isGm
                 ? (geminiModel ?? (models[0] as { value?: string }).value ?? "Gemini")
+                : isAg
+                  ? (antigravityModel ?? (models[0] as { value?: string }).value ?? "Antigravity")
                 : isGk
                   ? (grokModel ?? (models[0] as { value?: string }).value ?? "Grok")
                 : isOl
@@ -2390,6 +2412,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                   ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your ChatGPT subscription (direct OAuth). Ask away.`
                 : isGm
                   ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Google account (Gemini Code Assist). Ask away.`
+                  : isAg
+                    ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Google AI subscription via Antigravity CLI. Note: agy turns show final answers only (no live tool progress). Ask away.`
                   : isGk
                     ? `🟢 comfyui-mcp agent ready — ${agentLabel} on your Grok (xAI) account. Ask away.`
                   : isOl
@@ -2418,6 +2442,8 @@ export async function runPanelOrchestrator(): Promise<void> {
                 ? "⚠️ The background agent isn't responding — ChatGPT direct OAuth couldn't start. Make sure ~/.codex/auth.json exists (run `codex login`), then Disconnect → Connect to retry."
               : isGm
                 ? "⚠️ The background agent isn't responding — the Gemini CLI couldn't start. Make sure the Gemini CLI is installed and signed in (run `gemini` once and complete the Google sign-in), then Disconnect → Connect to retry."
+                : isAg
+                  ? "⚠️ The background agent isn't responding — the Antigravity CLI couldn't answer `agy models`. Install it from https://antigravity.google, run `agy` once and complete the Google Sign-In, then Disconnect → Connect to retry."
                 : isGk
                   ? "⚠️ The background agent isn't responding — the Grok CLI couldn't start. Make sure Grok is installed and signed in (run `grok` once and complete the xAI sign-in), then Disconnect → Connect to retry."
                 : isOl

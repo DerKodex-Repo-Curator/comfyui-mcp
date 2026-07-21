@@ -203,6 +203,14 @@ of asking the ComfyUI host to spawn an orchestrator it can't run.)
 - **`CodexBackend`** — OpenAI Codex over the **`codex app-server`** JSON-RPC
   protocol (`@openai/codex`), on the ChatGPT subscription (`codex login`, no key).
 
+Further adapters follow the same port — Gemini CLI (ACP), **Antigravity
+(`agy`, the Google AI Pro/Ultra subscription path — install from
+[antigravity.google](https://antigravity.google) and run `agy` once to sign
+in)**, Grok, Kimi, GLM, Ollama/LM Studio/llama.cpp (local), OpenRouter, and
+any OpenAI-compatible endpoint. See
+[docs/backends](https://comfyui-mcp.artokun.io/docs/backends) for the full
+matrix.
+
 Both are optional dependencies, and the panel picks a **provider, not a port** —
 each backend runs its own orchestrator on its own loopback bridge port. A
 capability matrix lets the panel degrade gracefully (e.g. conversation-rollback is

@@ -20,8 +20,9 @@ panel (pick a provider) ⇄ loopback bridge ⇄ orchestrator (Claude · ChatGPT 
 
 ## Pick a provider, not a port
 
-The panel shows a **backend picker** — Claude / ChatGPT / Gemini / Grok /
-Kimi / GLM / Ollama / LM Studio / llama.cpp / OpenRouter / Custom endpoint
+The panel shows a **backend picker** — Claude / ChatGPT / Gemini /
+Antigravity / Grok / Kimi / GLM / Ollama / LM Studio / llama.cpp /
+OpenRouter / Custom endpoint
 chips (experimental providers like Copilot appear behind the experimental
 toggle). Clicking one connects that provider on the single shared orchestrator
 (one bridge port serves all providers; each panel tab picks its provider in
@@ -41,7 +42,20 @@ placeholder follows the active backend ("Ask Claude…" / "Ask Ollama…").
   `codex login`: the `chatgpt` backend reuses `~/.codex/auth.json` and talks
   to ChatGPT directly (no Codex process). If the ack says the auth file is
   missing, run `codex login` once.
-- **Gemini** — `gemini` — Google sign-in.
+- **Gemini** — `gemini` — Google sign-in. Note the free individual Google
+  login was retired 2026-06-18: the Gemini CLI backend now needs a
+  `GEMINI_API_KEY` or an enterprise/Code Assist account. Individual
+  subscribers: use **Antigravity** below.
+- **Antigravity (Google subscription)** — install the official Antigravity
+  CLI from [antigravity.google](https://antigravity.google), run `agy` once
+  and complete the Google Sign-In (AI Pro/Ultra and free tiers). The backend
+  drives `agy -p` per turn with `--continue` conversation continuity, reads
+  the live model catalog from `agy models`, and wires the ComfyUI + panel MCP
+  tools through a merge-safe workspace `.agents/mcp_config.json`. Reduced
+  capabilities by design (no documented machine-readable event stream): final
+  answer text streams in, but there's no per-tool progress and no image
+  input. `COMFYUI_MCP_ANTIGRAVITY_MODEL` pins a model,
+  `COMFYUI_MCP_ANTIGRAVITY_PATH` points at a non-standard install.
 - **Grok** — install the Grok CLI (xAI / Grok Build) and run `grok` once to
   sign in; the backend drives it in ACP mode. The panel also offers an
   in-panel OAuth sign-in row when Grok isn't ready.

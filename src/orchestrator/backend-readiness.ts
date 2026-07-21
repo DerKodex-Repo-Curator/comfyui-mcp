@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readOAuthStatus } from "../services/code-provider-auth.js";
+import { resolveAgyBin } from "./antigravity-backend.js";
 import type { OAuthStatusRecord } from "../services/panel-secrets.js";
 import { simpleKeyProvider } from "../services/openai-provider-registry.js";
 
@@ -196,6 +197,17 @@ export function backendReadiness(
     const geminiHome = process.env.GEMINI_CLI_HOME || home;
     const auth = fileExists(geminiHome, ".gemini", "oauth_creds.json");
     return { backend: "gemini", cli, auth, ready: cli && auth };
+  }
+  if (b === "antigravity") {
+    // Antigravity CLI (`agy`, issue #262) — Google subscription (AI Pro/Ultra).
+    // Auth lives in the system keyring, which we deliberately do NOT read
+    // (per #262: no token extraction) — so auth is UNKNOWN (null, don't nag)
+    // when the CLI is present; the real auth signal is the connect ack's
+    // `agy models` probe, which degrades with sign-in guidance when it fails.
+    // resolveAgyBin covers COMFYUI_MCP_ANTIGRAVITY_PATH, PATH, and the official
+    // installers' well-known locations (%LOCALAPPDATA%\agy\bin, ~/.local/bin).
+    const cli = !!resolveAgyBin(home);
+    return { backend: "antigravity", cli, auth: cli ? null : false, ready: cli };
   }
   if (b === "grok") {
     const cli = onPath(CLI_NAMES.grok);

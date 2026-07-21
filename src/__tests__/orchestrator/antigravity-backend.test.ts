@@ -373,6 +373,32 @@ describe("AntigravityBackend turns", () => {
     if (hoisted.procs[0]) expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
   });
 
+  it("an idle interrupt expires and does not cancel the next turn (stale-flag regression)", async () => {
+    hoisted.script.push({ stdout: ["fine"], exit: 0 });
+    const backend = new AntigravityBackend({ cwd: workDir });
+    await backend.interrupt(); // stray Stop while idle — arms with a 500ms expiry
+    await new Promise((r) => setTimeout(r, 650)); // let it expire (no turn started)
+    const events = await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: true, subtype: "end_turn" },
+    ]);
+    expect(hoisted.killed).toEqual([]);
+  });
+
+  it("rejects an over-32K prompt on Windows with a legible error instead of a cryptic spawn failure", async () => {
+    if (process.platform !== "win32") return; // preflight is win32-only
+    const backend = new AntigravityBackend({ cwd: workDir });
+    const events = await collect(
+      backend.run({ channel: channelOf([{ text: "x".repeat(31_000) }]) }),
+    );
+    expect(hoisted.spawns).toHaveLength(0); // never spawned
+    const err = events.find((e) => e.type === "error") as { message: string };
+    expect(err.message).toMatch(/too large/i);
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: false, subtype: "error" },
+    ]);
+  });
+
   it("prepare() fails fast with install guidance when agy is missing", async () => {
     delete process.env.COMFYUI_MCP_ANTIGRAVITY_PATH;
     const savedPath = process.env.PATH;

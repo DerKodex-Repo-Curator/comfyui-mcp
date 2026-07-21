@@ -259,6 +259,17 @@ export class AntigravityBackend implements AgentBackend {
   /** The in-flight per-turn child (interrupt/close kill its tree). */
   private child: AgyChild | null = null;
   private interrupted = false;
+  /** True from runTurn entry until settle — a turn is definitely in flight. */
+  private turnActive = false;
+  /** Expiry for an interrupt armed while NO turn was active. Two truths clash:
+   *  a Stop pressed right after Send must survive the pre-spawn window (the
+   *  03080bc bug — the turn is coming, just not visible to us yet), but a stray
+   *  Stop while genuinely idle must NOT stay armed and cancel the user's next
+   *  unrelated message minutes later. The backend can't see PanelAgent's queue
+   *  to tell the two apart, so an idle-armed interrupt self-expires after a
+   *  short grace: an imminent turn (Stop-after-Send) starts within it and
+   *  consumes the flag; nothing starting means it was a stray Stop. */
+  private idleInterruptExpiry: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   /** False until the first turn of a FRESH conversation completes; resumed
    *  sessions start true so every turn continues the latest conversation. */
@@ -404,7 +415,33 @@ export class AntigravityBackend implements AgentBackend {
     // channel before reaching runTurn), and clearing at turn START silently
     // discarded it — the turn then ran with nothing able to stop it. The flag is
     // cleared when a turn SETTLES instead, so it survives setup and the child
-    // assignment below acts on it.
+    // assignment below acts on it. A pending idle-armed interrupt is now
+    // definitely aimed at THIS turn — cancel its expiry so it's consumed here.
+    this.turnActive = true;
+    if (this.idleInterruptExpiry) {
+      clearTimeout(this.idleInterruptExpiry);
+      this.idleInterruptExpiry = null;
+    }
+
+    // Windows caps the whole CreateProcess command line at 32,767 chars, and the
+    // prompt rides argv. The panel system preamble alone is ~29K on the first
+    // turn, so a transcript replay / pasted workflow can blow past it — spawn
+    // then fails with a cryptic EINVAL/E2BIG. Preflight with a legible error.
+    if (process.platform === "win32") {
+      const cmdLen = bin.length + args.reduce((n, a) => n + a.length + 3, 0);
+      if (cmdLen > 30_000) {
+        this.turnActive = false;
+        yield {
+          type: "error",
+          message:
+            `This message is too large for the Antigravity CLI (${cmdLen} chars; Windows caps a command line at ~32K, and agy takes the prompt as an argument). ` +
+            "Send a shorter message, or start a fresh chat to drop replayed context.",
+        };
+        yield { type: "result", ok: false, subtype: "error" };
+        return;
+      }
+    }
+
     const queue: AgentEvent[] = [];
     let wake: (() => void) | null = null;
     let done = false;
@@ -510,8 +547,10 @@ export class AntigravityBackend implements AgentBackend {
       }
       // Clear the interrupt HERE (turn end), not at turn start — see the note
       // where the queue is set up. The flag has now been consumed to pick this
-      // turn's result, so the next turn starts clean.
+      // turn's result, so the next turn starts clean. turnActive closes with it:
+      // interrupts landing from now until the next runTurn are idle no-ops.
       this.interrupted = false;
+      this.turnActive = false;
       finish();
     };
     child.on("error", (err) => settle(null, err));
@@ -541,11 +580,25 @@ export class AntigravityBackend implements AgentBackend {
     // Set the flag FIRST and UNCONDITIONALLY. `this.child` is only assigned
     // after spawn() returns, so an interrupt landing in that window used to hit
     // the `if (!child) return` below, leave `interrupted` false, and never kill
-    // anything — the turn then ran to completion with nothing able to stop it.
-    // In the panel that is "hit Stop right after Send and the turn hangs
-    // forever"; in CI it was a 5s timeout in the interrupt test. run() re-checks
-    // this flag the moment it assigns the child, so a kill is never lost.
+    // anything — the turn then ran to completion with nothing able to stop it
+    // (the original 03080bc bug). run() re-checks this flag the moment it
+    // assigns the child, so a kill is never lost.
     this.interrupted = true;
+    if (this.idleInterruptExpiry) clearTimeout(this.idleInterruptExpiry);
+    this.idleInterruptExpiry = null;
+    if (!this.turnActive) {
+      // Armed while NO turn was in flight: either a Stop racing its own turn's
+      // startup (honor it — a turn starts within ms and consumes the flag) or a
+      // stray idle Stop (PanelAgent interrupts unconditionally, e.g. rewind).
+      // Self-expire so the stray case can't linger and spuriously cancel the
+      // user's NEXT message (the post-03080bc poisoning regression).
+      const t = setTimeout(() => {
+        this.idleInterruptExpiry = null;
+        if (!this.turnActive) this.interrupted = false;
+      }, 500);
+      t.unref?.();
+      this.idleInterruptExpiry = t;
+    }
     const child = this.child;
     if (!child) return; // spawn window — run() kills it as soon as it exists
     killProcessTree(child.pid);

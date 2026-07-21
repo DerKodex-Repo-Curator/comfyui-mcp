@@ -188,9 +188,13 @@ export function comfyuiPortExposed(pod: RunpodPod): boolean {
  *  RUNPOD_GPU_TYPES (comma-separated) for other budgets/regions. */
 export const RUNPOD_DEFAULT_GPU_TYPES: string[] = (
   process.env.RUNPOD_GPU_TYPES?.split(",").map((s) => s.trim()).filter(Boolean) || [
+    // Ordered by rough preference; createPod tries each (× COMMUNITY then SECURE)
+    // until one has capacity, so a crunch on one card falls through to the next.
     "NVIDIA GeForce RTX 4090",
-    "NVIDIA RTX A5000",
+    "NVIDIA RTX A6000",
+    "NVIDIA RTX PRO 4500 Blackwell",
     "NVIDIA A40",
+    "NVIDIA RTX A5000",
   ]
 );
 

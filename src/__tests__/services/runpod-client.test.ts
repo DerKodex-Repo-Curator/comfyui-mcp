@@ -65,7 +65,14 @@ describe("createPod (GPU fallback)", () => {
   it("throws a descriptive error listing every GPU tried when all fail", async () => {
     global.fetch = vi.fn(async () => gqlResponse({ errors: [{ message: "no capacity" }] })) as unknown as typeof fetch;
     await expect(createPod({ gpuTypeIds: ["GPU-A", "GPU-B"] })).rejects.toThrow(/GPU-A[\s\S]*GPU-B/);
-    expect(global.fetch).toHaveBeenCalledTimes(2);
+    // 2 GPU types × 2 cloud types (COMMUNITY then SECURE) = 4 attempts.
+    expect(global.fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("pins the cloud type when one is given (no SECURE fallback)", async () => {
+    global.fetch = vi.fn(async () => gqlResponse({ errors: [{ message: "no capacity" }] })) as unknown as typeof fetch;
+    await expect(createPod({ gpuTypeIds: ["GPU-A"], cloudType: "SECURE" })).rejects.toThrow(/SECURE\/GPU-A/);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
   it("sends our template id + community cloud + the ComfyUI port in the deploy input", async () => {

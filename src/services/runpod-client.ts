@@ -192,7 +192,7 @@ export interface RunpodCreateOptions {
   /** GPU types to try in order (default RUNPOD_DEFAULT_GPU_TYPES). */
   gpuTypeIds?: string[];
   gpuCount?: number; // default 1
-  /** COMMUNITY (cheaper, default) or SECURE. */
+  /** Pin a cloud type. Omit to try COMMUNITY (cheaper) then SECURE (reliable). */
   cloudType?: "COMMUNITY" | "SECURE";
   name?: string; // default "comfyui-mcp"
   templateId?: string; // default RUNPOD_TEMPLATE_ID (our image)
@@ -200,49 +200,60 @@ export interface RunpodCreateOptions {
   volumeInGb?: number; // default 60 (matches our template; /workspace)
 }
 
-/** Deploy a fresh on-demand pod from our template. Tries each GPU type until one
- *  has capacity; throws a descriptive error listing what RunPod rejected if none
- *  do. The returned pod is freshly created (runtime null — it still needs to boot;
- *  follow with getPod/runpod_pod_connect which waits for ComfyUI). */
+async function deployOnce(
+  cloudType: "COMMUNITY" | "SECURE",
+  gpuTypeId: string,
+  opts: RunpodCreateOptions,
+): Promise<RunpodPod | null> {
+  const data = await runpodGql<{ podFindAndDeployOnDemand: RunpodPod | null }>(
+    `mutation Deploy($input: PodFindAndDeployOnDemandInput!) {
+       podFindAndDeployOnDemand(input: $input) {
+         id name desiredStatus costPerHr machine { gpuDisplayName }
+       }
+     }`,
+    {
+      input: {
+        cloudType,
+        gpuCount: opts.gpuCount ?? 1,
+        gpuTypeId,
+        templateId: opts.templateId ?? RUNPOD_TEMPLATE_ID,
+        name: opts.name ?? "comfyui-mcp",
+        containerDiskInGb: opts.containerDiskInGb ?? 20,
+        volumeInGb: opts.volumeInGb ?? 60,
+        volumeMountPath: "/workspace",
+        // Guarantee ComfyUI is reachable through RunPod's HTTP proxy even if
+        // the template's port config drifts.
+        ports: `${RUNPOD_COMFYUI_PORT}/http`,
+      },
+    },
+  );
+  const pod = data.podFindAndDeployOnDemand;
+  return pod?.id ? ({ ...pod, runtime: pod.runtime ?? null } as RunpodPod) : null;
+}
+
+/** Deploy a fresh on-demand pod from our template. Community GPU capacity is
+ *  spotty, so unless a cloud type is pinned we try COMMUNITY (cheap) across each
+ *  GPU type, then SECURE (reliable, pricier) — the first slot with capacity wins,
+ *  so one-tap deploy survives community supply constraints. Throws a descriptive
+ *  error listing what RunPod rejected if nothing is available. The returned pod
+ *  is fresh (runtime null — still booting; follow with getPod/runpod_pod_connect). */
 export async function createPod(opts: RunpodCreateOptions = {}): Promise<RunpodPod> {
   const gpuTypeIds = opts.gpuTypeIds?.length ? opts.gpuTypeIds : RUNPOD_DEFAULT_GPU_TYPES;
+  const cloudTypes: Array<"COMMUNITY" | "SECURE"> = opts.cloudType ? [opts.cloudType] : ["COMMUNITY", "SECURE"];
   const attempts: string[] = [];
-  for (const gpuTypeId of gpuTypeIds) {
-    try {
-      const data = await runpodGql<{ podFindAndDeployOnDemand: RunpodPod | null }>(
-        `mutation Deploy($input: PodFindAndDeployOnDemandInput!) {
-           podFindAndDeployOnDemand(input: $input) {
-             id name desiredStatus costPerHr machine { gpuDisplayName }
-           }
-         }`,
-        {
-          input: {
-            cloudType: opts.cloudType ?? "COMMUNITY",
-            gpuCount: opts.gpuCount ?? 1,
-            gpuTypeId,
-            templateId: opts.templateId ?? RUNPOD_TEMPLATE_ID,
-            name: opts.name ?? "comfyui-mcp",
-            containerDiskInGb: opts.containerDiskInGb ?? 20,
-            volumeInGb: opts.volumeInGb ?? 60,
-            volumeMountPath: "/workspace",
-            // Guarantee ComfyUI is reachable through RunPod's HTTP proxy even if
-            // the template's port config drifts.
-            ports: `${RUNPOD_COMFYUI_PORT}/http`,
-          },
-        },
-      );
-      const pod = data.podFindAndDeployOnDemand;
-      if (pod?.id) {
-        // Ensure the runtime shape is present (deploy returns it null).
-        return { ...pod, runtime: pod.runtime ?? null } as RunpodPod;
+  for (const cloudType of cloudTypes) {
+    for (const gpuTypeId of gpuTypeIds) {
+      try {
+        const pod = await deployOnce(cloudType, gpuTypeId, opts);
+        if (pod) return pod;
+        attempts.push(`${cloudType}/${gpuTypeId}: no capacity available`);
+      } catch (err) {
+        attempts.push(`${cloudType}/${gpuTypeId}: ${err instanceof Error ? err.message : String(err)}`);
       }
-      attempts.push(`${gpuTypeId}: no capacity available`);
-    } catch (err) {
-      attempts.push(`${gpuTypeId}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   throw new Error(
-    `Could not deploy a pod on any of [${gpuTypeIds.join(", ")}]. RunPod reported:\n` +
+    `Could not deploy a pod on any of [${gpuTypeIds.join(", ")}] in ${cloudTypes.join("/")}. RunPod reported:\n` +
       attempts.map((a) => `  • ${a}`).join("\n") +
       `\nTry again shortly (capacity fluctuates), set RUNPOD_GPU_TYPES to other GPUs, ` +
       `or deploy from the console with runpod_deploy_link.`,

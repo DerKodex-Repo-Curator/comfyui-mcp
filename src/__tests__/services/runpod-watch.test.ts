@@ -41,7 +41,7 @@ describe("runpod-watch — status broadcast", () => {
   it("broadcasts a status frame for the watched pod (change-only)", async () => {
     getPodMock.mockResolvedValue(runningPod());
     const frames: RunpodStatusFrame[] = [];
-    const w = createRunpodWatcher({ push: (f) => frames.push(f as RunpodStatusFrame), comfyuiIdle: () => false, idleStopMinutes: 0 });
+    const w = createRunpodWatcher({ push: (f) => frames.push(f as RunpodStatusFrame), comfyuiIdle: () => false, renderingOnPod: () => true, idleStopMinutes: 0 });
     w.watch("pod1");
     await w.poll(); // watch() also kicks one poll; this is a second, identical → no new frame
     await Promise.resolve();
@@ -59,7 +59,7 @@ describe("runpod-watch — status broadcast", () => {
   it("clears the frame on unwatch", async () => {
     getPodMock.mockResolvedValue(runningPod());
     const frames: RunpodStatusFrame[] = [];
-    const w = createRunpodWatcher({ push: (f) => frames.push(f as RunpodStatusFrame), comfyuiIdle: () => false, idleStopMinutes: 0 });
+    const w = createRunpodWatcher({ push: (f) => frames.push(f as RunpodStatusFrame), comfyuiIdle: () => false, renderingOnPod: () => true, idleStopMinutes: 0 });
     w.watch("pod1");
     await Promise.resolve();
     w.unwatch();
@@ -69,7 +69,7 @@ describe("runpod-watch — status broadcast", () => {
 
   it("unwatches when the pod vanishes", async () => {
     getPodMock.mockResolvedValue(null);
-    const w = createRunpodWatcher({ push: () => {}, comfyuiIdle: () => false, idleStopMinutes: 0 });
+    const w = createRunpodWatcher({ push: () => {}, comfyuiIdle: () => false, renderingOnPod: () => true, idleStopMinutes: 0 });
     w.watch("gone");
     await w.poll();
     expect(w.watchedPodId()).toBeNull();
@@ -84,6 +84,7 @@ describe("runpod-watch — idle auto-stop", () => {
     const w = createRunpodWatcher({
       push: (f) => frames.push(f as RunpodStatusFrame),
       comfyuiIdle: () => true, // always idle
+      renderingOnPod: () => true, // connected to the pod
       idleStopMinutes: 15,
       now: c.now,
     });
@@ -106,7 +107,7 @@ describe("runpod-watch — idle auto-stop", () => {
     getPodMock.mockResolvedValue(runningPod());
     const c = clock();
     let idle = false;
-    const w = createRunpodWatcher({ push: () => {}, comfyuiIdle: () => idle, idleStopMinutes: 15, now: c.now });
+    const w = createRunpodWatcher({ push: () => {}, comfyuiIdle: () => idle, renderingOnPod: () => true, idleStopMinutes: 15, now: c.now });
     w.watch("pod1");
     idle = true; await w.poll(); // idle starts
     c.advance(10 * 60_000);
@@ -122,12 +123,36 @@ describe("runpod-watch — idle auto-stop", () => {
     getPodMock.mockResolvedValue(runningPod());
     const c = clock();
     const frames: RunpodStatusFrame[] = [];
-    const w = createRunpodWatcher({ push: (f) => frames.push(f as RunpodStatusFrame), comfyuiIdle: () => true, idleStopMinutes: 0, now: c.now });
+    const w = createRunpodWatcher({ push: (f) => frames.push(f as RunpodStatusFrame), comfyuiIdle: () => true, renderingOnPod: () => true, idleStopMinutes: 0, now: c.now });
     w.watch("pod1");
     await w.poll();
     c.advance(60 * 60_000); // an hour idle
     await w.poll();
     expect(stopPodMock).not.toHaveBeenCalled();
     expect(frames.at(-1)?.autostop_minutes).toBeNull();
+  });
+
+  // Regression (live-caught): a pod we WATCH but haven't connected to must never
+  // auto-stop on the LOCAL rig's idleness — else a booting pod gets killed at the
+  // timeout while we wait for it. Only a pod we're rendering on accrues idle time.
+  it("does NOT auto-stop a watched pod we're not rendering on (local idle)", async () => {
+    getPodMock.mockResolvedValue(runningPod());
+    const c = clock();
+    const frames: RunpodStatusFrame[] = [];
+    const w = createRunpodWatcher({
+      push: (f) => frames.push(f as RunpodStatusFrame),
+      comfyuiIdle: () => true, // the LOCAL ComfyUI is idle
+      renderingOnPod: () => false, // …but we haven't connected to the pod
+      idleStopMinutes: 15,
+      now: c.now,
+    });
+    w.watch("pod1");
+    await w.poll();
+    c.advance(30 * 60_000); // half an hour of local idle
+    await w.poll();
+    expect(stopPodMock).not.toHaveBeenCalled(); // pod stays up while it boots
+    expect(w.watchedPodId()).toBe("pod1");
+    expect(frames.at(-1)?.idle_seconds).toBeNull(); // no idle accrued against the pod
+    expect(frames.at(-1)?.autostop_in_seconds).toBeNull();
   });
 });

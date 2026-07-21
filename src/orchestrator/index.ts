@@ -3329,6 +3329,11 @@ export async function runPanelOrchestrator(): Promise<void> {
       const s = QueueMonitor.snapshot();
       return s.connected && !s.running && s.queueDepth === 0;
     },
+    // Idle auto-stop only applies to a pod we're actually rendering on: the active
+    // ComfyUI target is that pod's proxy (its id appears in the URL). A pod we
+    // merely watch while it boots stays local-targeted, so this is false and it is
+    // never auto-stopped on the local rig's idleness.
+    renderingOnPod: (podId) => !isTargetingLocal() && getComfyUIBaseUrl().includes(podId),
     idleStopMinutes: runpodIdleStopMinutes,
   });
 

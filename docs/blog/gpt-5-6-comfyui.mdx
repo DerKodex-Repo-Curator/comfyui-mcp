@@ -1,0 +1,151 @@
+---
+title: "GPT-5.6 lands in the ComfyUI agent — Sol, Terra, and Luna on your ChatGPT subscription"
+description: "comfyui-mcp v0.41.0 brings OpenAI's GPT-5.6 family — Sol, Terra, and Luna — to the ComfyUI Agent Panel through the Codex integration, on your own ChatGPT subscription with no API key. The new max and ultra reasoning efforts, a live account-aware model catalog that only shows what YOUR plan can run, why hiding a deprecated model is not the same as force-switching it, and the SDK pin it took to survive a fast-moving provider."
+keywords:
+  - ComfyUI GPT-5.6
+  - GPT-5.6 Sol Terra Luna
+  - ComfyUI ChatGPT agent
+  - ComfyUI Codex
+  - ultra reasoning effort
+  - ComfyUI MCP
+  - ComfyUI AI agent
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · Codex · GPT-5.6 · provider tracking_
+
+Back in June, we wrote that the [Agent Panel](/panel) lets you [pick a provider,
+not a port](/blog/comfyui-agent-claude-or-chatgpt): the same canvas-driving agent
+runs on either Claude or ChatGPT, on your own subscription, no API keys. The
+promise implicit in that design is that when a provider ships a new frontier
+family, you shouldn't have to do anything — the same panel just offers the new
+models.
+
+This week that promise got tested. OpenAI shipped the **GPT-5.6 family** —
+**Sol** (the flagship), **Terra** (the balanced middle), and **Luna** (fast, and
+the cheapest of the three) — and as of **comfyui-mcp v0.41.0**, all three are in
+the panel's model picker via the Codex integration. Same chip, same Connect
+button, same subscription billing. Pick GPT-5.6 Sol and ask it to build you a
+WAN video graph.
+
+Getting there was not just "add three strings to a list." The interesting parts
+are a new kind of reasoning effort, a catalog that has to be honest about what
+*your* account can run, and a dependency pin that only exists because a user
+filed a great bug report. That's what this post is about.
+
+## Ultra is not a bigger dial
+
+The Codex effort scale used to top out at `xhigh`. GPT-5.6 extends it with two
+new levels: **`max`**, available to all 5.6 users in Codex, and **`ultra`** —
+and ultra is worth pausing on, because it is not just a longer thinking budget.
+Per OpenAI's GA post, an ultra-effort turn **coordinates four agents in parallel
+by default**: the model fans the problem out, works branches concurrently, and
+merges. For the kind of request the panel gets — "audit this 60-node graph and
+fix whatever's mis-wired" — that's a materially different execution mode, not a
+notch on the same dial.
+
+The panel's effort dropdown honors **per-model ceilings**, and those ceilings
+come from the provider's live `model/list`, not from our assumptions: **Sol and
+Terra accept effort through `ultra`; Luna tops out at `max`.** The dropdown you
+see is the intersection of the panel's scale and what the selected model
+actually supports — pick Luna and `ultra` simply isn't offered, rather than
+being offered and rejected at turn time.
+
+One pleasant simplification fell out of this: the panel's cross-provider effort
+mapping used to downmap Claude's `max` to Codex's `xhigh` when you switched
+providers, because Codex had no `max`. Now it does — `max` maps to `max`,
+natively.
+
+## The catalog is live, and it's about *your* account
+
+The bigger change in 0.41.0 is philosophical: the model picker stopped being a
+hardcoded list and became a **live, account-aware catalog**.
+
+The Codex backend asks the `codex app-server` for `model/list` on connect, and
+that RPC is account-aware — a given ChatGPT plan only sees the models that plan
+can actually run. We learned to want this the hard way: the old static list once
+advertised a model a ChatGPT-plan account couldn't use, and picking it produced
+a 400 on *every turn*. A picker that offers you something unrunnable is worse
+than a shorter picker.
+
+With GPT-5.6 out, the live catalog gained a policy layer: **pre-5.6 models are
+deprecated, and the picker hides them whenever your account has the 5.6
+family**. If your account hasn't been migrated yet and has no 5.6 models, you
+keep your full existing catalog — the panel never bricks an account that lags
+behind the provider's rollout.
+
+### Hidden is not unrunnable
+
+There's a design decision buried in that filter worth making explicit. Hiding a
+deprecated model from the picker and *forcing you off it* are two different
+things, and 0.41.0 deliberately does only the first.
+
+Internally the backend keeps **two views** of the catalog. The full,
+unfiltered account catalog answers the question "can this account legally run
+model X?" — and that's what every turn's model resolution clamps against. The
+picker gets the deprecation-filtered view. So if you have a tab **pinned** to a
+pre-5.6 model that your account can still run, it keeps running on that model.
+You won't find it in the dropdown for *new* picks, but your existing choice is
+respected until the provider itself pulls the model. Hiding a model from new
+selections must never force-switch a still-runnable session mid-conversation —
+that's the invariant.
+
+The one place we *do* switch you automatically is when there's no legal
+alternative: the ChatGPT-direct backend's default model moved from
+`gpt-5.4-mini` — now retired by OpenAI, not merely deprecated — to
+**`gpt-5.6-luna`**, its natural successor on the fast-and-cheap end. Saved tabs
+that had the old default stored migrate automatically; without that, a tab
+would have kept its retired model selected and 400'd every turn while looking
+perfectly configured.
+
+## The pin: a compatibility war story
+
+Now the part where a fast-moving provider bites back.
+
+comfyui-mcp bundles the Codex SDK (`@openai/codex`) as an optional dependency so
+the ChatGPT backend works with zero extra installs. For 0.41.0 that bundle is
+pinned to **`0.145.0-alpha.24`** — an alpha, pinned exactly, on purpose.
+
+The stable release at the time had a crash with a very specific shape: if
+**Codex Desktop 0.145** had already written its model cache to disk, the stable
+SDK would crash while *renewing* that cache, because the newer cache entries
+carry a field — `supports_reasoning_summaries` — that the stable release didn't
+know and refused to tolerate. So the failure mode wasn't "new feature missing";
+it was "having OpenAI's own desktop app installed breaks the panel's backend."
+Two official components of the same provider, one version apart, sharing state
+on disk and disagreeing about its schema.
+
+We would likely have chased this for days if not for the field report in
+[GitHub issue #241](https://github.com/artokun/comfyui-mcp/issues/241), which
+was the kind of bug report maintainers dream about: the exact crash, the exact
+Codex Desktop version, the observation that it only happened on machines where
+Desktop had touched the cache, and the verification that the alpha pairing
+worked. The pin that shipped is the **field-verified** pairing, not a guess.
+Thank you — reports like that are how a small project keeps up with a provider
+that ships weekly.
+
+The general lesson is the real content here. Tracking a frontier provider means
+living with three moving parts — the models, the SDK, and the provider's *other*
+software on the same machine — that don't version in lockstep. The answers that
+held up: pin exactly what you verified, derive capabilities from live endpoints
+instead of hardcoding them, and always leave a path for accounts and binaries
+that are one step behind (the static fallback catalog still exists for older
+CLIs that can't serve `model/list` at all — and since such a binary can't run
+any 5.6 model, that fallback keeps a runnable pre-5.6 escape hatch).
+
+## What you do with it
+
+Nothing new — that's the point. Sign in with `codex login`, open the Agent tab,
+pick the ChatGPT chip, and the picker now shows Sol, Terra, and Luna with the
+effort ceilings each one really has. The same `panel_*` live-canvas tools, the
+same model-family knowledge, the same cost guardrail, the same Ctrl+Z — now with
+a flagship that can fan out four agents on your gnarliest graph, and a fast
+default that's the cheapest way yet to have an agent wire your nodes. You
+picked a provider; the port kept up.
+
+---
+
+Drive ComfyUI from an autonomous agent on your own Claude **or** ChatGPT
+subscription: install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and
+add the [Agent Panel](/panel) — see [Backends / providers](/backends) for the
+full capability matrix. Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

@@ -1,0 +1,181 @@
+---
+title: "The 405 that wasn't: one Manager API, three dialects, two excellent bug reports"
+description: "comfyui-mcp installs custom nodes through ComfyUI-Manager's HTTP API — which turned out to exist in three incompatible dialects. A debugging war story in three acts: the released 3.x Manager vs the pip v4 package, a Docker flag that swaps the server under your feet, and the aiohttp catchall that makes every wrong route answer 405 Method Not Allowed instead of 404."
+keywords:
+  - ComfyUI-Manager API 405
+  - ComfyUI-Manager v4 vs v3
+  - install custom node 405 Method Not Allowed
+  - comfyui_manager pip package
+  - enable-manager-legacy-ui
+  - ComfyUI Docker custom node install fails
+  - ComfyUI-Manager queue task endpoint
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · debugging · compatibility · war stories_
+
+`405 Method Not Allowed` has a precise meaning: the route exists, but not for
+that HTTP method. You sent a POST where only GET is registered. Every developer
+who has ever read an HTTP status table knows this, and that knowledge is exactly
+what made this bug take two releases and two issues to kill. Because in a stock
+ComfyUI, **405 doesn't mean what you think it means** — and the API we were
+speaking to turned out to exist in three mutually incompatible dialects, none of
+which announce themselves.
+
+This is the story of [#116](https://github.com/artokun/comfyui-mcp/issues/116)
+and [#235](https://github.com/artokun/comfyui-mcp/issues/235), in three acts.
+
+## Background: how comfyui-mcp installs nodes
+
+When the agent (or you) calls `install_custom_node` or applies a pack manifest,
+comfyui-mcp talks to **ComfyUI-Manager's HTTP API** on the running ComfyUI. On a
+remote or Dockerized ComfyUI that's the *only* option — the MCP host can't touch
+the remote filesystem, so Manager's queue is the install engine. We POST a task,
+poll queue status, done. Simple, as long as the API on the other end is the API
+you think it is.
+
+## Act 1: the branch that wasn't main (#116)
+
+Version 0.24.2 spoke what we believed was the Manager API: a unified task
+envelope, `POST /v2/manager/queue/task` with a `kind` and `params`. It worked on
+the RunPod image. Then issue #116 arrived from a user running comfyui-mcp
+against a bone-stock ComfyUI-Manager V3.41 — the current `main` branch — and
+every install died with:
+
+```json
+{
+  "error": "NODE_MANAGEMENT_ERROR",
+  "message": "ComfyUI-Manager API 405 Method Not Allowed for /v2/manager/queue/task",
+  "details": { "status": 405, "body": "405: Method Not Allowed" }
+}
+```
+
+The report itself was the fix's first half. The reporter didn't stop at the
+error — they read our compiled `dist/`, quoted the exact `queueManagerTask()`
+call, then went and **inventoried every branch of ComfyUI-Manager upstream**:
+the released `main` (3.x, what Manager installs by default as a custom node)
+serves per-operation routes — `POST /manager/queue/install`, `/reinstall`,
+`/fix`, `GET /manager/queue/status` — and has **no `/v2/` queue routes at all**.
+The unified `/v2/manager/queue/task` envelope exists only on the `manager-v4`
+lineage, the pip `comfyui_manager` package that our RunPod image happens to
+bake. They even cross-checked the bundled `openapi.yaml` to prove `main`
+documents none of it. That's an excellent bug report: not "install is broken,"
+but "you implemented branch B of a two-branch upstream; here is the route table
+of branch A."
+
+So: two dialects in the wild. Same project, same queue engine, different URL
+scheme, different body shapes. The 0.24.3 fix was runtime **detection** — probe
+`GET /v2/manager/queue/status`; if it answers, speak v4's task envelope; if not,
+fall back to `GET /manager/queue/status` and speak 3.x's per-operation routes.
+Probe once per target, cache, adapt. Closed, shipped, tested against both.
+
+Two dialects. We were one short.
+
+## Act 2: the flag that swaps the server (#235)
+
+Fast-forward two dozen releases. Issue #235: a Docker user running the popular
+`yanwk/comfyui-boot` image, pip Manager **4.2.2** confirmed installed
+(`pip install -U comfyui_manager` → "Requirement already satisfied: 4.2.2"),
+comfyui-mcp in `--comfyui-url` remote mode. Manager v4. Our v4 dialect. And
+every node in a pack manifest failing with — you can say it with me —
+`405 Method Not Allowed for /v2/manager/queue/task`.
+
+This should have been impossible. Detection probed `GET
+/v2/manager/queue/status`, got a real queue status back, and correctly
+concluded "v4 lineage." Then the very next POST to a sibling route on the same
+prefix bounced. The report was, again, excellent — full compose file, the exact
+pip version, their start script, the raw tool output for all 19 failures — a
+complete repro of a configuration we didn't know existed.
+
+The twist lives in the image's entrypoint: `yanwk/comfyui-boot` hardcodes
+`--enable-manager-legacy-ui`. That flag doesn't just change the frontend. It
+makes the pip v4 package **load its bundled 3.x server instead of its own** —
+mounted under the `/v2` prefix. So the surface is a chimera: `GET
+/v2/manager/queue/status` exists (that's why detection said "v4"), but `POST
+/v2/manager/queue/task` does not, because the code actually serving `/v2/...`
+is the 3.x engine that never had a task route. Mutations in that mode go
+through `POST /v2/manager/queue/batch` with 3.x body shapes —
+`{ install: [body], uninstall: [body], ... }`.
+
+A third dialect: v4's address, 3.x's grammar.
+
+## Interlude: why it's never a 404
+
+Here's the mechanic that made both acts maddening, and the reason the title of
+this post is what it is. ComfyUI's frontend registers a **catchall GET route**
+— it has to, so the SPA can serve `index.html` for any path. In aiohttp, that
+means *every* path in the server has at least one method registered: GET. And
+aiohttp's router, on finding a path that exists but not for your method,
+returns **405 Method Not Allowed** — never 404.
+
+So an unregistered POST to a ComfyUI server can *never* 404. `POST
+/v2/manager/queue/task` on a server that has no such handler doesn't say "no
+such route"; it says "route exists, wrong method," because the SPA catchall
+technically matches the path for GET. Every instinct 405 triggers — "check my
+HTTP verb," "maybe a proxy is rewriting POST to GET" — is a decoy. On a Manager
+route, **405 means wrong dialect, not wrong method**. Once you know that, both
+issues read instantly; until you know it, the status code is actively lying to
+you.
+
+The catchall has one more trick: it answers unknown GETs with `200` and a page
+of HTML. Which means a naive "did `GET .../queue/status` respond OK?" probe can
+be fooled by any SPA into detecting a Manager that isn't there.
+
+## Act 3: ask, don't infer
+
+The [0.38.1](https://github.com/artokun/comfyui-mcp/blob/main/CHANGELOG.md) fix
+has three parts, all in
+[`src/services/node-management.ts`](https://github.com/artokun/comfyui-mcp/blob/main/src/services/node-management.ts):
+
+1. **A truthful discriminator.** Both pip modes — normal v4 and legacy-UI —
+   register `GET /v2/manager/is_legacy_manager_ui` and answer honestly. When
+   the `/v2` status probe succeeds, detection now asks that question instead of
+   assuming. `is_legacy_manager_ui: true` → speak the **batch** dialect
+   (`POST /v2/manager/queue/batch`, 3.x bodies under operation keys); route
+   missing (older pip) or `false` → the normal v4 task envelope. No more
+   inferring the server from the shape of its front door.
+
+2. **A payload guard.** A probe response only counts as a Manager if it
+   actually *looks like* a queue status — `total_count` is a number or
+   `is_processing` is a boolean. A catchall's `200` with a page of HTML no
+   longer masquerades as a Manager API. (`looksLikeQueueStatus()` — four lines
+   that close the whole SPA-spoofing class.)
+
+3. **The third dialect, spoken natively.** `"v2-batch"` joins `"v2"` and
+   `"legacy"` as a first-class `ManagerApi` value, with the dialect taxonomy
+   documented right above the detection code — "Three dialects in the wild
+   (issue #116 found the second; #235 the third)" — so the next act, if there
+   is one, starts with a map.
+
+## What this actually taught us
+
+The uncomfortable lesson: at no point was the *documented* API wrong. The v4
+openapi described v4. The 3.x routes did what 3.x said. Every server was
+behaving exactly as its authors intended. The bug lived entirely in the gap
+between "the API" and **the set of servers actually answering that port in the
+field** — a released custom-node branch, a pip package, and a pip package
+wearing its predecessor's engine because a Docker image someone else maintains
+passes a flag nobody talks about.
+
+When you integrate with an ecosystem, you don't integrate with the docs. You
+integrate with every version, fork, branch, and startup flag that exists on
+users' machines — including combinations the upstream authors would tell you
+are unusual. **Detection beats assumption**, and detection itself has to be
+paranoid: probe, then *validate the payload*, then ask a discriminator that
+can't lie, because a catchall route will happily 200 your probe and 405 your
+payload.
+
+And the other lesson, the one worth ending on: both acts were solved in a
+single release cycle each, and neither fix started with our test suite. They
+started with two excellent bug reports — one that inventoried an upstream's
+branches and cross-checked its openapi against our compiled output, one that
+shipped a byte-for-byte reproducible Docker environment. A user who tells you
+*which server is actually answering* is worth more than any amount of testing
+against the servers you already knew about. Write reports like that, and
+maintainers will move mountains for you. We did it twice.
+
+---
+
+If you hit a `405` from a Manager route, you now know what it means — and
+[0.38.1+](https://github.com/artokun/comfyui-mcp) already speaks all three
+dialects. Found a fourth? File it (with a repro like these two, please) at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

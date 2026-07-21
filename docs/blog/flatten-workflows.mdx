@@ -1,0 +1,196 @@
+---
+title: "Untangling Workflow Spaghetti: Flatten Get/Set Buses and Use-Everywhere Links Without Wrecking the Layout"
+description: "Community ComfyUI workflows arrive as 128-node graphs wired through rgthree Get/Set buses, Reroutes, and cg-use-everywhere broadcasts. Three new tools — panel_strip_workflow, panel_slice_workflow, and panel_flatten_workflow — resolve the virtual wiring into real links so agents (and humans) can actually read them. The headliner flattens the live canvas in place while preserving every pixel of the author's layout."
+keywords:
+  - ComfyUI flatten workflow
+  - rgthree Get Set nodes
+  - cg-use-everywhere links
+  - ComfyUI workflow spaghetti
+  - ComfyUI Reroute cleanup
+  - comfyui-mcp panel agent
+  - ComfyUI workflow to API format
+  - litegraph groups layout
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · panel · workflows · agent · dev-log_
+
+Download any serious community workflow — a WAN pipeline, an LTX video director,
+one of those "everything" templates — and open it. You'll find **128 nodes**, and
+almost none of them visibly connected. The wiring runs through **rgthree Get/Set
+nodes** (named buses: a `Set_MODEL` over here, three `Get_MODEL`s scattered across
+the canvas), through chains of **Reroutes**, and through
+**cg-use-everywhere** senders that broadcast a model or a seed to every matching
+input *with no visible wire at all*.
+
+For the author, this is great. Buses keep a huge graph editable; broadcasts kill
+forty redundant wires. For a **reader** — and especially for an **agent** — it's
+opaque. Ask "what feeds this sampler's model input?" and the honest answer is: a
+`Get_MODEL` node, which matches a `Set_MODEL` node by string, which is fed by a
+Reroute, which… The graph you can *see* is not the graph that *runs*.
+
+The [Panel](/panel) agent kept hitting this wall. It can read the canvas, edit
+nodes, run workflows — but reading an expert workflow meant re-implementing three
+custom-node packs' resolution rules in its head, every time, per input. So we
+built the resolution once, as tools. This post is the dev-log: three tools, one
+layout-preservation trick that made the headliner possible, and a widget-scrambling
+bug the work flushed out of the UI→API converter.
+
+> **TL;DR.** `panel_strip_workflow` resolves everything into a flat API graph for
+> inspection and headless execution. `panel_slice_workflow` extracts one pipeline
+> from a toggle-template multi-workflow. And `panel_flatten_workflow` flattens the
+> **live canvas in place** — buses, Reroutes, and Use-Everywhere broadcasts become
+> direct links, the virtual nodes vanish, and the author's layout survives
+> exactly. One undo restores.
+
+## Three tools, three jobs
+
+**`panel_strip_workflow`** is the X-ray. It takes the live canvas (no arguments
+needed — no save-to-disk round trip), a bundled pack, a server-side path, or an
+inline graph, and collapses *everything* — Get/Set buses, Reroutes, subgraph
+definitions, bypassed and muted nodes — into real connections, returning the
+resolved graph in API/prompt format plus a node-type histogram. That output is
+what ComfyUI actually executes, and it's dramatically smaller than the raw UI
+JSON. The catch is deliberate and stated right in the tool description: API
+format **cannot be loaded back onto the canvas**. Strip is for understanding a
+workflow's real wiring, running it headless, or rebuilding connections with the
+graph-edit tools — not for round-tripping.
+
+**`panel_slice_workflow`** handles a different beast: the toggle-template. These
+are workflows built around rgthree's *Fast Groups Bypasser/Muter* — one graph
+holding five pipelines (text-to-image, upscale, extend, detail, …), only one
+active at a time. Slice seeds from the output nodes in the group titles you name,
+takes their backward closure through both real links *and* the Set/Get buses,
+un-bypasses the kept nodes, and returns a standalone, activated **UI** graph —
+this one *is* loadable. Pair it with strip to then flatten the buses too.
+
+Both are read-and-return tools. The third one touches your canvas.
+
+## The headliner: flatten in place, keep the layout
+
+`panel_flatten_workflow` does the thing you actually want when a spaghetti
+workflow is sitting open in front of you: it rewrites the **live canvas** so that
+every input fed through virtual wiring gets a direct real link to its true
+producer, then deletes the now-dead Get/Set nodes, Reroutes, and Use-Everywhere
+senders — **without moving a single kept node**. Groups, positions, sizes,
+colors, titles: all survive exactly. The only visible change is the virtual nodes
+leaving empty space, and the wires now going where they always secretly went. One
+Ctrl+Z restores the original.
+
+That last property was the hard part, and the insight behind it is worth
+spelling out.
+
+### Groups are geometric — so don't touch the nodes
+
+The naive implementation writes itself: convert the UI graph to API format (the
+strip pass already resolves everything), then regenerate a UI graph from it and
+load that. It also destroys everything. The regenerated graph has fresh
+auto-layout positions, default sizes, no colors, no titles — and, fatally, no
+groups.
+
+Here's why groups are the tell: **litegraph groups are geometric**. A group is a
+titled bounding box with coordinates — it has *no node membership list*. Nodes
+are "in" a group purely because they're physically inside its rectangle. Which
+means the moment you move a node, group membership silently changes; and if you
+regenerate positions wholesale, every group on the canvas becomes an empty box
+framing nothing.
+
+Flip that around and it becomes a gift: **if you never move a kept node,
+positions, sizes, colors, and groups are preserved for free.** So the flattener
+(`src/services/flatten-workflow.ts` — its header comment is the design doc) never
+round-trips. It mutates a copy of the *original* UI graph directly:
+
+1. Walk every input on every real node. If it's fed by a Get/Set/Reroute chain,
+   resolve upstream — Get matches its Set by bus name, Set and Reroute pass
+   through — until the first **real** node.
+2. Mint a **fresh direct link** from that real producer to the consumer input.
+3. Delete the virtual nodes, purge their links, scrub any dangling references.
+
+Kept nodes are never altered in any way — not position, not widgets, not mode.
+That mode point matters: unlike the API converter, the resolver stops at any real
+node *regardless of whether it's muted or bypassed*. A toggle-template's inactive
+branches are the author's state; a wiring-only flatten must not collapse or drop
+them. (And genuinely executable "virtual-looking" nodes — rgthree's Context and
+Context Switch — are kept. They run at prompt time; they're not wiring.)
+
+### Use-Everywhere: trust the pack, don't re-implement it
+
+cg-use-everywhere was the scary one. Its broadcast matching — regex filters on
+node titles, input names, group membership — is a moving target, and
+re-implementing it meant being subtly wrong forever.
+
+Turns out we don't have to. On every graph analysis, the pack writes its
+**own computed link list** into `extra.ue_links`: `{ downstream,
+downstream_slot, upstream, upstream_slot, controller, type }`, where `upstream`
+is already the *real producer*. That's the pack's ground truth, computed by the
+pack's own matching code. The flattener just **materializes** it: each entry
+becomes a direct link (skipping inputs that gained a real link since analysis —
+UE wouldn't fire on those anyway), and a sender is deleted only once it's not the
+real producer of any surviving link.
+
+Two consequences fall out naturally. **Seed Everywhere stays** — it's its own
+producer (the controller *owns* the seed widget), so it ends up upstream of live
+links and is kept as the executable node it is. And if UE senders exist but
+`ue_links` is missing or empty, the flattener **refuses to guess**: it warns,
+leaves the senders in place, and tells you to open the graph with the pack active
+and save once so the list gets written. Never guess a broadcast match.
+
+## The bug the work flushed out: scrambled widgets
+
+Now the war story. While validating the strip pass against WhatDreamsCost's LTX
+director workflow, the resolved graph looked… wrong. The `LTXDirector` node's
+`frame_rate` had resolved to the string `"seconds"`. Its `display_mode` was
+`768`. Its `divisible_by` was `18`. Every value was real — just pulled from a
+*neighboring* widget.
+
+The cause lived in the UI→API converter (`src/services/workflow-converter.ts`).
+UI-format graphs store widget values as a **positional array**, and the converter
+maps them onto input names using the node definition's declared input order.
+That works — until a node has a **custom serialized-widget layout**. Nodes like
+LTXDirector, LTXSequencer, and kijai's PromptRelay pack extra or reordered
+widgets into `widgets_values`, so the positional mapping shifts by one at the
+first unaccounted slot and every widget after it lands on the wrong name.
+`frame_rate` inherits its neighbor's `"seconds"`; dominoes from there.
+
+The fix keys off the flag those nodes set: `properties.has_serialized_properties`.
+Nodes with custom layouts also write their **authoritative named values** into
+`node.properties` — so when the flag is `true`, the converter prefers those named
+values over the shifted positional mapping. It's carefully gated: normal nodes
+(whose `properties` can carry stale copies) are untouched, and only names that
+are actually widget inputs are read, so bookkeeping like `cnr_id` or
+`timeline_data` can't leak into the prompt. Shipped as a fix in
+[0.34.0](https://github.com/artokun/comfyui-mcp/blob/main/CHANGELOG.md), alongside
+strip/slice learning to read the live canvas; the flattener landed right behind
+it in 0.35.0.
+
+## The receipts
+
+The acceptance test was the workflow that started all of this: the real
+**128-node LTX director** graph, dense with buses. One `panel_flatten_workflow`
+call:
+
+- **55 Get/Set nodes removed**, their buses resolved,
+- **43 direct links added** to the consumers they secretly fed,
+- **0 kept nodes moved** — every group band, color, and title intact,
+- widget values **byte-identical** before and after.
+
+The canvas looks like the author's canvas, minus the indirection. You can finally
+*follow a wire*.
+
+## Why this matters for agents
+
+Everything about agent-driven ComfyUI gets easier when the graph on the canvas is
+the graph that runs. "What model feeds this sampler?" becomes one link-lookup
+instead of a three-pack resolution algorithm. Modifying a workflow becomes safe —
+the agent rewires a real link instead of discovering, post-run, that a UE
+broadcast was silently overriding its edit. And explaining a workflow to the
+human who downloaded it becomes possible at all.
+
+Agents don't just need to *run* workflows. They need to **read** them. Now the
+spaghetti untangles itself — and it doesn't move your nodes doing it.
+
+---
+
+Try it on the gnarliest workflow in your collection: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp), add the [Panel](/panel),
+and ask the agent to flatten what's on your canvas. Star the repo or file an
+idea at [artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

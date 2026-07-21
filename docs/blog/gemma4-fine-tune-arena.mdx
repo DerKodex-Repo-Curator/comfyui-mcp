@@ -1,0 +1,204 @@
+---
+title: "We fine-tuned Gemma 4 to drive ComfyUI — then built an Arena that told us our smallest model was broken"
+description: "The gemma4-comfyui-mcp ladder (e2b/e4b/12b) is Gemma 4 fine-tuned on server-verified ComfyUI tool trajectories — and the LLM Arena that scores it is honest enough to have caught our own regression. How the v1 e2b scored 4/20 by emitting call_tool without a tool name, why the fix was a training-data format split, and the temperature-0 bug the Arena couldn't see."
+keywords:
+  - ComfyUI local LLM
+  - Gemma 4 fine-tune
+  - ComfyUI Ollama
+  - LLM tool calling benchmark
+  - gemma4-comfyui-mcp
+  - QLoRA fine-tuning
+  - ComfyUI agent local model
+  - LLM Arena
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · fine-tuning · benchmarks · local LLMs_
+
+There's a specific kind of dishonesty that creeps into "we fine-tuned a model"
+announcements: the benchmark is designed after the model, the judge is another
+LLM, and somehow the numbers always go up. This post is the opposite story.
+We fine-tuned the Gemma 4 family to drive ComfyUI through
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp)'s compact tool router —
+and we built a benchmark rigid enough that it **caught our own smallest model
+scoring worse than random flailing**, published that number anyway, root-caused
+it, retrained, and published the fix.
+
+Two intertwined builds, one rule: **the ComfyUI server is the judge, not the
+model.** Here's both stories.
+
+## Why fine-tune at all
+
+The [Agent Panel](/panel) runs on frontier models beautifully — Claude,
+ChatGPT, Gemini all clear the hardest tasks. But a lot of people running
+ComfyUI have exactly one GPU, and it's busy rendering. The pitch of a **local**
+agent backend is: no account, no API key, no per-token cost, nothing leaves
+your machine. The problem is that small local models meet a 178-tool surface
+(113 MCP tools + 65 live-canvas `panel_*` tools) completely cold, and it
+shows — wrong tool families, malformed arguments, confident narration of
+things that never happened.
+
+So we taught the model the suite natively. **gemma4-comfyui-mcp** is
+QLoRA-trained on **1,055 server-verified tool-use trajectories** synthesized
+against a live ComfyUI — real calls, real results, covering the full tool
+surface. It ships as an Ollama ladder sized to whatever VRAM you can spare
+next to a render:
+
+```bash
+ollama pull artokun/gemma4-comfyui-mcp:e4b   # the default — ~3.5 GB at q4
+ollama pull artokun/gemma4-comfyui-mcp:12b   # ~8 GB
+ollama pull artokun/gemma4-comfyui-mcp:e2b   # smallest — ~2 GB
+```
+
+The panel's Ollama backend defaults to `:e4b`; weights, LoRA adapters, and the
+training pipeline are open at
+[`artokun/gemma4-comfyui-mcp`](https://huggingface.co/artokun/gemma4-comfyui-mcp)
+on Hugging Face, dataset included. And the whole thing was trained on
+**one RTX 4090 under WSL2** — the e2b v2 run is 496 steps, about two hours.
+No cluster, no cloud bill. That matters because it means the retrain loop
+you're about to read was cheap enough to actually run.
+
+## The Arena: a judge that can't be charmed
+
+A fine-tune claim needs a measurement you'd trust from a stranger. The
+[LLM Arena](/arena) is a **10-scenario ladder** run over the same compact
+tool-router the panel and MCP clients use, so a score predicts real agent
+behavior. Every scenario is a real ComfyUI task, and every outcome is
+**verified against the ComfyUI server itself** — job history, the parameters
+in the *executed* graph, real output files and their pixel sizes. Not an
+LLM-judged vibe check; if the model claims it rendered at 1024px, the harness
+reads the PNG header.
+
+The ladder climbs three bands — basics (tool discovery, single-call tasks),
+a gauntlet (async render with polling, exact parameters landing in the
+executed graph, a deliberate break-and-recover, provenance via `regenerate`),
+and a crucible of raw graph composition no template covers. PASS is 2,
+PARTIAL is 1, FAIL is 0, max **20**; ties break on nudges, then tool rounds,
+then wall time — a model that nails a task first-try outranks one that flailed
+to the same score. See the [Arena page](/arena) for the full task table, the
+all-tier leaderboard, and how to run *your* model through it with one command.
+
+Best-of-3 on an RTX 4090, here's where the ladder landed:
+
+| Model | Score /20 | Reference points |
+|---|---|---|
+| `gemma4-comfyui-mcp:e4b` | **14** — best local model we've tested | qwen3:4b: 13 · stock gemma4:e4b: 12 |
+| `gemma4-comfyui-mcp:12b` | 13 | |
+| `gemma4-comfyui-mcp:e2b` (v2) | 10 | stock gemma4:e2b: 8 |
+
+Every rung beats its stock base. But that table is the *end* of the story.
+The first version had a different bottom row, and it's the interesting one.
+
+## The 4/20: publishing the number that hurt
+
+When the ladder first went through the Arena, `:e2b` — the ~2 GB model, the
+one meant for the tightest VRAM budgets — scored **4/20**. Not "small model
+struggles with the crucible" bad. Worse than *stock* gemma4:e2b, the very
+model it was fine-tuned from. Our training had made it worse.
+
+The tempting move is obvious: quietly pull the tag, ship the two rungs that
+looked good, say nothing. Instead the 4/20 went into the docs and the
+changelog, flagged honestly as "pending the v2 training fix" — because a
+benchmark you only publish when it flatters you isn't a benchmark, it's
+marketing.
+
+And because the Arena keeps full per-scenario transcripts, the failure wasn't
+a mystery for long. The transcripts showed e2b emitting `call_tool` — the
+router envelope — **without the tool name inside it**. A syntactically shaped
+but semantically empty call, over and over.
+
+The root cause was a mismatch between training and deployment. Compact mode
+doesn't expose 178 tools to a small model directly; it exposes a tiny router
+surface, and the model invokes everything through a `call_tool` envelope that
+names the underlying tool as an *argument*. The v1 training data, though, was
+written in **direct** tool-call format — `get_system_stats(...)`,
+`generate_image(...)` — the raw trajectories as synthesized. So v1 e2b had
+learned the tool suite's *names* in a dialect the runtime never speaks. At
+inference time it saw the router surface, reached for the envelope, and had
+no learned association between the envelope's `tool` field and the names it
+knew. The bigger rungs had enough general capability to bridge the format gap
+on the fly. The 2B model didn't — it produced the wrapper and left it hollow.
+
+The v2 fix was a training-data change, not a model change: retrain with a
+**dual-view dataset where 52% of examples use the router envelope format** —
+the same trajectories, seen both as direct calls and as the `call_tool`
+dialect the deployed runtime actually speaks. Two hours and 496 steps later,
+v2 e2b scored **10/20** against stock e2b's 8, with zero malformed envelopes
+across the verdict runs. The regression was dead, and the smallest rung was
+finally a legitimate pick for tight VRAM.
+
+The lesson generalizes past this project: **fine-tune in the exact wire
+format your runtime speaks.** A capable base model will paper over a
+train/serve format mismatch; a small one will fail in ways that look like
+stupidity but are actually translation.
+
+## The bug the Arena couldn't see
+
+Honest benchmarks have a second failure mode: the things they don't measure.
+After v2 shipped, reports came in from real panel sessions that the fine-tune
+"goes in circles" — repeating the same phrasing, re-treading the same tool
+call, looping instead of progressing.
+
+The Arena hadn't caught it, and the reason is instructive. The published
+Modelfiles had **temperature 0 baked in** — a reasonable-looking choice for
+tool-calling determinism, and one the Arena's short, well-scoped scenarios
+never punished. But greedy decoding on a small model in a *long* interactive
+session is a repetition machine: once the highest-probability continuation is
+a phrase it just said, it says it again, forever.
+
+So we A/B'd it on the real orchestrator, not the benchmark: at temperature 0
+the model looped in **2 out of 2** runs; with Gemma's recommended sampling —
+**temperature 1.0, top_k 64, top_p 0.95** — it looped in **0 out of 4**. The
+fix ships in the backend itself: when the orchestrator sees a fine-tune tag,
+it sends the corrected sampling parameters automatically, overriding the baked
+Modelfile values (and `COMFYUI_MCP_OLLAMA_TEMPERATURE` / `TOP_K` / `TOP_P`
+override wholesale if you want your own numbers). You don't need to re-pull
+anything.
+
+Two bugs, two different detectors. The format regression was caught by the
+benchmark and invisible in a demo; the sampling loop was invisible to the
+benchmark and obvious in ten minutes of real use. If your evaluation story is
+only one of those, you're blind in one eye.
+
+## Run your own model through it
+
+The Arena isn't a private scoreboard for our ladder — it scores **any**
+model, local or hosted, and merging results across runs is the point:
+
+```bash
+npm run arena                                    # default local field via Ollama
+ARENA_MODELS="artokun/gemma4-comfyui-mcp:e4b,qwen3:4b" npm run arena
+```
+
+Anything OpenAI-compatible works too — one OpenRouter key covers most of the
+hosted market. Results land in `arena-results/` as JSON, full per-scenario
+transcripts, and a share-ready `arena-report.md`. If you run a model we
+haven't covered, post the report in a
+[GitHub discussion](https://github.com/artokun/comfyui-mcp/discussions) with
+your GPU and model tags — the leaderboard on the [Arena page](/arena) is
+built from exactly these runs.
+
+## What the two builds bought each other
+
+The fine-tune made the Arena worth building: without a model of our own on
+the line, "server-verified scoring" would have stayed a nice-to-have. The
+Arena made the fine-tune trustworthy: the same harness that produced the
+14/20 headline also produced the 4/20 embarrassment, the transcripts that
+explained it, and the 10/20 that verified the fix. A recommendation you can
+audit — pull the tag, run the ladder, read the transcripts — is worth more
+than a leaderboard you have to take on faith.
+
+The models are live on Ollama
+([`artokun/gemma4-comfyui-mcp`](https://ollama.com/artokun/gemma4-comfyui-mcp),
+tags `:e2b` / `:e4b` / `:12b`) and
+[Hugging Face](https://huggingface.co/artokun/gemma4-comfyui-mcp) — GGUFs for
+LM Studio and llama.cpp included. Pull the size that fits next to your
+renders, pick **Ollama (local)** in the panel's backend picker, and the agent
+runs free, offline, on a model that has actually met your tools before.
+
+---
+
+Run the ComfyUI agent on a free local model: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp), pull
+`artokun/gemma4-comfyui-mcp:e4b`, and see [Local LLMs](/local-llms) for setup —
+or benchmark your own model on the [Arena](/arena). Star the repo or file an
+idea at [artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

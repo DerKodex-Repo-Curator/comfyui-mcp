@@ -1,0 +1,149 @@
+---
+title: "Panel-owned sessions: your conversation now survives workflow switching"
+description: "The comfyui-mcp Panel agent used to treat every ComfyUI workflow tab as a separate conversation — switch, save, or rename a workflow and your chat emptied mid-task. Now the conversation is the unit of continuity: the orchestrator rebinds the live agent across tabs (no respawn, so even in-memory Ollama models keep their history) and mechanically tells it which canvas it's driving."
+keywords:
+  - ComfyUI agent session persistence
+  - comfyui-mcp panel agent
+  - ComfyUI workflow switching chat reset
+  - agent conversation continuity
+  - Ollama in-memory session
+  - ComfyUI sidebar assistant
+  - panel-owned sessions
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · panel · sessions · architecture_
+
+A user on our Discord filed the kind of report that stings because it's
+completely correct: **"the context window empties on workflow change."** You'd be
+deep in a session — the agent has read your graph, downloaded a LoRA, has three
+turns of context about what you're building — then you tab over to another
+workflow to check something, tab back, and the chat is a stranger. Or worse: you
+hit **Ctrl+S** on the workflow the agent just built for you, and *the act of
+saving it* reset the conversation about it.
+
+Their proposed fix was better than a bug report. The agent window, they said,
+should **ride in a layer above the workflows** — not live inside any one of them.
+
+That's exactly what shipped in Panel 0.9.0, and this post is about why the fix
+was harder than "just don't reset the chat," the trap hiding in the obvious
+implementation, and the codeword test that proved it works.
+
+## The old model: one workflow, one conversation
+
+The original design wasn't an accident. Every workflow tab got its own identity —
+a saved file becomes `wf:<path>`, an unsaved scratch tab gets a minted
+`tmp:<uuid>` — and the panel keyed **everything** to that id: the chat thread,
+the agent session, the socket's tab mapping on the orchestrator. Switch
+workflows and the panel would re-hello under the new id and resume *that*
+workflow's session, or open a blank one if it had never had a chat.
+
+For some usage that's genuinely nice: each project keeps its own thread, and
+flipping to your inpainting workflow flips to your inpainting conversation. The
+per-workflow code even grew careful edge handling — saving an unsaved workflow
+**adopts** the temp thread onto the new file identity, and renaming a saved one
+migrates the thread to the new path, because ComfyUI mutates the same workflow
+object's path in place on rename.
+
+But watch what it does to the primary use case. The Panel agent is a *builder* —
+you ask it to construct a workflow, it creates one, and the moment that new tab
+becomes active… the conversation that created it is gone from view. Save it: the
+id flips from `tmp:` to `wf:` and you'd better hope the adoption bookkeeping
+catches it. The user's mental model is one continuous collaboration; the panel's
+model was a filing cabinet.
+
+## The design decision: the conversation is the unit of continuity
+
+The fix inverts the ownership. In the new default mode, the **conversation
+belongs to the panel**, and the workflow is just **the canvas the agent is
+currently pointed at**. Switching, saving, renaming, or creating workflows must
+never swap or reset the chat — full stop.
+
+Mechanically, a workflow change now does exactly three small things
+(`onWorkflowMaybeChanged` in the panel):
+
+1. **Re-target the socket.** The panel re-hellos under the new tab id, so run
+   outputs and canvas events route to the workflow you're actually looking at —
+   and the orchestrator drops the old mapping so a background workflow's output
+   can't leak into your feed.
+2. **Rebind the live agent.** The bridge stamps the hello with `migrated_from`,
+   and the orchestrator moves the **running agent instance** from the old tab id
+   to the new one. No teardown, no respawn — the same process, same context
+   window, now addressed by a new id.
+3. **Arm a one-shot context note.** The next message you send carries a
+   prepended note: *the user switched the open workflow — it is now "X"; your
+   `panel_*` graph tools operate on THIS graph now; re-read it before assuming
+   anything, since earlier turns may refer to a different workflow.*
+
+The chat feed just prints `Canvas → workflow-name (same conversation).` and life
+goes on.
+
+That third step deserves a word, because it's a philosophy we keep coming back
+to: **mechanical, not promptable.** We could have given the agent a memory tool
+and a system-prompt plea to "check which workflow is active before editing."
+Tools the model is supposed to remember to call are tools the model forgets to
+call — usually at the worst moment, mid-task, when its attention is on the
+render. Instead the retarget is done *to* the agent: the socket moves, the
+instance is rebound, and the canvas-change note is injected into its next turn
+whether it thinks to ask or not. There is nothing for the model to forget.
+
+## The trap: `resume_session` silently wipes local models
+
+Here's the subtle part, and the reason the obvious implementation is wrong.
+
+The legacy switch path sent a `resume_session` frame after re-helloing — "resume
+session `<id>` on this tab." For Claude that's harmless bordering on elegant:
+Claude sessions are **disk-backed**, so the manager can tear down the agent,
+respawn it, and resume from the stored transcript. Reset, resume, nobody notices.
+
+But the panel doesn't only run Claude. It runs Ollama models, and other local
+backends whose entire conversation state lives **in the memory of the running
+process**. For those, `manager.reset` → respawn is a lobotomy. There's no
+transcript on disk to resume from; the "resume" succeeds structurally and the
+history is just… gone. Silently. The agent greets you like it's never met you,
+and nothing in any log says why.
+
+So the panel-owned path deliberately sends **no `resume_session` frame at all**.
+It never resets. It moves the live instance — which works identically for a
+disk-backed Claude session and a fully in-memory `qwen3:4b` on Ollama, because
+neither one is ever asked to die and remember. The comment in the source says it
+plainly: *deliberately NO resume_session frame (manager.reset would respawn the
+agent and wipe in-memory backends like Ollama).*
+
+## The codeword test
+
+Verifying this needed the harshest possible backend, so we used a local
+in-memory model — no disk transcript, no resume safety net, nothing to hide
+behind.
+
+The test: tell the agent a codeword. Switch to a different workflow. Send one
+message on the new canvas. Then ask: *what was the codeword?*
+
+Under the old path, a local model fails this every time — the switch respawned
+it, and the codeword died with the old process. Under panel-owned sessions it
+answered immediately, correctly, and without ceremony — because from the model's
+point of view **nothing happened**. The same process simply followed you to the
+new tab. It saw a note that the canvas changed, and a question, and it had the
+answer because it had never stopped being the agent you told.
+
+That's the whole feature in one anecdote. Continuity isn't restored after the
+switch; it's never broken by it.
+
+## The legacy mode is still there
+
+Some people genuinely want the filing cabinet — one chat per workflow, threads
+that flip with the tabs. That mode didn't get deleted; it got demoted to a
+toggle. **Settings → General → "Conversation follows the panel"** — on by
+default. Turn it off and you're back to the per-workflow behavior, adoption and
+rename-migration bookkeeping included.
+
+But the default is the layer-above model the Discord report asked for: one
+conversation riding over all your workflows, an agent that keeps its memory
+across every tab switch, and a mechanical nudge — never a hope — telling it
+which canvas it's driving now.
+
+---
+
+Run an agent that survives your tab habits: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp) and add the
+[Panel](/panel). Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

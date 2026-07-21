@@ -1,0 +1,170 @@
+---
+title: "The ComfyUI mobile app: your agent, your renders, your CivitAI — from your phone"
+description: "The ComfyUI-MCP mobile companion (Flutter, iOS + Android beta) puts the same autonomous agent that drives your desktop ComfyUI in your pocket: chat with it, watch renders land, browse CivitAI with full likes/collections/creator parity, pick providers, and even mirror and drive a live desktop tab. Pairing is one QR scan, and a persistent pair token keeps the phone connected across restarts."
+keywords:
+  - ComfyUI mobile app
+  - ComfyUI remote control
+  - ComfyUI on your phone
+  - ComfyUI agent iOS Android
+  - ComfyUI QR pairing
+  - CivitAI mobile browser
+  - ComfyUI MCP
+  - Flutter AI agent app
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · mobile · pairing · remote control_
+
+The render finished while you were making coffee.
+
+That sentence is the whole problem with ComfyUI, and it always has been. A good
+generation — a video especially — takes long enough that you *leave*. You queue
+the job, you wander off, and now the state of your work lives on a screen in
+another room. Did it finish? Did it OOM at 90%? Did the agent install the
+missing node and retry, and is it now waiting on a question you can't see? The
+desktop is doing fine. **You're the disconnected part.**
+
+The [ComfyUI-MCP mobile app](/mobile) closes that loop. It's a phone-native
+front end — Flutter, shipping on **iOS and Android** in closed beta — to the
+same agent that powers the [Sidebar Panel](/panel). Not a dashboard, not a
+read-only queue viewer: the actual agent, on the actual bridge, with your
+desktop's GPU doing the work.
+
+## What it actually is
+
+The app connects to the panel orchestrator's bridge — the same WebSocket the
+in-ComfyUI sidebar rides — so it's not a parallel system with its own limits.
+It's another seat at the same table:
+
+- **The same conversation.** Chat with the agent from the couch exactly like
+  you would in the sidebar. Ask for a render, ask it to fix a workflow, ask why
+  the last one came out wrong.
+- **Renders land in your hand.** Finished images appear inline; videos play
+  inline with a lightbox, and you can save MP4 outputs straight to your
+  camera roll. A **live queue monitor bar** shows the running job, queue depth,
+  and sampler progress — powered by the orchestrator's change-only
+  `queue_status` broadcast — with a **one-tap cancel** that's deliberately
+  narrow: it only interrupts the exact `prompt_id` you're looking at, and never
+  touches pending jobs (which might belong to another agent sharing the queue).
+- **Full CivitAI browsing — real parity, not a teaser.** Search models,
+  page through *all* results with infinite scroll, browse creators (the
+  creator leaderboard and username search ride the same
+  `search_civitai_creators` tooling the desktop got in v0.35.0), and see your
+  favorites properly — the app reads your CivitAI **likes collection**, so if
+  you've liked 700 models, you see 700 models, not the handful the reactions
+  endpoint returns.
+- **The same provider chips.** The model picker exposes provider, model, and
+  reasoning effort — Claude, ChatGPT, Gemini, Kimi K3, and the whole
+  local/self-hosted family (Ollama, LM Studio, llama.cpp, OpenRouter). Whatever
+  the orchestrator can run, the phone can select.
+- **A LoRA hub and prompt presets.** Browse installed LoRAs with detail sheets
+  and an update checker (the `civitai:` provenance line from v0.37.0 is what
+  lets it link back and check for newer versions), and keep favorite prompts
+  one tap away.
+
+The mental model is simple: the orchestrator is the brain, ComfyUI is the
+hands, and the phone is just another pair of eyes and a mouth. Nothing was
+forked to make mobile happen.
+
+## Pairing: one QR, every path
+
+Pairing flows are where companion apps usually die — type this IP, copy this
+token, install this cert. Here it's **one QR code** shown by the panel, and
+it's deliberately multi-purpose:
+
+- **Scan it from inside the app** and you're logged in instantly. Done.
+- **Scan it with your phone's camera** — before you've even installed the
+  app — and it opens a lander that reads your user-agent and routes you to the
+  right place: TestFlight on iOS, Firebase App Distribution on Android. If the
+  app is already installed, the lander's **Open in app** button fires the
+  `comfyui-mcp://pair` deep link and drops you straight into a paired session.
+
+The security detail that makes this comfortable: the pairing credentials —
+host and token — ride the **URL fragment**, not the query string. Fragments
+never leave the browser; they're not sent in the HTTP request, so your bridge
+token never appears in a server log, a proxy trace, or an analytics pixel.
+Scan the same QR three different ways and the secret still only ever exists on
+your two devices.
+
+## Pairing that survives restarts
+
+Early beta testers found the sharp edge fast: the bridge's pairing token was
+per-session. Restart the orchestrator — an update, a reboot, the self-updater
+doing its job — and every paired phone silently died and needed a re-scan.
+Fine for a demo, hostile for a daily driver.
+
+**v0.33.0** fixed this with a stable pair token. Set `COMFYUI_MCP_PAIR_TOKEN`
+in `~/.comfyui-mcp/.env` and the token is pinned: a paired phone reconnects
+across orchestrator restarts like nothing happened. When set, the LAN pairing
+listener also auto-starts at boot and prints a ready-to-paste
+`ws://<lan-ip>:<port>/?token=…` URL.
+
+The default posture is unchanged and worth stating plainly: if you *don't* set
+the token, the pairing listener stays **on-demand and per-session** — nothing
+is exposed on your LAN until you explicitly ask for the QR. Persistence is
+opt-in; "nothing listening unless you asked" is the default.
+
+## The headline: mirror a desktop tab and drive it
+
+Everything above makes the phone a good *second client*. Tab mirror
+(v0.35.0) makes it a **remote control**.
+
+The scenario: you've been working in the panel on your desktop all afternoon.
+Mid-conversation, mid-workflow, the render is queued — and you have to leave
+the desk. On the phone, you open remote control, pick that desktop tab, and
+the phone **mirrors its live session**: the same conversation you were having
+at the desk, streaming in real time. Type a message on the phone and it
+appears in the desktop tab — sent as that session, answered in that session,
+visible on both screens at once. You're not starting a parallel chat with the
+same agent; you are *operating the desktop tab* from your pocket.
+
+That's the feature where sloppy engineering would be genuinely dangerous — a
+remote client injecting into another client's session is one bad assumption
+away from a cross-session leak. So the implementation is built on deliberate
+invariants rather than trust:
+
+- **Server-authoritative tab identity.** The phone never gets to claim which
+  tab it's mirroring; the orchestrator owns the canonical tab identity and the
+  mapping. A client asserting "I am tab X" is ignored — identity is assigned,
+  not requested.
+- **Allowlisted fan-out.** Mirrored frames are fanned out only to sockets
+  explicitly allowlisted for that tab, keyed by canonical id. There is no
+  broadcast path where a frame for one session could reach a socket that
+  wasn't granted it.
+- **Pinned socket kind.** A socket's role is pinned at handshake. A pairing
+  socket can't quietly become a mirror socket mid-connection; each kind gets
+  exactly the frames its role allows.
+
+One honest limitation in the current beta: the mirror streams the session
+**live from the moment you attach** — full transcript hydration (scrolling
+back through everything said before you picked up the phone) is deferred to
+v2, because backfilling a long desktop conversation onto a phone screen is a
+UX decision we'd rather get right than rush.
+
+## Where the beta is honest
+
+This is a **closed beta**, and the framing is deliberate. Builds ship through
+**TestFlight** on iOS and **Firebase App Distribution** on Android — beta
+channels, not the App Store and Play Store. Store releases come at launch;
+right now the release cadence is fast (the changelog is a steady drip of
+"favorites now show all 700, not 12"-grade fixes), and beta channels are the
+right place for that pace. What you get in exchange for tolerating the
+occasional rough edge is a direct line: mobile beta feedback on Discord has
+repeatedly turned into shipped tools within days — creator search existed on
+the phone because a beta tester asked for it.
+
+The through-line of the whole project has been removing the reasons you have
+to *sit at the machine*: the agent installs the nodes, recovers from the
+crashes, judges its own renders. The phone removes the last reason. The render
+finishes while you're making coffee — and now the render, the agent that made
+it, and the conversation about what to do next are all in your pocket, cup in
+the other hand.
+
+---
+
+Put your ComfyUI agent in your pocket: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp) with the
+[Agent Panel](/panel), then join the beta — the **iOS TestFlight** and
+**Android Firebase App Distribution** invites are right in the Panel's
+Settings, or on the [mobile page](/mobile). Scan the QR, and you're paired.
+Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

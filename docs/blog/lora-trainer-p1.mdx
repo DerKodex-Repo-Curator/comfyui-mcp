@@ -1,0 +1,196 @@
+---
+title: "Train a character LoRA by asking: the train_* tools land"
+description: "comfyui-mcp's panel agent can now drive LoRA training end to end — dataset staging, Docker + GPU preflight, a headless ai-toolkit container, streamed progress, and honest cancel — all from a conversation. P1 ships character LoRAs on FLUX.1-dev, E2E-proven on an RTX 4090."
+keywords:
+  - train LoRA with AI agent
+  - character LoRA FLUX.1-dev
+  - ai-toolkit Docker headless
+  - comfyui-mcp train tools
+  - local LoRA training RTX 4090
+  - MCP LoRA trainer
+  - Flux character consistency LoRA
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · training · LoRA · Flux · Docker_
+
+For a while now, the pitch of [comfyui-mcp](https://github.com/artokun/comfyui-mcp)
+has been "generate with any model by asking" — the panel agent installs the pack,
+wires the graph, and iterates on prompts with you. The natural next step was
+obvious and kept coming up: **make the model yours**. Not "here's a link to a
+training UI" — actually train, from the same conversation, on your own GPU.
+
+That ships today. The panel agent can now **drive a character LoRA training run
+end to end** through a new set of `train_*` MCP tools: preflight your Docker/GPU
+setup, build the trainer image, stage and validate your dataset, launch the run,
+stream progress, and — when it's done — drop the finished `.safetensors` into
+ComfyUI's `models/loras/` with a catalog entry, ready to load in a Flux workflow.
+You say "train a LoRA of this character from these photos," and the rest is the
+agent's job.
+
+## What we didn't build: a trainer
+
+The most important design decision is the one that sounds like a cop-out:
+**we did not write a trainer.** The actual training is
+[ostris's ai-toolkit](https://github.com/ostris/ai-toolkit) — its `run.py`,
+**unchanged, straight from upstream** — wrapped in a lean headless Docker image
+(CUDA 12.8 devel, pinned torch, ai-toolkit pinned to a git ref for
+reproducibility, `ENTRYPOINT ["python","run.py"]`, no Node, no web UI).
+
+ai-toolkit is a proven, actively maintained trainer with presets tuned for
+exactly this job. Reimplementing it would mean re-earning years of its bug
+fixes; forking it would mean drifting from them. So the split is deliberate:
+
+- **ai-toolkit does the training.** Unmodified, containerized, pinned.
+- **The LLM does everything around it** — the parts that are genuinely
+  judgment calls: dataset guidance (which images, what to caption), picking a
+  trigger word, generating the config, monitoring the run, and deciding when
+  something looks wrong.
+
+That second half is codified in a purpose-built skill
+(`plugin/skills/train-character-lora`) that teaches the agent the whole flow —
+10–30 varied images, caption what *changes* between shots while the trigger word
+stays constant, rank 16 for a simple character, 1500–3000 steps for a real run
+(200 for a smoke test), loss should settle around 0.1–0.3, identity should be
+recognizable in samples by a third of the way through or the run is probably
+underfitting. The config generator (`src/services/training-config.ts`) owns the
+mapping from "character LoRA on flux1-dev with these params" to the YAML schema
+`run.py` consumes, mirrored from ai-toolkit's own example configs.
+
+## The flow, as a conversation
+
+Under the hood it's seven tools, but from the chat it reads like this:
+
+1. **`train_doctor`** — preflight. Docker daemon reachable? `--gpus all`
+   passthrough working (NVIDIA Container Toolkit)? Trainer image built?
+   `HF_TOKEN` set (FLUX.1-dev is a gated repo — the first run downloads it)?
+   Per-check booleans with setup hints, so the agent can tell you exactly
+   what's missing instead of failing twenty minutes in.
+2. **`train_build_image`** — one-time, several minutes. Builds
+   `comfyui-mcp-trainer:latest` from the Dockerfile that ships in the npm
+   package.
+3. **`train_prepare_dataset`** — you point at your images, the agent supplies
+   captions and the trigger word. Staging is **validate-everything-first, then
+   atomic swap**: every image is checked before a single byte lands in the
+   final dataset dir, so a half-staged dataset can never exist, and it refuses
+   to restage a directory an active job is training from. Your source files
+   are copied, never touched.
+4. **`train_start`** — generates the ai-toolkit config, launches
+   `docker run --gpus all` with bind mounts, and returns a job id immediately.
+   Training runs detached; the container's stdout is streamed and parsed into
+   step/loss progress ticks.
+5. **`train_status`** — poll it whenever. Step count, loss, recent sample
+   images, a log tail, and result paths when done. Job records live as JSON on
+   disk and are **refreshed from disk on every read**, which means status works
+   *cross-process*: the process answering your phone's query doesn't need to be
+   the one that launched the run. Your phone can poll a training job your
+   desktop started. (`train_status` and `train_list_flows` are whitelisted
+   read-only for the mobile `call_tool` path for exactly this reason.)
+6. **Done** — the final `.safetensors` is copied into ComfyUI's
+   `models/loras/` and upserted into the LoRA catalog with the trigger keyword,
+   the base model, and a sample preview. Load it in a Flux workflow with the
+   trigger word in the prompt, and it's yours.
+
+And if you change your mind: **`train_cancel`** — with a property that deserves
+its own section.
+
+## The honest-engineering parts
+
+Long-running GPU jobs driven by a process that can restart at any moment are a
+minefield of lying state. Most of the review effort on this feature went into
+refusing to lie.
+
+**Cancel doesn't claim success it can't prove.** `train_cancel` issues a
+`docker stop`, then *verifies the container actually stopped* before marking
+the job cancelled. If the stop can't be confirmed, the tool returns `ok:false`
+and the job **reverts to running** — because a client that believes a failed
+cancel has freed the GPU will immediately do something wrong with that belief.
+The comment in `src/tools/train.ts` says it plainly: a failed cancel "must not
+surface as a successful cancellation."
+
+**Recovery is keyed on the final save.** If the MCP server dies while training
+runs (the container doesn't care — it keeps going), the job record survives on
+disk. On the next read, recovery has to decide: did this orphaned job finish,
+or die mid-run? The tempting shortcut is "are there checkpoint files?" — but
+periodic checkpoints prove nothing except that the run *reached* step N.
+Recovery is keyed on the **final save** specifically, because that's the only
+artifact that proves training actually completed rather than merely progressed.
+
+**The handoff is honest too.** If the ComfyUI instance the MCP is pointed at
+changed mid-run, the auto-copy into `models/loras/` is skipped — with the job
+result saying so — rather than dropping your LoRA into a directory you didn't
+ask for.
+
+## The two bugs the E2E caught
+
+We don't ship trainer claims off unit tests alone, and this is why. The full
+end-to-end run — real Docker, real GPU, real FLUX.1-dev — caught two bugs that
+1,500 passing tests never would have:
+
+**The dataset mount must be read-write.** The obvious, "safe" choice is to
+mount the dataset into the container read-only — the trainer only *reads*
+training images, right? Wrong: ai-toolkit writes a `.aitk_size.json` sidecar
+*into the dataset directory* during preprocessing. With an `ro` mount, the run
+dies before step one. The mount is `rw` now, and the staging design (copies,
+atomic swap, never your originals) is what makes that acceptable.
+
+**Progress parsing needs a loss reading.** ai-toolkit's dataset preprocessing
+prints progress bars — `6/6` as it caches six images — that look exactly like
+training-step counters to a naive parser. Our first pass cheerfully reported a
+six-image dataset scan as "6 of 6 steps complete." The fix: a step count is
+only trusted as *training* progress when it comes with a **loss reading**,
+which dataset bars never have. Progress bars can masquerade as steps; loss
+can't.
+
+## The receipts
+
+The E2E that shook those bugs out, on an RTX 4090 running this exact code: a
+**6-image character dataset**, `train_start` → **200 steps on FLUX.1-dev**
+(smoke-test length), final **loss 0.196**, producing a **172 MB rank-16 LoRA**
+that was auto-copied into `models/loras/` with its catalog entry. `train_status`
+reported the running job correctly from a *separate process* — the cross-process
+path, live. Then the part that matters: the LoRA was **loaded in a live Flux
+workflow** (`LoraLoaderModelOnly`) and **A/B-verified against a strength-0
+control** — same seed, same settings, LoRA on vs. effectively off — confirming
+the output steering came from the LoRA and not from wishful thinking.
+
+Six images and 200 steps is a smoke test, not a portfolio piece — a real
+character run wants 10–30 varied images and 1500–3000 steps, roughly an hour on
+a 4090. But every link in the chain — preflight, staging, launch, cross-process
+monitoring, handoff, catalog, in-workflow verification — ran for real.
+
+## Scope, honestly
+
+P1 is deliberately narrow: **one flow (character LoRA), one base model
+(FLUX.1-dev), local GPU only** — roughly 24 GB of VRAM with quantization on,
+RTX 4090 class. FLUX.1-dev is the proven character-consistency base and the one
+ai-toolkit's presets are tuned for, so it went first.
+
+What's next: more flows and base models (style/slider/edit, Z-Image Turbo),
+then cloud GPUs via RunPod — same container image, remote iron — for everyone
+whose local card can't fit Flux training. The panel and mobile **Training UI is
+being wired now**; the Training button ships as a preview while the tools
+underneath it are already the real, E2E-proven thing.
+
+And if 24 GB isn't your reality *today*: LoRA training on genuinely small cards
+already exists in the pack shelf — [ANIMA trains character and style LoRAs on
+~6 GB](/blog/anima-comfyui), via its own trainer skill. Different base model,
+same idea: your character, your GPU.
+
+---
+
+## Train one tonight
+
+1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and the
+   [Panel](/panel) — the panel auto-starts a background agent on your Claude
+   subscription (no API keys; sign in with `claude` once).
+2. Have Docker + the NVIDIA Container Toolkit installed, and an `HF_TOKEN` with
+   FLUX.1-dev access in the MCP server env.
+3. Ask: *"train a character LoRA from these photos."* The agent runs
+   `train_doctor`, builds the image if needed, walks you through dataset and
+   trigger-word choices, launches the run, and tells you when your LoRA is
+   sitting in `models/loras/`.
+
+That's the whole point of the project: first the graph drove itself from your
+agent session — now the models train themselves there too. File what you want
+trainable next at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

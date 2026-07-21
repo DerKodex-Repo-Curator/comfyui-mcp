@@ -1,0 +1,194 @@
+---
+title: "Blind mode said the agent NEVER sees your images. A user proved it was lying — here's the mechanical fix"
+description: "The panel's Blind toggle promised the AI agent never receives image pixels — but get_image and view_image fetched them straight from ComfyUI's /view anyway. How issue #90 exposed a promptable privacy promise, and how one wrapper at the tool-registration boundary made it a mechanical guarantee in comfyui-mcp v0.42.0 + panel 0.9.8."
+keywords:
+  - ComfyUI privacy
+  - AI agent blind mode
+  - ComfyUI NSFW privacy
+  - LLM image privacy
+  - mechanical enforcement AI agents
+  - ComfyUI MCP blind mode
+  - agent never sees images
+  - AI consent workflows
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · privacy · blind mode · security_
+
+The [Panel](/panel)'s **Blind** toggle has a tooltip that makes a hard promise:
+
+> "the agent still gets text notifications about renders and results, but
+> **NEVER receives the image pixels**."
+
+A user — [s0lci700](https://github.com/artokun/comfyui-mcp-panel/issues/90), who
+gets full credit for this one — read that promise the way a security reviewer
+would, and then did the obvious test: turned Blind ON, asked the agent to call
+`get_image` on a recent output filename, and watched the pixels come back
+**normally**. The toggle gated the panel's own image feed — render notifications,
+`panel_show_media` — and nothing else. The headless ComfyUI MCP tools
+(`get_image`, `view_image`) fetch bytes straight from ComfyUI's HTTP `/view`
+endpoint, and they'd never heard of Blind.
+
+The report's last paragraph is the whole thesis of this post:
+
+> right now that's only true if the agent **voluntarily self-restricts**, not
+> something the harness enforces.
+
+**A privacy promise an LLM is merely asked to keep is not a guarantee.** If the
+enforcement is a prompt, a well-behaved model keeps it — until context pressure,
+a confusing tool result, or a jailbroken instruction makes it "helpfully" fetch
+the image anyway. Enforcement has to be mechanical: the pixels must be
+*unreachable*, not *politely declined*. That's what shipped in comfyui-mcp
+**v0.42.0** and panel **0.9.8**, and this post is how it works.
+
+## Why anyone cares whether the agent sees pixels
+
+Blind mode exists because some workflows have a human-only viewing contract.
+Consent-sensitive and NSFW-adjacent generation is the sharpest case: the person
+at the canvas may be fine with an agent *building* the graph, tuning samplers,
+and reading filenames and error text — while wanting to remain the **only
+viewer** of the actual output. There are duller versions too: client work under
+NDA, reference photos of real people, anything where "an LLM processed the
+image" is a sentence you don't want to say later.
+
+For those users the tooltip wasn't a nicety — it was the reason the feature was
+usable at all. Which is exactly why a leak in it is worse than not having the
+toggle: a promise that's *mostly* true trains people to rely on it.
+
+## One wrapper, every tool, forever
+
+The tempting fix is the whack-a-mole one: add an `if (blind) refuse()` to
+`get_image`, then to `view_image`, then remember `convert_image` returns
+previews, then remember the color-analysis tools do too… and then someone adds a
+new image-returning tool next month and the leak is back. Per-tool opt-ins are
+how this bug regrows.
+
+So the fix lives at the **one place every tool passes through**: the
+registration boundary in
+[`src/tools/index.ts`](https://github.com/artokun/comfyui-mcp). Every tool group
+in the server registers through a single `registerAllTools()` pass, and that
+pass now wraps the server in `withBlindImageGate()` — a proxy that intercepts
+each `tool()` registration and wraps its handler:
+
+```ts
+const wrapped = async (...hargs) => {
+  const result = await handler(...hargs);
+  return blindMode() ? scrubImageBlocks(result) : result;
+};
+```
+
+When `COMFYUI_MCP_BLIND=1` is set on the tool-server process, `scrubImageBlocks`
+walks every result's content and replaces each image block with an honest text
+note:
+
+```
+[Blind mode: image withheld (412 KB, image/png). The user's Blind setting
+means you NEVER receive image pixels — work from filenames/metadata, and
+tell the user to inspect the image themselves if it matters.]
+```
+
+Note what the note does: it keeps the *metadata* (size, mime type) so the agent
+can still reason — "the render finished, it's a 412 KB PNG" — and it tells the
+model plainly why it can't see more, so it doesn't burn a turn retrying.
+
+Two properties make this the right shape:
+
+- **Both tool paths share the boundary.** The full MCP surface (the live
+  `McpServer`) and the compact-mode `ToolCatalog` — the `call_tool` router that
+  small local models use — both receive handlers wrapped by the same function.
+  There is no second door.
+- **Future tools are covered by construction.** A tool added next year that
+  returns an image block gets scrubbed without its author ever hearing the word
+  "blind." Zero per-tool opt-ins means zero per-tool omissions.
+
+## Wiring the toggle to the process
+
+The gate reads an environment variable, so the orchestrator's job is to make
+sure blind tabs spawn their tool server with it. In
+[`src/orchestrator/index.ts`](https://github.com/artokun/comfyui-mcp) a
+`blindTabs` set tracks which panel tabs have the toggle ON — seeded from a
+`blind` field the panel now sends on its hello — and every comfyui tool-server
+spawn for a blind tab gets `COMFYUI_MCP_BLIND=1` in its env.
+
+Toggling live works too. Clicking Blind sends a `set_content_mode` frame; the
+orchestrator records the new state and **respawns the tab's tool server at the
+next idle** — the same coalesced restart path a just-saved API token uses. Your
+conversation resumes; only the tool subprocess env changes. The panel posts a
+plain-language note ("🕶️ Blind mode ON — applies after the current turn") so
+you know exactly when the guarantee takes effect.
+
+The sweep had to cover every pixel path, not just tool results:
+
+- **Screenshots** — the panel's `graph_screenshot` refuses under Blind, since
+  that capture happens panel-side before any tool server is involved.
+- **Render-event images** — finished renders normally inject into the agent's
+  turn as inline image blocks. The desktop panel already dropped these
+  client-side, but the orchestrator now strips them at the **server** boundary
+  too, because a mirror viewer (the mobile client has no Blind concept) could
+  otherwise inject `agent_event` frames with images onto a blinded desktop tab.
+- **Composer attachments** — paste an image into the chat while Blind is on and
+  the agent gets a note that N attachments were withheld, not the pixels.
+
+And one honesty detail I like a lot: what if your panel is new but your
+orchestrator predates the gate? An old orchestrator has no `set_content_mode`
+handler and never acks. Rather than silently under-delivering — the exact sin
+issue #90 reported — the panel waits for the ack and, if it doesn't come, shows
+a visible warning: *the orchestrator may predate v0.42.0, where Blind only gates
+the panel's own image feed; update comfyui-mcp for full enforcement.* A privacy
+feature that can't enforce should say so out loud.
+
+## The war story: the default path bypassed the gate
+
+Here's the part worth admitting, because it's the same lesson at a smaller
+radius.
+
+The first implementation passed its live end-to-end test: blind tab, agent calls
+`get_image`, withheld note comes back. Done? No — the live test ran on a
+**local-model backend**, and adversarial review caught that the **default
+backend — Claude — bypassed the gate entirely.** The Claude path built its MCP
+server config from a **shared static object**, created once and reused for every
+tab. A static object shared across tabs cannot express per-tab spawn env, so
+blind tabs on Claude spawned tool servers with no `COMFYUI_MCP_BLIND` at all.
+The HTTP-backend paths (Codex, Gemini) happened to already build their server
+set per tab, which is why the test passed.
+
+The fix is a per-key `makeMcpServers(key)` factory that rebuilds the config —
+including the per-tab blind env — on every spawn, with the static set demoted to
+a fallback. The review comment is still in the source: *"without this, the
+default backend bypassed the gate."* Same review round also caught that a Blind
+toggle flipped during a socket drop lost its `set_content_mode` frame — so the
+re-hello now *enforces* the state (respawning a live agent on change), not just
+records it. And then the whole thing was re-proven end-to-end **on the Claude
+path** before merge.
+
+Two lessons, neither new but both apparently in need of relearning:
+
+1. **Test the default path.** A live test that exercises the exotic
+   configuration and skips the one 90% of users run is a test of the wrong
+   thing.
+2. **Adversarially review security claims.** "The gate is mechanical" is a
+   claim about *every* path reaching the pixels. The reviewer's job is to go
+   find the path the author forgot — and there's almost always one.
+
+## The general principle
+
+Issue #90 is a small bug with a large moral. Agent systems are full of
+promises like Blind's — "the agent won't spend money without asking," "the
+agent can't touch files outside the project," "the agent never sees X." Each
+one is either enforced by **architecture** (the capability isn't there, the
+data is scrubbed at a boundary the model can't route around) or by
+**instruction** (the model is asked nicely, in a prompt it might deprioritize).
+Only the first kind is a guarantee. The second kind is a default behavior.
+
+The Blind gate is now the first kind: one wrapper at one boundary, an env var
+the model can't unset, a scrub the model can't skip, on every backend, for
+every tool that exists or ever will. The tooltip finally tells the truth.
+
+Thanks again to the #90 reporter for testing the promise instead of trusting
+it. That's exactly the kind of user a project earns by being fixable in public.
+
+---
+
+Run an autonomous ComfyUI agent whose privacy toggles are enforced in code, not
+prompts: install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) (v0.42.0+)
+and add the [Panel](/panel) (0.9.8+). Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

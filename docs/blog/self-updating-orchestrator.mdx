@@ -1,0 +1,178 @@
+---
+title: "The orchestrator that never goes stale: self-updating, self-restarting, and the art of waiting for idle"
+description: "A long-running panel orchestrator quietly falls behind npm releases — users file bugs that shipped fixed weeks ago, and developers debug 'regressions' that are really a days-old process serving a fresh checkout. In v0.34.0 the orchestrator updates itself: hourly npm re-checks, restart-on-rebuild for dev installs, and a restart gate that only fires when every agent is idle with nothing queued, held, or rendering."
+keywords:
+  - self-updating MCP server
+  - ComfyUI agent orchestrator
+  - auto-update long-running process
+  - restart when idle
+  - npm self-update
+  - npx version pinning
+  - ComfyUI panel agent
+  - zero-downtime restart
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · autonomous agents · self-updating · architecture_
+
+In [the last post](/blog/self-healing-comfyui-agent), the panel agent learned to
+read ComfyUI's corpse after a native crash, name the custom node that killed it,
+and patch the file. It can heal everything around it. There was one thing it
+couldn't heal: **itself**.
+
+The orchestrator — the long-running background process that serves the panel,
+runs your agent sessions, and watches the render queue — is exactly the kind of
+software that goes stale. You start it once, it works, and it keeps working, so
+you never think about it again. Meanwhile releases keep landing on npm. Weeks
+later a user hits a bug, files an issue, and the fix has been shipped for
+fifteen days — their process just never picked it up. On the developer side
+it's worse and funnier: `npm run build` writes a fresh `dist`, the "regression"
+gets debugged for an hour, and the culprit turns out to be a days-old
+orchestrator process cheerfully serving code from before the fix existed.
+
+Infrastructure should update like a **browser**, not like a printer driver. You
+don't run an installer for Chrome; it just quietly becomes the new version the
+next time it's safe to. As of **v0.34.0**, the orchestrator does the same —
+default on, opt-out, and (the actually interesting part) careful about *when*.
+
+## Published installs: check hourly, update, restart when safe
+
+For npm installs, the loop lives in
+[`src/services/self-restart.ts`](https://github.com/artokun/comfyui-mcp) on top
+of the existing `self-update.ts` policy engine. Every hour
+(`COMFYUI_MCP_UPDATE_CHECK_MS` to tune — that's ~24 tiny registry GETs a day)
+the orchestrator asks npm for the latest published version.
+
+The install mode matters:
+
+- **global / local installs** — `self-update.ts` replaces the package on disk
+  via npm. Crucially, updating the disk changes *nothing* about the running
+  process; the old code keeps executing until someone restarts it. So a disk
+  update **arms a restart**.
+- **npx installs** — there's no package to update; the cache belongs to npx.
+  Re-execing the cached entry would just re-run the old code. Instead the
+  replacement is spawned as `npx -y comfyui-mcp@<version>`, **pinned to the new
+  version**, so npx fetches it at launch.
+
+Arming a restart is not the same as restarting. That gap is the whole design.
+
+## The at-idle gate: choosing *when* is the engineering
+
+A restart may **never eat a reply**. The orchestrator is mid-conversation with
+you — an agent might be halfway through a tool-using turn, a message might be
+held in the pending tray, a Wan render might be twenty minutes into a
+forty-minute run. Restarting into new code at the wrong moment turns "auto
+update" into "the assistant randomly forgot what it was doing."
+
+So an armed restart sits behind a gate that's polled every five seconds, and it
+only opens when **all** of these hold at once:
+
+- **every agent session is idle** — no turn in flight, nothing queued on any
+  agent (`manager.allIdle()`);
+- **no held messages** — nothing parked in the hold-during-generation buffer
+  waiting to be flushed;
+- **no render in flight** — the queue monitor reports ComfyUI isn't busy.
+
+This is the same instinct as the busy guard on `panel_restart_comfyui` from the
+self-healing post — the system refuses to trade your in-flight work for its own
+convenience — applied to the orchestrator's own life. The restart *coalesces*
+to the next quiet moment, whether that's five seconds away or an hour.
+
+When the moment comes, the sequence is deliberately paranoid:
+
+1. **Announce** to every panel tab: "⬆️ updated X → Y — restarting the agent
+   orchestrator. Back in a few seconds; your session resumes automatically."
+2. **Spawn the replacement first**, detached, sharing stdio so it keeps logging
+   into the same terminal. If the spawn fails, the restart aborts and the old
+   process stays fully intact — you're never left with *no* orchestrator.
+3. **Tear down cleanly** — stop agents, release the bridge — and exit. The
+   replacement rides the bridge's existing bind-retry while the port frees.
+
+On the other side, sessions come back from the **durable session store** and
+the panel reconnects on its own. From the sidebar it looks like a hiccup: an
+announcement, a few seconds of reconnect, and the same conversation — now
+running the new code.
+
+And because the failure mode of any self-restarter is the restart *loop*,
+triggers are strictly **change-driven**: a version newer than the one running,
+or a build newer than the one booted with. A freshly restarted process observes
+"no change" and settles. A minimum-uptime guard (two minutes) adds defense in
+depth, and a generation counter in the environment makes each hop visible in
+the logs.
+
+## Dev installs: `npm run build` is the deploy
+
+If you're running from `npm link` or a checkout, the orchestrator will **never
+touch your working tree**. Auto-updating a developer's checkout would be an
+act of war.
+
+Instead it flips the mechanism around: it watches the mtime of **its own built
+entry script** — the file it was launched from — with a cheap `statSync` every
+ten seconds. When a rebuild lands, it waits for the mtime to hold still for an
+extra poll (a build writes many files; restarting into a half-written `dist`
+would be a self-inflicted crash), arms a restart, and goes through the exact
+same at-idle gate as a published update.
+
+Which means the entire dev deploy step is now:
+
+```
+npm run build
+```
+
+No hunting for the orchestrator's terminal, no killing PIDs, no wondering
+whether the process you're testing against matches the code you just wrote.
+The day this shipped, it earned its keep immediately: the very next feature
+was deployed **by the self-restarter itself** — build finished, agents went
+idle, the orchestrator announced, swapped, and came back running the code that
+had just been written. The feature after that, too. It's a strange, pleasant
+feeling watching your process update itself out from under you, correctly.
+
+## The boundary: MCP stdio never self-restarts
+
+One hard line: all of this applies to **panel orchestrator mode only**. When
+comfyui-mcp runs as a plain MCP stdio server — spawned by Claude Code or any
+other MCP client over stdin/stdout — it never replaces itself. That process's
+lifecycle belongs to the **client**: the client spawned it, holds its pipes,
+and decides when it dies. A stdio server that exits and respawns itself
+detached would just orphan a process while the client stares at a dead pipe.
+Self-restart is only legitimate where the process *owns* its own lifecycle,
+and the code refuses to blur that boundary.
+
+## Opting out
+
+Default on, because stale infrastructure generates phantom bug reports. But
+every layer has a switch:
+
+- `COMFYUI_MCP_AUTO_UPDATE_DISABLE=1` — master off: no checks, no restarts.
+- `COMFYUI_MCP_AUTORESTART=0` — keep checking, never restart. You still get a
+  one-time note in the panel when a new version is waiting ("restart the
+  orchestrator to load it") — informed, but in control.
+- `COMFYUI_MCP_UPDATE_CHECK_MS` — tune the registry re-check period.
+
+## Why this is the interesting part
+
+Downloading a new version is trivial; npm does it in one line. The real
+problem is that **a long-running process is a cache of its own code**, and the
+engineering is entirely in the invalidation: detecting that the disk moved on
+without you, and then picking the one moment — no turn in flight, nothing
+held, nothing rendering — when swapping the process costs the user exactly
+nothing. Everything else is a `spawn` and an `exit(0)`.
+
+```
+new version on npm (or a rebuilt dist)
+        → arm restart (change-driven, once)
+        → wait: agents idle ∧ nothing held ∧ nothing rendering
+        → announce → spawn replacement → teardown → exit
+        → sessions resume from the durable store
+```
+
+The self-healing agent could fix everything except the process it lived in.
+Now that's covered too — and the bug you're about to file might already be
+fixed by the time you've finished typing it, because your orchestrator updated
+itself while you were getting coffee.
+
+---
+
+Run an orchestrator that keeps itself current: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp) and add the
+[Panel](/panel). Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

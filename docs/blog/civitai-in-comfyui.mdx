@@ -1,0 +1,167 @@
+---
+title: "CivitAI, Inside ComfyUI: Browse, Like, Load, Recreate"
+description: "The panel now ships a full CivitAI browser in ComfyUI's sidebar — images, videos, checkpoints, LoRAs, and workflows behind a server-side proxy with PKCE OAuth, a generation-details lightbox, first-class likes, creator search qualifiers, and 'load this workflow onto my canvas' as a single click."
+keywords:
+  - CivitAI browser in ComfyUI
+  - ComfyUI sidebar panel CivitAI
+  - load CivitAI workflow onto canvas
+  - CivitAI OAuth PKCE ComfyUI
+  - comfyui-mcp panel agent
+  - CivitAI likes collection
+  - CivitAI creator search
+  - recreate CivitAI image locally
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · panel · civitai · agent · dev-log_
+
+There's a loop every ComfyUI user runs a dozen times a day: see something great
+on CivitAI, squint at its generation details, download a workflow or a LoRA into
+a folder, alt-tab back to ComfyUI, and try to reassemble the thing you were just
+looking at. The browser tab and the GPU tab don't talk to each other, and the
+download folder in between is where momentum goes to die.
+
+Panel 0.9.0 closes that loop. The **Civitai** button in the panel toolbar — the
+one that shipped parked in 0.8.0 — now opens a full CivitAI browser *inside*
+ComfyUI's sidebar: **Images, Videos, Checkpoints, LoRAs, Workflows, and
+Favorites** tabs, each paging 100 items at a time with scroll auto-load and
+debounced (500ms) search on every tab. Found it, liked it, loaded it, running it
+— without leaving the canvas.
+
+> **TL;DR.** A CivitAI browser modal in the ComfyUI sidebar, backed by a
+> server-side proxy (browsers can't call the CivitAI API directly) with PKCE
+> OAuth whose tokens never reach the browser. Full-screen lightbox with
+> generation details, like/unlike that mirrors into a collection on your
+> account, `@creator` search qualifiers, one-click "load workflow onto canvas"
+> (including CivitAI's `.zip`-wrapped workflow files), share-with-agent to
+> recreate a reference image, and `open_civitai` so the agent can answer a
+> search with a UI instead of a text dump. The same browser ships in the mobile
+> app.
+
+## Why there's a Python proxy in the middle
+
+The first thing you learn building this: **a browser cannot talk to the CivitAI
+API.** CORS blocks the cross-origin calls, and CivitAI's bot-gate wants request
+headers a web page isn't allowed to set. So every network call the browser
+makes goes to a same-origin route on the ComfyUI Python side
+(`/comfyui_mcp_panel/civitai/*`), and *that* process makes the real calls. Media
+comes back the same way — thumbs, full images, and video resolve to same-origin
+`/media` URLs that work directly as `<img>`/`<video>` sources and are fetchable
+as Blobs when the agent needs the actual pixels.
+
+Sign-in rides the same route. The proxy runs the full **PKCE OAuth** flow
+against CivitAI's auth service — a public native client, no secret — and the
+resulting tokens are stored **server-side only**, in a JSON file under the
+ComfyUI user directory. The browser sees "signed in: yes/no" and nothing else;
+access and refresh tokens never cross into page JavaScript. (One migration
+note: 0.9.0 widened the OAuth scope to include SocialWrite and CollectionsRead,
+because reactions and collections 403'd under the old scope — an existing
+sign-in re-consents once.)
+
+## The lightbox is the product
+
+Click any image or video and it opens a **full-screen lightbox**: media on the
+left, everything you actually came for on the right — author, stats, the
+**prompt and negative prompt**, and the generation parameters. Arrow keys and
+the mouse wheel page through the feed (Esc closes), and the pager is
+boundary-safe: open the lightbox on one of the last items and it fetches the
+next page immediately instead of dead-ending.
+
+This is the part the website makes you work for. On CivitAI proper, generation
+details live behind a click and a scroll per image; here, flipping through a
+hundred results with the settings pinned next to each one turns browsing into
+research.
+
+## Likes that actually mean something
+
+Hearts are first-class: hover a card and a heart appears; the lightbox has one
+too. Signed out, the heart opens sign-in. Signed in, a like does two things —
+it reacts on CivitAI, *and* it mirrors into a **default likes collection** on
+your account, picked (or created) in the new account sheet.
+
+That mirroring exists because of a quirk we hit building the **Favorites** tab:
+on the CivitAI website, the ❤ button saves into a *collection*, while the
+reactions API only holds hearts made through the API. Read reactions alone and
+your Favorites tab shows the handful of things you liked in-panel while the
+hundreds you hearted on the website are invisible. So the feed reads your likes
+collection — auto-detected from your account if you haven't picked one — with
+reactions as the fallback, and shows **all** your likes with All/Images/Videos
+filter chips. Like in the panel, like on the website: one list.
+
+## Finding a creator without a form
+
+Two paths into a creator's work. The obvious one: the lightbox and the model
+detail view both grow a **"See more from @creator"** button that flips the feed
+to that person.
+
+The better one is **GitHub-style search qualifiers**. Type
+`@ba0zi cyberpunk city rain` into the search box and the `@ba0zi` token becomes
+the creator filter while `cyberpunk city rain` stays a ranked full-text query.
+Under the hood the media search is Meilisearch, and `user.username` is a
+filterable attribute — so the qualifier compiles to a filter while the rest of
+your terms keep Meili's typo-tolerant relevance ranking instead of degrading to
+brittle exact-match filters. Only the *first* `@token` owns the creator slot
+(a pasted sentence with a stray @mention can't silently retarget your filter),
+and deleting the token clears it.
+
+There's also a proper **creator filter** in the filter sheet: empty, it shows
+the site's top-creators leaderboard; typing runs a debounced username search;
+the pick becomes a removable pill that narrows every feed — images, videos,
+media search, and the model tabs alike.
+
+## From a post to your canvas
+
+Here's the loop-closer. A lot of CivitAI posts embed the actual ComfyUI
+workflow that made them. In the lightbox, a post with an embedded UI-format
+graph gets a **"Load onto canvas"** action: it confirms before overwriting
+unsaved changes, then loads through the same undoable path the agent bridge
+uses — snapshot, `loadGraphData`, change-tracker `checkState` — so one load is
+one Ctrl+Z. Posts that only carry the API-format prompt say so honestly
+(there's no client-side API→UI converter, and pretending otherwise corrupts
+your canvas); you can still save their JSON.
+
+The **Workflows tab** goes further: every downloadable workflow file on a model
+version gets its own "Load onto canvas" button. Raw `.json` loads directly —
+but CivitAI wraps most workflow files in `.zip` archives (780 of the 844 live
+workflow versions at last count), so the panel **unpacks the zip in the
+browser**: a central-directory walk plus `DecompressionStream("deflate-raw")`,
+no new dependency, with a picker when an archive holds several workflows and
+zip-bomb caps on entry count and uncompressed size. The download itself streams
+through a same-origin proxy route that follows CivitAI's 307 redirect
+server-side behind an SSRF guard — only CivitAI's https download CDNs, every
+DNS answer verified public, OAuth header dropped on the cross-host hop, 100MB
+cap. Gated files (CivitAI redirects some downloads to a login page, even on
+nominally public versions) come back as a clean 401 with a one-click sign-in,
+and every outcome — downloaded, parsed, empty, API-only, gated — surfaces as
+both a toast and an inline status line. The action is never a silent no-op.
+
+And when the post *doesn't* have a workflow? **Share-with-agent** hands the
+reference image — actual pixels, via the proxy's Blob route — plus its full
+generation settings to the panel agent with one intent: *match this*. The agent
+has the prompt, the negative, the parameters, and the picture to judge itself
+against, on your models, on your GPU.
+
+## The agent can open it too
+
+The browser isn't just a human surface. The agent can open it **pre-seeded**
+with a query and filters (`cmd: open_civitai`) — so "find me some good
+cyberpunk LoRAs" answers with a scrollable, filterable grid instead of a text
+dump of URLs. The actions inside are mute-aware: with the agent listening, a
+pick is handed to it; muted, the panel downloads directly.
+
+One more thing: none of this is desktop-only. The panel's browser is a direct
+port of the **mobile app's** CivitAI screens — same tabs, same lightbox, same
+creator filter — so the phone and the sidebar stay in lockstep.
+
+## Closing the loop
+
+The point was never "CivitAI, but in a modal." It's that discovery and
+execution finally live in the same place: the thing you found, its exact
+recipe, and the graph that runs it are one click apart, with no download folder
+in between. Browse in the sidebar, heart what's good, load the workflow, or
+tell the agent to match the picture — and the queue is already yours.
+
+---
+
+Grab [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and the
+[Panel](/panel) to try it, or tell us what the browser should do next at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

@@ -1,0 +1,169 @@
+---
+title: "Giving every backend eyes — and making them admit when they're blind"
+description: "An image-generation agent that can't SEE what it generated is flying blind. How the ComfyUI agent delivers vision on every backend — Claude, ChatGPT, Gemini, Ollama, OpenRouter, and friends — by treating vision as a property of the MODEL, not the provider: always attempt delivery, and on rejection degrade honestly with one images-stripped retry, a visible 📎 note, and an in-history note so the model can never pretend it saw the attachment."
+keywords:
+  - ComfyUI agent vision
+  - multimodal AI agent
+  - Ollama vision images
+  - image_url data URL
+  - ComfyUI agent sees renders
+  - local LLM vision
+  - graceful degradation AI
+  - GGUF vision projector
+---
+
+_by [artokun](https://github.com/artokun) · July 20, 2026 · vision · backends · honesty_
+
+The [Agent Panel](/panel) drives an image generator. That sentence carries an
+obligation most agent stacks quietly dodge: an agent that *makes* images had
+better be able to *look* at them. You paste a screenshot of a broken graph, or a
+render finishes on your canvas — and the agent should see it, the actual pixels,
+not a filename it pretends to have opinions about.
+
+The panel now runs on a lot of backends — Claude, ChatGPT, Gemini, Grok, and the
+whole Ollama-family crowd (Ollama, OpenRouter, LM Studio, llama.cpp, GLM, Kimi,
+Copilot, custom endpoints). This post is about how **all of them** got eyes, and
+about the design decision that turned out to matter more than any wire format:
+what the agent does when a model *doesn't* have them.
+
+## Vision belongs to the model, not the provider
+
+The tempting design is a per-provider flag: "Ollama supports vision: yes/no."
+It's also wrong. Point the same Ollama backend at `gemma4` and it sees images
+perfectly; point it at `qwen3` and it doesn't. Point the OpenAI-compatible
+adapter at DeepSeek's API and the endpoint doesn't just ignore image parts — it
+**rejects the request outright**. Same provider code path, three different
+realities. Vision is a property of the **model** (and sometimes the endpoint in
+front of it), and there's no reliable catalog telling you which is which across
+every OpenAI-compatible host someone might type into the settings box.
+
+So the backend doesn't guess. The comment in `ollama-backend.ts` is the whole
+policy:
+
+> Vision is a per-MODEL property (gemma4 sees images, qwen3 doesn't; DeepSeek's
+> API rejects image parts outright), so ALWAYS attempt delivery … and let the
+> strip-and-retry handle endpoints that reject them.
+
+Every attached image is resolved from its ComfyUI ref into inline base64 and
+sent, every time, to every model. Then one of three things happens:
+
+1. **The model sees it.** Great — that's the point.
+2. **The model silently ignores it** (text-only model, tolerant endpoint). Not
+   ideal, but not harmful — and increasingly rare as servers get stricter.
+3. **The endpoint rejects the request.** This is the interesting case, and it
+   gets exactly one recovery move.
+
+## The strip-and-retry: honesty as a feature
+
+When a request bounces because of image input, the backend does a **one-shot
+retry with every inline image stripped from history** — and it leaves two notes
+behind, aimed at two different audiences.
+
+The first is for **you**, visible in the chat:
+
+```
+📎 <model> rejected image input, so I'm continuing without the attachment —
+I can't see the image. Describe it in words, or switch to a vision-capable model.
+```
+
+The second is for **the model**, appended to every user message that lost an
+attachment:
+
+```
+[note: the attached image(s) were removed — this model/endpoint rejected image
+input. You did NOT see them; tell the user so if it matters.]
+```
+
+That second note is the load-bearing one. LLMs are pathologically agreeable:
+ask a text-only model "what do you think of the image I attached?" and it will
+happily invent a description of an image it never received. The in-history note
+forecloses that — the model can never pretend it saw the attachment, because
+its own context says, in plain text, that it didn't.
+
+This is the design principle worth stealing: **the failure mode is a clear
+message, not a hallucinated description.** A multimodal agent is only
+trustworthy if it knows — and admits — what it can't see. "I can't see the
+image, describe it or switch models" is a *feature*. A confident paragraph
+about a screenshot the model never opened is the single fastest way to torch a
+user's trust in everything else the agent says.
+
+The retry is deliberately one-shot per turn (`round--` so the rejected request
+doesn't burn a tool round), and stripping mutates history permanently — a later
+turn on the same model won't trip over the same attachment again.
+
+## One turn shape, four wire formats
+
+Upstream of all of this, the orchestrator deals in a single provider-neutral
+turn: text plus a list of ComfyUI image refs (`NeutralTurn` in
+`agent-backend.ts`). Each backend shapes that into its provider's native
+format:
+
+- **Ollama native:** raw base64 strings in the message's `images` array — no
+  data-URL prefix, that's Ollama's own chat shape.
+- **OpenAI-compatible** (OpenRouter, LM Studio, llama.cpp, DeepSeek, custom):
+  content-part arrays with `image_url` objects wrapping
+  `data:image/png;base64,...` URLs.
+- **Codex Responses** (ChatGPT OAuth): `input_image` items — and here the data
+  URL is a **plain string**, not the nested `image_url` object
+  chat/completions uses. Same data, different envelope, and mixing them up is
+  a rejection.
+- **Claude / Gemini:** inline base64 image blocks in their respective content
+  formats, shaped by each SDK adapter.
+
+The refs themselves resolve through one shared fetch against ComfyUI's `/view`
+endpoint — mime-sniffed, capped at 12 MB, and **null on any failure** rather
+than a thrown error, because the text still names the file and a missing inline
+image should degrade a turn, not kill it.
+
+## Render awareness: the agent looks at what it made
+
+Attachments you paste are half the story. The other half is the loop the panel
+closes automatically: when a workflow finishes on your canvas, the outputs are
+**injected into the agent's next turn** — no fetch, no tool call, the render
+just arrives as inline images alongside a short event note.
+
+And the injection is capability-honest. On a vision backend the note says the
+images "are attached below" and they really are. On a text-only backend the
+note says, verbatim: *"You cannot view images on this provider, but they are
+already shown to the user in the panel."* The code comment explains why the
+distinction exists: a text-only backend told "attached below" **would
+confabulate having viewed the render**. Same principle as the 📎 note — never
+hand the model a sentence it can turn into a lie.
+
+## Two field lessons
+
+**Tiny images are unreliable evidence.** During testing, a 64-pixel color
+swatch was confidently misread by a mini model — same swatch at 256 pixels,
+read correctly. Vision pipelines downscale and patch-tokenize input; a 64px
+thumbnail may arrive at the model as a handful of mushy patches. If you're
+having the agent verify a render, give it the real output, not a thumbnail —
+and if you're building your own eval swatches, make them big enough to survive
+the resize.
+
+**GGUF exports can silently go blind.** If you run local fine-tunes: a GGUF
+export can drop the vision projector (the `mmproj` component) without
+complaint, leaving you a model that *was* multimodal and now isn't — our own
+gemma4 fine-tunes are text-only until a proper multimodal re-export. This is
+exactly where the always-attempt-then-strip design earns its keep. A
+capability-flag design would have listed the base model as vision-capable and
+sent images into the void; the graceful path means your accidentally-blinded
+fine-tune fails *politely* — one 📎 message, an honest note in history, and the
+turn continues — instead of failing weird.
+
+## The contract
+
+Every backend in the panel now carries `vision: true` in its capability
+descriptor, but the flag means something slightly humble: *we will always
+attempt to deliver your images, and we will always tell the truth about what
+happened to them.* Sometimes that truth is "the model saw your render and it
+looks great." Sometimes it's "this model can't see, here's how to fix that."
+Both are fine. The only unacceptable answer is a beautiful description of an
+image nobody ever looked at.
+
+---
+
+Run an agent that actually looks at what it generates: install
+[comfyui-mcp](https://github.com/artokun/comfyui-mcp) and add the
+[Agent Panel](/panel) — see [Backends / providers](/backends) for the
+capability matrix. Star the repo or file an idea at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

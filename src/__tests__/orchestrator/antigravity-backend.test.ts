@@ -111,6 +111,22 @@ beforeEach(() => {
   hoisted.procs.length = 0;
   hoisted.killed.length = 0;
   hoisted.script.length = 0;
+  // killProcessTree has TWO platform paths: Windows shells out to `taskkill`
+  // (mocked via spawnSync above), POSIX signals the process group with
+  // process.kill(-pid). Only the Windows path was emulated, so on Linux/macOS
+  // the fake child was never terminated and every interrupt test hung to the
+  // 5s timeout — green on a Windows dev box, red on CI. Emulate the POSIX path
+  // too so these tests assert the same behavior on every platform.
+  vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+    const target = Math.abs(Number(pid)); // POSIX group kill passes -pid
+    hoisted.killed.push(target);
+    const proc = hoisted.procs.find((p) => p.pid === target);
+    if (proc && proc.exitCode === null) {
+      proc.exitCode = 1;
+      (proc as { emit: (ev: string, ...a: unknown[]) => void }).emit("exit", null, "SIGKILL");
+    }
+    return true;
+  }) as unknown as typeof process.kill);
   process.env.COMFYUI_MCP_ANTIGRAVITY_PATH = FAKE_BIN;
   delete process.env.COMFYUI_MCP_ANTIGRAVITY_PRINT_TIMEOUT;
   workDir = mkdtempSync(join(tmpdir(), "agy-test-"));
@@ -119,6 +135,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.COMFYUI_MCP_ANTIGRAVITY_PATH;
   rmSync(workDir, { recursive: true, force: true });
+  vi.mocked(process.kill).mockRestore?.();
 });
 
 describe("parseAgyModels", () => {
@@ -309,6 +326,34 @@ describe("AntigravityBackend turns", () => {
     expect(events.filter((e) => e.type === "result")).toEqual([
       { type: "result", ok: false, subtype: "cancelled" },
     ]);
+  });
+
+  it("honors an interrupt that lands BEFORE the child is assigned (spawn window)", async () => {
+    // The regression: interrupt() used to bail on `if (!this.child) return`
+    // WITHOUT setting `interrupted`. `this.child` is assigned only after
+    // spawn() returns, so a Stop pressed in that window was silently dropped
+    // and the turn ran forever (CI saw this as a 5s timeout in the interrupt
+    // test; a user sees the stop button do nothing).
+    hoisted.script.push({ hang: true });
+    const backend = new AntigravityBackend({ cwd: workDir });
+    const gen = backend.run({ channel: channelOf([{ text: "long job" }]) });
+    const events: AgentEvent[] = [];
+    const drain = (async () => {
+      for await (const ev of gen) events.push(ev);
+    })();
+
+    // Interrupt IMMEDIATELY — deliberately without waiting for the spawn, so
+    // this lands in (or before) the spawn window.
+    await backend.interrupt();
+
+    // Must still terminate. Pre-fix this hung until the test timeout.
+    await drain;
+
+    expect(events.filter((e) => e.type === "result")).toEqual([
+      { type: "result", ok: false, subtype: "cancelled" },
+    ]);
+    // and the child must not be left running
+    if (hoisted.procs[0]) expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
   });
 
   it("prepare() fails fast with install guidance when agy is missing", async () => {

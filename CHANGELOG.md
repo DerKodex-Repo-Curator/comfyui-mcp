@@ -6,6 +6,49 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.44.0] - 2026-07-21
+
+### RunPod image
+
+#### Added
+- broaden default GPU fallback list (A6000, RTX PRO 4500 Blackwell)
+- one-tap deploy (runpod_pod_create) + honest local⇄pod host switch
+- allow RUNPOD_API_KEY as a comfyui tool secret (panel-savable)
+- add RunPod to the panel API-Keys card (RUNPOD_API_KEY slot)
+- live status broadcast + idle auto-stop (gpu-cli-style control-panel backbone)
+- RunPod connector — manage a live pod by ID (status/start/stop/troubleshoot/connect) + referral deploy link
+
+#### Fixed
+- target port 3000 (RunPod ComfyUI convention), not 8188
+- idle auto-stop only applies to a pod we're rendering on
+- createPod falls back COMMUNITY→SECURE across GPU types
+
+### MCP
+
+#### Added
+- Antigravity CLI (agy) backend for Google subscription users (#262)
+- **`ltx-director` skill** — the LTX Director (Timeline) node's *Add Image /
+  Text / Audio* buttons are DOM-only and cannot be clicked by an agent, which
+  read as "the agent can't control this node". They only serialize into one
+  hidden `timeline_data` widget, which IS settable — so the node was always
+  drivable and only the knowledge was missing. Documents the verified schema
+  (track gates that silently ignore segments when off; `imageB64` actually
+  holding an `/api/view` URL, making image segments reachable via
+  `upload_image`; fractional pixel-space frames; the `guide_data` →
+  `LTXDirectorGuide` edge). Same pattern covers `PromptRelayEncodeTimeline`. (#265)
+
+#### Fixed
+- a Stop pressed during turn startup was silently dropped (#266)
+- foreign-run attribution + sub-tick run completions in the queue_status broadcast (#261)
+- start-failure follow-ups — rebind-safe settle, held mail, real spinner clear (#260)
+- a per-tab start failure can never self-exit the orchestrator (#253)
+- steer failure-diagnosis to diagnose_run over get_history (#246)
+
+#### Changed
+- make ~/.comfyui-mcp/.env the single canonical store for token secrets
+- provider registry for simple OpenAI api-key backends (#234)
+
+
 ## [0.43.1] - 2026-07-20
 
 ### MCP

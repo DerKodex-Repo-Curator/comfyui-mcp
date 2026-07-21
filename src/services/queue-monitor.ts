@@ -6,13 +6,20 @@
 // for minutes at high resolution) is invisible here — which is how a stalled job
 // once let the agent stack three more behind it before anyone noticed.
 //
-// This service opens its OWN lightweight WebSocket to COMFYUI_URL. ComfyUI
-// broadcasts `status`, `progress`, and `progress_state` to every connected
-// client, so we receive the live stream for ANY job — including the
-// browser-queued ones — without touching the panel or the agent subprocess.
-// (The legacy execution_start / executing / execution_* events are sid-scoped
-// to the QUEUING client on modern ComfyUI — verified live on 0.28 — so the
-// handlers below also derive the run state from the broadcast-safe frames.)
+// This service opens its OWN lightweight WebSocket to COMFYUI_URL, and — on
+// modern ComfyUI — supplements it with a cheap HTTP poll (see poll() below).
+// The WS handlers keep the full event vocabulary for older servers, but on
+// ComfyUI 0.28 a passive (non-originating) client receives ONLY `status`
+// frames: execution_start / executing / execution_* AND progress /
+// progress_state are all sid-scoped to the QUEUING client (verified wire-level
+// on a live 0.28.0 — a foreign run delivers nothing but queue_remaining
+// transitions here). So run ATTRIBUTION for foreign jobs must come from HTTP:
+//   • GET /queue        — queue_running entries are [number, prompt_id, ...],
+//                          which names the running prompt (issue #258);
+//   • GET /history tail — a run that starts AND finishes between polls still
+//                          lands in history, so diffing the newest ids yields a
+//                          completion event with success/error status even when
+//                          no live signal was ever observed (issue #259).
 // It holds the last-known run state and derives a stall/backlog report the
 // orchestrator surfaces to the agent as a turn-start note (the same channel as
 // the crash-dump injector).
@@ -37,6 +44,21 @@ interface MonitorState {
   // progress value ticked up) while a job runs. A stuck step re-emits the same
   // progress value, which must NOT refresh this — that's how we see the stall.
   lastActivityTs: number | null;
+  // The most recent completed run (from the /history tail diff or, on older
+  // ComfyUI, the execution_success/error WS events). Sticky: survives idle so a
+  // tab that connects late still learns what just finished.
+  lastCompleted: CompletionEvent | null;
+}
+
+/** How a finished run ended. `interrupted` = cancelled mid-run. */
+export type CompletionStatus = "success" | "error" | "interrupted";
+
+/** One finished run, observed live (WS) or recovered from the /history tail. */
+export interface CompletionEvent {
+  promptId: string;
+  status: CompletionStatus;
+  /** ms epoch when WE observed the completion (not ComfyUI's own timestamp). */
+  at: number;
 }
 
 export interface StallReport {
@@ -65,9 +87,16 @@ export interface QueueSnapshot {
   /** Progress of the current node (sampler steps), null before the first tick. */
   progressValue: number | null;
   progressMax: number | null;
+  /** The most recent completed run (sticky; null until one completes). */
+  lastCompleted: CompletionEvent | null;
 }
 
 const RECONNECT_MS = 5000;
+// /history tail entries fetched per poll. Wide enough that a realistic burst
+// of sub-second runs between 1 Hz polls stays inside the window; when a diff
+// still saturates it (every entry new), we log the potential gap instead of
+// silently claiming coverage.
+const HISTORY_TAIL_ITEMS = 32;
 
 class QueueMonitorImpl {
   private ws: WebSocket | null = null;
@@ -89,7 +118,27 @@ class QueueMonitorImpl {
     progressMax: null,
     queueRemaining: 0,
     lastActivityTs: null,
+    lastCompleted: null,
   };
+  // ---- HTTP-poll bookkeeping (the broadcast-safe channel on modern ComfyUI) ----
+  private pollInFlight = false;
+  // Bumped on every start()/stop(). A poll captures it before fetching and
+  // abandons its (now stale) responses if a retarget happened while awaiting —
+  // otherwise an in-flight /queue answer from the OLD ComfyUI could mutate
+  // state for the NEW one.
+  private pollGeneration = 0;
+  // When THIS monitor came up (ms epoch) — the priming cutoff for the history
+  // diff: tail entries that completed before this predate us and are swallowed;
+  // ones that completed after (a run finishing during startup) are reported.
+  private monitorStartTs = Date.now();
+  // /history tail diff: the ids seen on the previous poll.
+  private historyPrimed = false;
+  private historySeen = new Set<string>();
+  // Prompt ids already reported as completed — dedupes the WS event vs. the
+  // history diff observing the same finish. Bounded FIFO.
+  private completedReported = new Set<string>();
+  // Completions not yet drained by the broadcaster. Bounded.
+  private pendingCompletions: CompletionEvent[] = [];
 
   /** Open the watchdog WS to ComfyUI. Idempotent per-URL; best-effort (never
    *  throws). A retarget (new URL) or a prior stop() must re-open the socket:
@@ -101,6 +150,17 @@ class QueueMonitorImpl {
     this.stop(); // tear down any prior socket/reconnect timer (also on URL change)
     this.url = comfyuiUrl;
     this.stopped = false;
+    // A (re)start may target a DIFFERENT ComfyUI whose history tail is all new
+    // to us — invalidate any in-flight poll (generation bump), re-prime the
+    // diff, and drop completion state that belonged to the old target so its
+    // backlog can neither replay nor leak across the retarget.
+    this.pollGeneration++;
+    this.monitorStartTs = Date.now();
+    this.historyPrimed = false;
+    this.historySeen.clear();
+    this.completedReported.clear();
+    this.pendingCompletions.length = 0;
+    this.state.lastCompleted = null;
     this.connect();
   }
 
@@ -143,6 +203,7 @@ class QueueMonitorImpl {
 
   stop(): void {
     this.stopped = true;
+    this.pollGeneration++; // strand any in-flight poll's pending responses
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     try {
@@ -326,6 +387,16 @@ class QueueMonitorImpl {
       case "execution_success":
       case "execution_error":
       case "execution_interrupted": {
+        // Older ComfyUI broadcasts these to every client; modern 0.28 scopes
+        // them to the originator (own runs still pass through here when the
+        // orchestrator queued them). recordCompletion dedupes against the
+        // /history diff seeing the same finish.
+        if (typeof data.prompt_id === "string") {
+          this.recordCompletion(
+            data.prompt_id,
+            msg.type === "execution_success" ? "success" : msg.type === "execution_interrupted" ? "interrupted" : "error",
+          );
+        }
         this.clearRunning();
         this.emitEndIfIdle();
         break;
@@ -333,6 +404,182 @@ class QueueMonitorImpl {
       default:
         break;
     }
+  }
+
+  /** Record one finished run exactly once (WS event and /history diff can both
+   *  observe the same finish). Completing the tracked running prompt also
+   *  clears the run state. Never throws. */
+  private recordCompletion(promptId: string, status: CompletionStatus): void {
+    if (this.completedReported.has(promptId)) return;
+    this.completedReported.add(promptId);
+    // Bounded FIFO — Set iterates in insertion order, so drop the oldest.
+    while (this.completedReported.size > 200) {
+      const oldest = this.completedReported.values().next().value;
+      if (oldest === undefined) break;
+      this.completedReported.delete(oldest);
+    }
+    const ev: CompletionEvent = { promptId, status, at: Date.now() };
+    this.state.lastCompleted = ev;
+    this.pendingCompletions.push(ev);
+    // Bound must exceed the history tail (HISTORY_TAIL_ITEMS) so one saturated
+    // diff still reaches the broadcaster whole; beyond that, drop the oldest.
+    while (this.pendingCompletions.length > 2 * HISTORY_TAIL_ITEMS) this.pendingCompletions.shift();
+    if (this.state.runningPromptId === promptId) {
+      this.clearRunning();
+      this.emitEndIfIdle();
+    }
+  }
+
+  /** Hand the not-yet-broadcast completions to the queue_status broadcaster
+   *  (each drains exactly once). */
+  drainCompletions(): CompletionEvent[] {
+    if (this.pendingCompletions.length === 0) return [];
+    return this.pendingCompletions.splice(0);
+  }
+
+  /** GET a JSON endpoint on the monitored ComfyUI. Best-effort: null on any
+   *  failure, hard 2.5s timeout so a wedged server can't pile up polls. */
+  private async fetchJson(path: string): Promise<unknown> {
+    if (!this.url) return null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
+    (timer as { unref?: () => void }).unref?.();
+    try {
+      const res = await fetch(`${this.url.replace(/\/+$/, "")}${path}`, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      return (await res.json()) as unknown;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** One HTTP poll tick — the broadcast-safe channel on modern ComfyUI, where
+   *  the passive WS carries no attribution (see header). Reads GET /queue for
+   *  the running prompt_id + true depth (#258) and diffs GET /history's tail
+   *  for runs that finished since the last poll — including runs that started
+   *  AND finished entirely between polls (#259). Best-effort, never rejects,
+   *  self-guards against overlap. Both fetches run in PARALLEL so the
+   *  worst-case poll is one timeout, not two — overlapping ticks bail at
+   *  pollInFlight, so a serial 5s worst case would stall attribution. */
+  async poll(): Promise<void> {
+    if (this.stopped || !this.url || this.pollInFlight) return;
+    this.pollInFlight = true;
+    const gen = this.pollGeneration;
+    const fetchStart = Date.now();
+    try {
+      const [q, h] = await Promise.all([
+        this.fetchJson("/queue"),
+        this.fetchJson(`/history?max_items=${HISTORY_TAIL_ITEMS}`),
+      ]);
+      // A stop()/start() (retarget) happened while we were awaiting — these
+      // responses belong to the OLD target; writing them would corrupt the
+      // fresh state (and re-seed the old server's completions).
+      if (gen !== this.pollGeneration || this.stopped) return;
+      this.applyQueue(q, fetchStart);
+      this.applyHistory(h);
+    } catch (err) {
+      logger.debug(`[queue-monitor] poll failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.pollInFlight = false;
+    }
+  }
+
+  private applyQueue(raw: unknown, fetchStart: number): void {
+    const q = raw as { queue_running?: unknown; queue_pending?: unknown } | null;
+    if (!q || typeof q !== "object") return;
+    const running = Array.isArray(q.queue_running) ? q.queue_running : [];
+    const pending = Array.isArray(q.queue_pending) ? q.queue_pending : [];
+    this.state.queueRemaining = running.length + pending.length;
+    // queue_running entries are [number, prompt_id, prompt, extra, outputs] —
+    // the ONLY place a passive observer learns WHICH prompt runs on 0.28.
+    const first = running[0];
+    if (Array.isArray(first) && typeof first[1] === "string") {
+      this.adoptRunningPrompt(first[1]);
+    } else if (running.length === 0 && this.state.runningPromptId !== null) {
+      // Empty queue → the tracked run is over. Skip the clear if a run was
+      // adopted AFTER this fetch began (the response would be stale for it).
+      if ((this.state.lastActivityTs ?? 0) <= fetchStart) {
+        this.clearRunning();
+        this.emitEndIfIdle();
+      }
+    } else if (running.length === 0) {
+      this.emitEndIfIdle();
+    }
+  }
+
+  /** Read one /history entry into diff-able facts. `queueNum` is ComfyUI's
+   *  monotonic queue counter (prompt[0]) — /history object order is NOT
+   *  chronological (see history-select.ts), so this is the only real order
+   *  key. `completedTs` is the newest server-side message timestamp (the end
+   *  event is always last), null when the entry carries none. */
+  private parseHistoryEntry(
+    id: string,
+    raw: unknown,
+  ): { id: string; queueNum: number; status: CompletionStatus; completedTs: number | null } {
+    const entry = raw as {
+      prompt?: unknown;
+      status?: { status_str?: unknown; completed?: unknown; messages?: unknown };
+    } | null;
+    const st = entry && typeof entry === "object" ? entry.status : undefined;
+    const messages = Array.isArray(st?.messages) ? (st.messages as unknown[]) : [];
+    let status: CompletionStatus;
+    if (st?.completed === true || st?.status_str === "success" || st === undefined) {
+      status = "success";
+    } else if (messages.some((m) => Array.isArray(m) && m[0] === "execution_interrupted")) {
+      status = "interrupted";
+    } else {
+      status = "error";
+    }
+    let completedTs: number | null = null;
+    for (const m of messages) {
+      if (!Array.isArray(m)) continue;
+      const ts = (m[1] as { timestamp?: unknown } | undefined)?.timestamp;
+      if (typeof ts === "number" && (completedTs === null || ts > completedTs)) completedTs = ts;
+    }
+    const prompt = entry && typeof entry === "object" ? entry.prompt : undefined;
+    const queueNum =
+      Array.isArray(prompt) && typeof prompt[0] === "number" ? prompt[0] : Number.MAX_SAFE_INTEGER;
+    return { id, queueNum, status, completedTs };
+  }
+
+  private applyHistory(raw: unknown): void {
+    const h = raw as Record<string, unknown> | null;
+    if (!h || typeof h !== "object" || Array.isArray(h)) return;
+    const ids = Object.keys(h);
+    if (!this.historyPrimed) {
+      // First look after (re)start. Entries whose completion predates the
+      // monitor are swallowed — but a run that finished DURING startup
+      // (server-side timestamp after monitorStartTs) is a real completion the
+      // subscribers must still see, not priming noise. (Timestamps are the
+      // server's clock; against a remote host with heavy skew this degrades to
+      // at worst a replayed or swallowed tail entry at startup — best-effort.)
+      this.historyPrimed = true;
+      this.historySeen = new Set(ids);
+      const fresh = ids
+        .map((id) => this.parseHistoryEntry(id, h[id]))
+        .filter((e) => e.completedTs !== null && e.completedTs > this.monitorStartTs)
+        .sort((a, b) => a.queueNum - b.queueNum);
+      for (const e of fresh) this.recordCompletion(e.id, e.status);
+      return;
+    }
+    const unseen = ids
+      .filter((id) => !this.historySeen.has(id))
+      .map((id) => this.parseHistoryEntry(id, h[id]))
+      // Oldest-first by ComfyUI's monotonic queue number, so the burst replays
+      // in true order and lastCompleted lands on the genuinely newest run.
+      .sort((a, b) => a.queueNum - b.queueNum);
+    // Saturated window: EVERY entry of a full tail is new since the last
+    // successful diff — completions may have scrolled past unobserved. Say so
+    // instead of silently claiming full coverage.
+    if (unseen.length >= HISTORY_TAIL_ITEMS && unseen.length === ids.length) {
+      logger.warn(
+        `[queue-monitor] history tail saturated (${unseen.length} new entries in one diff) — some run completions may have been missed between polls`,
+      );
+    }
+    for (const e of unseen) this.recordCompletion(e.id, e.status);
+    this.historySeen = new Set(ids);
   }
 
   /** Cheap snapshot for backpressure (panel_run) and the live `queue_status`
@@ -346,6 +593,7 @@ class QueueMonitorImpl {
       currentNode: this.state.currentNode,
       progressValue: this.state.progressValue,
       progressMax: this.state.progressMax,
+      lastCompleted: this.state.lastCompleted,
     };
   }
 

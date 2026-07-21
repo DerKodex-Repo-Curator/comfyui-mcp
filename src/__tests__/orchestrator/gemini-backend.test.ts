@@ -28,7 +28,17 @@ const hoisted = vi.hoisted(() => ({
   received: [] as Array<Record<string, unknown>>,
   // Per-test server behavior: "complete" auto-finishes the prompt with end_turn;
   // "cancel" streams a bit then WAITS for session/cancel before resolving.
-  config: { mode: "complete" as "complete" | "cancel" },
+  config: {
+    mode: "complete" as "complete" | "cancel",
+    // authMethods advertised in the initialize result (empty = none).
+    authMethods: [] as Array<{ id?: string; name?: string; description?: string }>,
+    // When true, session/new fails with an `auth_required` error until the client
+    // has sent an `authenticate` request (models the CLI being signed out).
+    requireAuth: false,
+    // Flipped by the authenticate handler; the last methodId the client sent.
+    authenticated: false,
+    lastAuthMethodId: undefined as string | undefined,
+  },
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -139,14 +149,24 @@ vi.mock("node:child_process", async (importOriginal) => {
                 mcpCapabilities: { http: true, sse: false },
               },
               agentInfo: { name: "gemini", title: "Gemini", version: "test" },
-              authMethods: [],
+              authMethods: hoisted.config.authMethods,
             },
           });
         } else if (method === "session/new" && id !== undefined) {
-          write({ jsonrpc: "2.0", id, result: { sessionId: SESSION_ID } });
+          if (hoisted.config.requireAuth && !hoisted.config.authenticated) {
+            write({
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32000, message: "auth required", data: { reason: "auth_required" } },
+            });
+          } else {
+            write({ jsonrpc: "2.0", id, result: { sessionId: SESSION_ID } });
+          }
         } else if (method === "session/load" && id !== undefined) {
           write({ jsonrpc: "2.0", id, result: {} });
         } else if (method === "authenticate" && id !== undefined) {
+          hoisted.config.authenticated = true;
+          hoisted.config.lastAuthMethodId = (msg.params as { methodId?: string } | undefined)?.methodId;
           write({ jsonrpc: "2.0", id, result: {} });
         } else if (method === "session/prompt" && id !== undefined) {
           // Stream on the next tick so the request is registered first.
@@ -183,6 +203,11 @@ beforeEach(async () => {
   hoisted.spawnArgs.length = 0;
   hoisted.received.length = 0;
   hoisted.config.mode = "complete";
+  hoisted.config.authMethods = [];
+  hoisted.config.requireAuth = false;
+  hoisted.config.authenticated = false;
+  hoisted.config.lastAuthMethodId = undefined;
+  delete process.env.GEMINI_API_KEY;
   ({ GeminiBackend } = await import("../../orchestrator/gemini-backend.js"));
 });
 
@@ -303,6 +328,82 @@ describe("GeminiBackend (ACP over stdio)", () => {
     await backend.close();
   });
 
+  it("on auth_required, authenticates with the API-KEY method when GEMINI_API_KEY is set (not method[0])", async () => {
+    // The free Google/Code-Assist OAuth login was retired 2026-06-18; the fix must
+    // pick the API-key method, not blindly authMethods[0] (the OAuth one).
+    process.env.GEMINI_API_KEY = "AIza-test-key";
+    hoisted.config.requireAuth = true;
+    hoisted.config.authMethods = [
+      { id: "oauth-personal", name: "Log in with Google" },
+      { id: "gemini-api-key", name: "Gemini API Key" },
+    ];
+
+    const backend = new GeminiBackend({ cwd: process.cwd() });
+    const channel = makeChannel();
+    const events: AgentEvent[] = [];
+    const run = consume(backend.run({ channel: channel.iterable }), events);
+
+    channel.push({ text: "hi" });
+    await waitFor(() => events.some((e) => e.type === "result"));
+    channel.close();
+    await run;
+
+    // It authenticated with the API-key method id, then completed a normal turn.
+    expect(hoisted.config.lastAuthMethodId).toBe("gemini-api-key");
+    expect(events.some((e) => e.type === "result" && e.ok === true)).toBe(true);
+
+    await backend.close();
+  });
+
+  it("on auth_required, falls back to the first advertised method when no GEMINI_API_KEY", async () => {
+    delete process.env.GEMINI_API_KEY;
+    hoisted.config.requireAuth = true;
+    hoisted.config.authMethods = [
+      { id: "oauth-personal", name: "Log in with Google" },
+      { id: "gemini-api-key", name: "Gemini API Key" },
+    ];
+
+    const backend = new GeminiBackend({ cwd: process.cwd() });
+    const channel = makeChannel();
+    const events: AgentEvent[] = [];
+    const run = consume(backend.run({ channel: channel.iterable }), events);
+
+    channel.push({ text: "hi" });
+    await waitFor(() => events.some((e) => e.type === "result"));
+    channel.close();
+    await run;
+
+    expect(hoisted.config.lastAuthMethodId).toBe("oauth-personal");
+
+    await backend.close();
+  });
+
+  it("prefers the real gemini-api-key method over a Vertex decoy that mentions 'API key'", async () => {
+    process.env.GEMINI_API_KEY = "AIza-test-key";
+    hoisted.config.requireAuth = true;
+    // Vertex is advertised FIRST and its blurb mentions "API key" — the strong
+    // match must still pick the canonical gemini-api-key method, not the decoy.
+    hoisted.config.authMethods = [
+      { id: "vertex-ai", name: "Vertex AI", description: "Use a Google Cloud project or API key" },
+      { id: "gemini-api-key", name: "Gemini API Key" },
+      { id: "oauth-personal", name: "Log in with Google" },
+    ];
+
+    const backend = new GeminiBackend({ cwd: process.cwd() });
+    const channel = makeChannel();
+    const events: AgentEvent[] = [];
+    const run = consume(backend.run({ channel: channel.iterable }), events);
+
+    channel.push({ text: "hi" });
+    await waitFor(() => events.some((e) => e.type === "result"));
+    channel.close();
+    await run;
+
+    expect(hoisted.config.lastAuthMethodId).toBe("gemini-api-key");
+
+    await backend.close();
+  });
+
   it("interrupt() sends session/cancel and the turn ends with a single cancelled result", async () => {
     hoisted.config.mode = "cancel";
     const backend = new GeminiBackend({ cwd: process.cwd() });
@@ -336,7 +437,12 @@ describe("GeminiBackend (ACP over stdio)", () => {
   it("listModels returns the static Gemini catalog (no effort metadata)", async () => {
     const backend = new GeminiBackend();
     const models = await backend.listModels();
-    expect(models.map((m) => m.id)).toEqual(["gemini-2.5-pro", "gemini-2.5-flash"]);
+    expect(models.map((m) => m.id)).toEqual([
+      "gemini-pro-latest",
+      "gemini-flash-latest",
+      "gemini-3.1-pro-preview",
+      "gemini-3.5-flash",
+    ]);
     // Gemini has no discrete effort scale → no effort metadata (panel hides picker).
     expect(models.every((m) => m.supportsEffort === undefined && m.supportedEffortLevels === undefined)).toBe(true);
   });
@@ -347,7 +453,7 @@ describe("GeminiBackend (ACP over stdio)", () => {
     const backend = new GeminiBackend({ cwd: process.cwd() });
     const channel = makeChannel();
     const events: AgentEvent[] = [];
-    const run = consume(backend.run({ channel: channel.iterable, model: "gemini-2.5-flash" }), events);
+    const run = consume(backend.run({ channel: channel.iterable, model: "gemini-flash-latest" }), events);
 
     channel.push({ text: "hi" });
     await waitFor(() => events.some((e) => e.type === "result"));
@@ -357,13 +463,13 @@ describe("GeminiBackend (ACP over stdio)", () => {
     expect(hoisted.spawnArgs).toHaveLength(1);
     expect(hoisted.spawnArgs[0]).toContain("--acp");
     expect(hoisted.spawnArgs[0]).toContain("--model");
-    expect(hoisted.spawnArgs[0][hoisted.spawnArgs[0].indexOf("--model") + 1]).toBe("gemini-2.5-flash");
+    expect(hoisted.spawnArgs[0][hoisted.spawnArgs[0].indexOf("--model") + 1]).toBe("gemini-flash-latest");
 
     await backend.close();
   });
 
   it("a live setModel() respawns the CLI with the new --model and a fresh session", async () => {
-    const backend = new GeminiBackend({ cwd: process.cwd(), model: "gemini-2.5-pro" });
+    const backend = new GeminiBackend({ cwd: process.cwd(), model: "gemini-pro-latest" });
     const channel = makeChannel();
     const events: AgentEvent[] = [];
     const run = consume(backend.run({ channel: channel.iterable }), events);
@@ -372,10 +478,10 @@ describe("GeminiBackend (ACP over stdio)", () => {
     channel.push({ text: "turn one" });
     await waitFor(() => events.filter((e) => e.type === "result").length >= 1);
     expect(hoisted.spawnArgs).toHaveLength(1);
-    expect(hoisted.spawnArgs[0][hoisted.spawnArgs[0].indexOf("--model") + 1]).toBe("gemini-2.5-pro");
+    expect(hoisted.spawnArgs[0][hoisted.spawnArgs[0].indexOf("--model") + 1]).toBe("gemini-pro-latest");
 
     // Live model switch (panel picker → PanelAgent.setOptions → agent.setModel).
-    await backend.setModel("gemini-2.5-flash");
+    await backend.setModel("gemini-flash-latest");
 
     // Next turn must transparently respawn with the new --model + a fresh session.
     channel.push({ text: "turn two" });
@@ -386,7 +492,7 @@ describe("GeminiBackend (ACP over stdio)", () => {
     // A SECOND `gemini --acp` was spawned, pinned to the new model.
     expect(hoisted.spawnArgs).toHaveLength(2);
     expect(hoisted.spawnArgs[1]).toContain("--acp");
-    expect(hoisted.spawnArgs[1][hoisted.spawnArgs[1].indexOf("--model") + 1]).toBe("gemini-2.5-flash");
+    expect(hoisted.spawnArgs[1][hoisted.spawnArgs[1].indexOf("--model") + 1]).toBe("gemini-flash-latest");
 
     // The respawn opened a fresh session → a second `session` event was emitted.
     expect(events.filter((e) => e.type === "session").length).toBe(2);
@@ -397,7 +503,7 @@ describe("GeminiBackend (ACP over stdio)", () => {
   });
 
   it("ignores a non-Gemini model id passed to setModel (e.g. the Claude panel model)", async () => {
-    const backend = new GeminiBackend({ cwd: process.cwd(), model: "gemini-2.5-pro" });
+    const backend = new GeminiBackend({ cwd: process.cwd(), model: "gemini-pro-latest" });
     const channel = makeChannel();
     const events: AgentEvent[] = [];
     const run = consume(backend.run({ channel: channel.iterable }), events);

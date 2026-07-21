@@ -38,13 +38,15 @@
 //                            no model enumeration; the model is selected at SPAWN via
 //                            the CLI `--model` flag (see resolveBin/spawn below)
 //
-// AUTH (NO API KEY — the CLI owns auth): Gemini CLI authenticates itself via
-// Google OAuth / Code Assist (the user runs `gemini` once to sign in). This
-// backend NEVER passes an API key; it just spawns the already-authenticated CLI.
-// If the CLI is signed out, `session/new` returns an `auth_required` error — we
-// attempt one `authenticate` with the first advertised auth method, then surface
-// a clear "run `gemini` and sign in" message (the OAuth browser flow itself is
-// owned by the CLI and cannot be completed headlessly).
+// AUTH (the CLI owns auth): Gemini CLI authenticates either via a Gemini API key
+// (USE_GEMINI — read from GEMINI_API_KEY, which we forward through the spawned
+// process.env) or via Google OAuth / Code Assist (paid/enterprise only — the free
+// individual login was retired 2026-06-18). If the CLI is unauthenticated,
+// `session/new` returns an `auth_required` error — we then call `authenticate`
+// with the API-key method when GEMINI_API_KEY is set (see pickAuthMethod), else
+// the first advertised method, and on failure surface a clear message pointing at
+// the GEMINI_API_KEY path. API-key auth completes headlessly; the OAuth browser
+// flow does not and must be done once by running `gemini` directly.
 //
 // PARITY with Codex/Claude: the Gemini backend gets the SAME tool surface — the
 // headless `comfyui` stdio MCP plus the `panel` HTTP MCP for live-graph panel_*
@@ -406,12 +408,26 @@ interface AcpInitializeResult {
 // Gemini's "thinking" is a token BUDGET, not a discrete effort scale, so we do
 // NOT advertise supportsEffort/supportedEffortLevels: the panel's normalizeModels
 // then hides the effort dropdown (omission is the documented "no effort control"
-// signal). gemini-2.5-pro is the default.
+// signal).
+//
+// PIN THE FLOATING ALIASES FIRST. A static catalog rots: as of 2026-07-20 Google
+// returns 404 "no longer available to new users" for BOTH former entries
+// (gemini-2.5-pro AND gemini-2.5-flash) on a newly-issued API key, so the old
+// default was dead on arrival for every new user. `gemini-pro-latest` /
+// `gemini-flash-latest` are Google's floating aliases (verified resolving to
+// gemini-3.1-pro-preview / gemini-3.5-flash) and keep tracking the current
+// generation without another code change. The pinned ids below are the concrete
+// models those aliases resolved to, kept for reproducibility.
+// Verified against generativelanguage.googleapis.com on 2026-07-20: the four
+// entries below return 200; gemini-2.5-pro / gemini-2.5-flash / gemini-3-pro-preview
+// return 404.
 const GEMINI_MODELS: ModelChoice[] = [
-  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { id: "gemini-pro-latest", label: "Gemini Pro (latest)" },
+  { id: "gemini-flash-latest", label: "Gemini Flash (latest)" },
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (preview)" },
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
 ];
-const GEMINI_DEFAULT_MODEL = "gemini-2.5-pro";
+const GEMINI_DEFAULT_MODEL = "gemini-pro-latest";
 
 /** Does this id look like a Gemini model (vs. the Claude panel model PanelAgent
  *  unconditionally passes as opts.model)? Used so the configured Gemini model
@@ -637,9 +653,10 @@ export class GeminiBackend implements AgentBackend {
 
   /** Ensure a live ACP session exists, creating (session/new) or resuming
    *  (session/load) one. Handles an `auth_required` error from session/new by
-   *  attempting a single `authenticate` with the first advertised method, then
-   *  retrying — surfacing a clear sign-in message if it still fails. Returns the
-   *  session id. */
+   *  attempting a single `authenticate` with the API-key method when GEMINI_API_KEY
+   *  is set (else the first advertised method — see pickAuthMethod), then retrying
+   *  — surfacing a clear sign-in message if it still fails. Returns the session
+   *  id. */
   private async ensureSession(client: AcpClient, cwd: string, resumeId: string | null): Promise<string> {
     const mcpServers = this.deps.mcpServers ? buildAcpMcpServers(this.deps.mcpServers) : [];
     const canLoad = this.agentCaps?.loadSession === true;
@@ -661,30 +678,93 @@ export class GeminiBackend implements AgentBackend {
       if (!res?.sessionId) throw new Error("gemini --acp session/new returned no sessionId.");
       return res.sessionId;
     };
+    // PROACTIVE API-key auth. When GEMINI_API_KEY is set we authenticate up front
+    // rather than only reacting to `auth_required`. Why: a CLI that was previously
+    // signed in keeps `security.auth.selectedType: "oauth-personal"` + cached OAuth
+    // creds, which OUTRANK GEMINI_API_KEY — so `session/new` SUCCEEDS via the (now
+    // dead, post-2026-06-18) individual OAuth without ever raising `auth_required`,
+    // then fails at request time ("session keeps ending"). Authenticating with the
+    // API-key method here switches the CLI to USE_GEMINI and clears the stale creds
+    // (the ACP `authenticate` handler drops cached creds when the method changes),
+    // so the reactive retry below only matters for a never-signed-in CLI.
+    if (process.env.GEMINI_API_KEY?.trim()) {
+      const apiKeyMethod = this.pickAuthMethod();
+      if (apiKeyMethod) {
+        try {
+          await client.request("authenticate", { methodId: apiKeyMethod });
+        } catch (err) {
+          logger.warn(
+            `[gemini-backend] proactive API-key authenticate failed (${msgOf(err)}) — continuing to session/new`,
+          );
+        }
+      }
+    }
     try {
       this.sessionId = await createNew();
     } catch (err) {
-      if (this.isAuthRequired(err) && this.authMethods[0]?.id) {
-        // The CLI owns auth (Google OAuth). Try the first advertised method once;
-        // if the CLI isn't already signed in this cannot complete headlessly.
-        try {
-          await client.request("authenticate", { methodId: this.authMethods[0].id });
-          this.sessionId = await createNew();
-        } catch {
-          throw new Error(
-            "Gemini CLI is not signed in. Run `gemini` once and complete the Google sign-in, then reconnect.",
-          );
-        }
-      } else if (this.isAuthRequired(err)) {
-        throw new Error(
-          "Gemini CLI is not signed in. Run `gemini` once and complete the Google sign-in, then reconnect.",
-        );
-      } else {
-        throw err;
+      if (!this.isAuthRequired(err)) throw err;
+      // The CLI owns auth. The free "Sign in with Google" / Code-Assist login for
+      // individuals was retired 2026-06-18; API keys (USE_GEMINI) still work. Pick
+      // the API-key auth method when GEMINI_API_KEY is set rather than blindly the
+      // first advertised method (OAuth — now a dead loop for individuals). The key
+      // itself already reaches the CLI via the spawned process.env.
+      const methodId = this.pickAuthMethod();
+      if (!methodId) throw new Error(this.authFailureMessage());
+      try {
+        await client.request("authenticate", { methodId });
+        this.sessionId = await createNew();
+      } catch {
+        throw new Error(this.authFailureMessage());
       }
     }
     this.needsSystemPreamble = !!this.deps.systemAppend; // fresh session → persona on first turn
     return this.sessionId!;
+  }
+
+  /** Choose the ACP auth method for the `authenticate` retry. Prefers the Gemini
+   *  API-key method (USE_GEMINI) when GEMINI_API_KEY is set — the free Google /
+   *  Code-Assist OAuth login for individuals was retired 2026-06-18, so blindly
+   *  taking authMethods[0] (OAuth) now dead-loops. Falls back to the first
+   *  advertised method when no key is set or no API-key method is advertised. The
+   *  methodId is the CLI's AuthType value (e.g. "gemini-api-key"); we match against
+   *  the CLI's own advertised methods rather than hardcode the literal, so this
+   *  survives AuthType value changes across gemini-cli versions. */
+  private pickAuthMethod(): string | undefined {
+    const methods = this.authMethods;
+    if (methods.length === 0) return undefined;
+    if (process.env.GEMINI_API_KEY?.trim()) {
+      const hay = (m: AcpAuthMethod) =>
+        `${m.id ?? ""} ${m.name ?? ""} ${m.description ?? ""}`.toLowerCase();
+      // Strong match: the canonical AuthType value, or a method naming BOTH gemini
+      // and api-key (so a Vertex/OAuth method that merely mentions "api key" in its
+      // blurb can't win).
+      const strong = methods.find(
+        (m) =>
+          m.id === "gemini-api-key" ||
+          m.id === "use_gemini" ||
+          (/gemini/.test(hay(m)) && /api.?key/.test(hay(m))),
+      );
+      if (strong?.id) return strong.id;
+      // Loose fallback: an api-key-ish method that is clearly NOT oauth/vertex.
+      const loose = methods.find((m) => {
+        const h = hay(m);
+        return /api.?key|use_gemini/.test(h) && !/oauth|vertex|sign.?in|log.?in/.test(h);
+      });
+      if (loose?.id) return loose.id;
+    }
+    return methods[0]?.id;
+  }
+
+  /** A clear sign-in error reflecting the 2026-06-18 individual-OAuth sunset:
+   *  points key-holders at a likely bad/unrestricted key, and everyone else at the
+   *  GEMINI_API_KEY path (the free Google login no longer works for individuals). */
+  private authFailureMessage(): string {
+    return process.env.GEMINI_API_KEY?.trim()
+      ? "Gemini CLI rejected the API key. Ensure GEMINI_API_KEY is a valid, API-restricted key " +
+          "(unrestricted standard keys are rejected as of 2026-06-19), then reconnect."
+      : "Gemini CLI is not authenticated. The free Google / Code-Assist login for individuals ended " +
+          "2026-06-18 — set GEMINI_API_KEY (a restricted AI Studio key) in ~/.comfyui-mcp/.env, or run " +
+          "`gemini` once and sign in with a paid / enterprise account, then reconnect.";
   }
 
   /** Does this error look like an ACP `auth_required`? Reads the JSON-RPC error

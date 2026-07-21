@@ -76,6 +76,7 @@ import { SYSTEM as MODEL_CARD_SYSTEM } from "./ai-proposer.js";
 import { resolvePrompt, registerPrompt, onPromptsChanged } from "../services/prompt-overrides.js";
 import { allBackendReadiness } from "./backend-readiness.js";
 import { handleOAuthBegin, handleOAuthStatus, handleOAuthSignout } from "./oauth-bridge.js";
+import { buildStartFailureNotice } from "./start-failure-notice.js";
 import { OAUTH_PROVIDERS } from "../services/oauth-flow.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import { startPanelConsoleHttpServer, type PanelConsoleHttpServer } from "./panel-console-http.js";
@@ -1730,26 +1731,11 @@ export async function runPanelOrchestrator(): Promise<void> {
     // cleanly. This must NOT self-exit — a bad moonshot key on one tab was
     // killing healthy sessions on every other tab.
     onStartFailure: (key, message) => {
-      const backend = backendOf(key);
-      const panelTab = panelTabOf(key);
-      const reg = openAiKeyProvider(backend);
-      const hint = reg
-        ? `Check your ${reg.slotLabel} API key in the API Keys card (${reg.envKeys[0]}), then Disconnect → Connect to retry.`
-        : backend === "openrouter"
-          ? "Check your OpenRouter API key in the API Keys card (OPENROUTER_API_KEY), then Disconnect → Connect to retry."
-          : backend === "custom"
-            ? "Check the base URL and API key in Settings → Custom endpoint, then Disconnect → Connect to retry."
-            : "Check the provider's credentials/login, then Disconnect → Connect to retry.";
-      bridge.push(
-        { type: "say", text: `⚠️ The ${backend} agent could not start: ${message} — ${hint}` },
-        panelTab,
-      );
-      bridge.push({ type: "ack", ok: false, kind: "degraded" }, panelTab);
-      // The user_message path already pushed turn:"working", and the panel
-      // clears its thinking spinner ONLY on turn:"done" — without this the
-      // degraded tab sits on a live spinner for the 120s safety timeout
-      // (adversarial review of #253, finding 1).
-      bridge.push({ type: "turn", state: "done" }, panelTab);
+      // Frame construction (hint selection via the key-provider registry,
+      // composite-key → panel-tab split, say + degraded ack + turn:done) lives
+      // in start-failure-notice.ts so it is unit-testable (issue #255).
+      const { panelTab, backend, frames } = buildStartFailureNotice(key, message, defaultBackend);
+      for (const frame of frames) bridge.push(frame, panelTab);
       logger.warn(
         `[panel-orchestrator] tab ${panelTab.slice(0, 8)} (${backend}) agent failed to start — degraded THIS tab only, other tabs unaffected (${message})`,
       );
@@ -3210,7 +3196,17 @@ export async function runPanelOrchestrator(): Promise<void> {
         },
         event.tab_id,
       );
-      bridge.push({ type: "turn", state: "idle" }, event.tab_id); // clear the working spinner
+      // Clear the working spinner — the panel's turn handler only recognizes
+      // "working" and "done", so the old "idle" frame never cleared it and the
+      // spinner ran until the 120s safety timeout (issue #257). But ONLY when no
+      // agent turn is actually in flight for this tab: a tab-wide "done" during
+      // an ACTIVE earlier turn would hide THAT turn's spinner and disarm its
+      // resume nudge (the idle frame was a load-bearing no-op in that case —
+      // #260 review). When a turn IS active we push nothing: the live turn's own
+      // turn:"done" clears the spinner at the right moment.
+      if (!manager.isTurnActive(key)) {
+        bridge.push({ type: "turn", state: "done" }, event.tab_id);
+      }
       return;
     }
     manager.send(agentKeyFor(event.tab_id), outText, sendOpts);
@@ -3375,6 +3371,11 @@ export async function runPanelOrchestrator(): Promise<void> {
   selfRestarter = new SelfRestarter({
     allIdle: () =>
       manager.allIdle() &&
+      // Failed-start held mail (issue #256): teardown erases it, so a restart
+      // while it's parked would silently drop the messages awaiting re-delivery.
+      // (allIdle() already covers this; kept explicit alongside heldDuringGen so
+      // the gate reads as the full "nothing queued or held" contract.)
+      !manager.hasHeldMail() &&
       ![...heldDuringGen.values()].some((msgs) => msgs.length > 0) &&
       !QueueMonitor.isBusy(),
     announce: (text) => void bridge.push({ type: "say", text }),

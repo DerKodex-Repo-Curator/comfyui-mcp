@@ -445,8 +445,9 @@ export class PanelAgent {
     return this.queue.length > 0;
   }
   /** Remove and return any unsent queued messages — so a session restart can hand
-   *  them to the replacement agent instead of dropping them. */
-  takePending(): Array<{ text: string; images?: ImageRef[] }> {
+   *  them to the replacement agent instead of dropping them. Items keep their
+   *  panel `mid`, so re-delivery still flips the right bubble on dequeue (seen). */
+  takePending(): Array<{ text: string; images?: ImageRef[]; mid?: string }> {
     const items = this.queue;
     this.queue = [];
     return items;
@@ -1087,6 +1088,12 @@ export class PanelAgentManager {
   private opts: PanelAgentManagerOptions;
   /** Per-tab session id to resume on the next spawn (reload restore). */
   private pendingResume = new Map<string, string>();
+  /** Held mail (issue #256): messages queued into an agent that then FAILED to
+   *  start (prepare() rejected before the channel was ever consumed) are
+   *  captured here at settle(err) instead of dying with the agent — the next
+   *  spawn on the same composite key re-delivers them, so nothing sent into the
+   *  spawn → prepare()-reject window is silently dropped. */
+  private heldMessages = new Map<string, Array<{ text: string; images?: ImageRef[]; mid?: string }>>();
   /** Tabs whose effort changed mid-turn — the session restart is deferred to the
    *  next idle moment so we never interrupt (and silently drop) a live reply. */
   private pendingEffortRestart = new Set<string>();
@@ -1267,9 +1274,23 @@ export class PanelAgentManager {
   }
 
   /** Cancel a still-queued message for a tab (user edited/deleted it before the
-   *  agent read it). Returns true if it was removed from the queue. */
+   *  agent read it). Returns true if it was removed from the queue. Also reaches
+   *  HELD mail (issue #256 follow-up): after a failed start parks messages in
+   *  heldMessages there is no live agent, but the user can still delete/edit the
+   *  bubble — without this the cancelled prompt would execute on the next spawn
+   *  (possibly alongside its replacement). */
   cancelQueued(tabId: string, mid: string): boolean {
-    return this.agents.get(tabId)?.cancelQueued(mid) ?? false;
+    if (this.agents.get(tabId)?.cancelQueued(mid)) return true;
+    const held = this.heldMessages.get(tabId);
+    if (held) {
+      const i = held.findIndex((item) => item.mid === mid);
+      if (i >= 0) {
+        held.splice(i, 1);
+        if (held.length === 0) this.heldMessages.delete(tabId);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Replace a tab's agent with a fresh one (picks up the manager's current
@@ -1280,7 +1301,7 @@ export class PanelAgentManager {
     const resume = oldAgent.sessionId ?? undefined;
     const pending = oldAgent.takePending();
     const fresh = this.spawn(tabId, resume); // new agent owns the tab now
-    for (const item of pending) fresh.send(item.text, { images: item.images });
+    for (const item of pending) fresh.send(item.text, { images: item.images, mid: item.mid });
     if (nudge) fresh.send(nudge);
     void oldAgent.stop(); // retire the old one; it's no longer mapped
     return pending.length;
@@ -1315,18 +1336,58 @@ export class PanelAgentManager {
     logger.info(
       `[panel-orchestrator] spawning agent for tab ${tabId.slice(0, 8)}${resume ? " (resume)" : ""} (${this.agents.size} active)`,
     );
+    // Re-deliver mail orphaned by a previous FAILED start on this key (issue
+    // #256): the doomed agent's still-queued messages were captured at
+    // settle(err) below; queue them into the fresh agent FIRST so they run
+    // ahead of whatever message triggered this spawn (chronological order).
+    // If this start fails too, settle(err) captures them right back — no loss.
+    const held = this.heldMessages.get(tabId);
+    if (held?.length) {
+      this.heldMessages.delete(tabId);
+      for (const item of held) agent.send(item.text, { images: item.images, mid: item.mid });
+      logger.info(
+        `[panel-orchestrator] tab ${tabId.slice(0, 8)} re-delivering ${held.length} message(s) held from the previous failed start`,
+      );
+    }
     // start() now SELF-RESTARTS internally on session-end, so it only settles on
     // an intentional stop() or after it gives up (repeated immediate failures),
     // or it rejects on a hard start failure. In the give-up / reject cases, drop
     // the dead agent (if still mapped and not stopped on purpose) so the next
     // user message spawns a fresh one.
     const settle = (err?: unknown) => {
-      if (this.agents.get(tabId) !== agent || agent.isStopped) return;
+      if (agent.isStopped) return;
+      // Locate the agent by IDENTITY, not by its spawn-time key (issue #255):
+      // rebindAgent() may have moved a still-starting agent to a NEW key (panel
+      // tab-id migration), and the old key-based guard (agents.get(tabId) !==
+      // agent) early-returned in that case — a prepare()-rejected agent then
+      // stayed mapped under the new key forever: hasLiveAgent true, queue never
+      // drained, no warning, tab wedged until reset. The failure must clean up
+      // (and report onStartFailure for) whatever key CURRENTLY maps this agent.
+      let key: string | undefined;
+      for (const [k, a] of this.agents) {
+        if (a === agent) {
+          key = k;
+          break;
+        }
+      }
+      if (key === undefined) return; // already replaced/dropped — nothing to settle
       const gaveUp = agent.gaveUp;
-      this.agents.delete(tabId);
+      this.agents.delete(key);
       if (err) {
         const m = msgOf(err);
-        logger.error(`[panel-agent ${tabId.slice(0, 8)}] failed to start: ${m}`);
+        logger.error(`[panel-agent ${key.slice(0, 8)}] failed to start: ${m}`);
+        // Held mail (issue #256): prepare() rejected before the channel was
+        // ever consumed, so EVERY message sent since the spawn is still in the
+        // agent's queue — including the one that triggered it. Capture them
+        // (BEFORE stop(), which closes the agent) for re-delivery by the next
+        // spawn on this key, so nothing dies silently with the doomed agent.
+        const orphaned = agent.takePending();
+        if (orphaned.length) {
+          this.heldMessages.set(key, [...(this.heldMessages.get(key) ?? []), ...orphaned]);
+          logger.warn(
+            `[panel-orchestrator] tab ${key.slice(0, 8)} holding ${orphaned.length} undelivered message(s) — re-delivered on the next successful start`,
+          );
+        }
         // PER-TAB degradation (issue #250): a hard start failure is almost
         // always a tab-local configuration error — an invalid API key (the
         // endpoint 401s in prepare()), an unreachable base URL, a missing CLI
@@ -1335,8 +1396,11 @@ export class PanelAgentManager {
         // including healthy sessions on different providers. The agent slot was
         // cleared above, so after the user fixes the key, the next message /
         // Disconnect → Connect spawns a fresh agent on the same tab.
-        if (this.opts.onStartFailure) this.opts.onStartFailure(tabId, m);
-        else this.opts.onSay(tabId, `⚠️ The panel agent could not start: ${m}`);
+        // Report under the CURRENT key (not the spawn-time tabId) so the
+        // orchestrator's composite-key → panel-tab split reaches the tab that
+        // owns the agent NOW, even after a rebind (issue #255).
+        if (this.opts.onStartFailure) this.opts.onStartFailure(key, m);
+        else this.opts.onSay(key, `⚠️ The panel agent could not start: ${m}`);
         // Insurance, not correctness: every current backend self-cleans when
         // prepare() throws, but that's per-backend convention — stop() makes
         // backend.close?.() a guarantee now that the process SURVIVES this
@@ -1345,7 +1409,7 @@ export class PanelAgentManager {
       } else if (gaveUp) {
         // The bounded self-restart loop gave up — the session keeps dropping. Same
         // fatal signal: let the orchestrator self-exit + respawn.
-        this.opts.onAgentFatal?.(tabId, "agent session kept dropping (self-restart gave up)");
+        this.opts.onAgentFatal?.(key, "agent session kept dropping (self-restart gave up)");
       }
     };
     void agent.start(resume).then(
@@ -1365,10 +1429,21 @@ export class PanelAgentManager {
     return true;
   }
 
-  /** Reorder a tab's still-queued messages to the panel's desired flush order. */
+  /** Reorder a tab's still-queued messages to the panel's desired flush order.
+   *  Also applies to HELD mail (a failed start parked the queue — the panel can
+   *  still drag bubbles while the tab is degraded), with the same stable-sort
+   *  semantics as PanelAgent.reorderQueue. */
   reorderQueue(tabId: string, order: string[]): boolean {
+    let applied = false;
+    const held = this.heldMessages.get(tabId);
+    if (Array.isArray(order) && held && held.length >= 2) {
+      const rank = new Map(order.map((mid, i) => [mid, i]));
+      const at = (mid?: string) => (mid && rank.has(mid) ? rank.get(mid)! : Number.MAX_SAFE_INTEGER);
+      held.sort((a, b) => at(a.mid) - at(b.mid));
+      applied = true;
+    }
     const agent = this.agents.get(tabId);
-    if (!agent || agent.isStopped) return false;
+    if (!agent || agent.isStopped) return applied;
     agent.reorderQueue(order);
     return true;
   }
@@ -1401,6 +1476,15 @@ export class PanelAgentManager {
       const persisted = this.opts.sessionStore?.get(oldKey);
       if (persisted) this.opts.sessionStore?.set(newKey, persisted);
       this.opts.sessionStore?.clear(oldKey);
+      // Held mail from a failed start migrates too (issue #256) — it exists
+      // precisely when NO live agent does, so it must move in the durable pass
+      // for the rebound tab's next spawn to re-deliver it. Old-key mail is
+      // older, so it goes ahead of anything already held under the new key.
+      const heldOld = this.heldMessages.get(oldKey);
+      if (heldOld?.length) {
+        this.heldMessages.set(newKey, [...heldOld, ...(this.heldMessages.get(newKey) ?? [])]);
+      }
+      this.heldMessages.delete(oldKey);
     };
     const agent = this.agents.get(oldKey);
     if (!agent || agent.isStopped) {
@@ -1540,6 +1624,7 @@ export class PanelAgentManager {
     this.opts.sessionStore?.clear(tabId);
     this.pendingEffortRestart.delete(tabId); // a reset supersedes any deferred restart
     this.pendingMcpRestart.delete(tabId);
+    this.heldMessages.delete(tabId); // a reset is an explicit fresh start — drop held mail
     // Drop this key's picker override so a provider switch (which reset()s the old
     // key) can't carry the old provider's model/effort into the new backend's spawn.
     this.modelByKey.delete(tabId);
@@ -1557,6 +1642,7 @@ export class PanelAgentManager {
   async stopAll(): Promise<void> {
     this.pendingEffortRestart.clear();
     this.pendingMcpRestart.clear();
+    this.heldMessages.clear();
     await Promise.all([...this.agents.values()].map((a) => a.stop()));
     this.agents.clear();
   }
@@ -1565,13 +1651,36 @@ export class PanelAgentManager {
     return this.agents.size;
   }
 
-  /** True when NO agent is mid-turn or holding queued messages — the only
-   *  moment a self-restart may replace the process without eating a reply. */
+  /** True when any message is parked in the held-mail map (a start failure
+   *  captured a doomed agent's queue for re-delivery, issue #256). Surfaced so
+   *  the self-restart gate can refuse to restart while mail is parked —
+   *  teardown (stopAll) ERASES held mail, so an auto-restart while it exists
+   *  would silently drop the very messages the hold protects. */
+  hasHeldMail(): boolean {
+    for (const msgs of this.heldMessages.values()) {
+      if (msgs.length > 0) return true;
+    }
+    return false;
+  }
+
+  /** True when this key's agent has a turn in flight (or messages queued to
+   *  start one imminently) — i.e. the panel's working spinner belongs to a REAL
+   *  turn that will push its own turn:"done". The orchestrator's held-during-gen
+   *  branch checks this before clearing the spinner, so a tab-wide turn:"done"
+   *  can never hide an ACTIVE turn's spinner or disarm its resume nudge. */
+  isTurnActive(key: string): boolean {
+    const agent = this.agents.get(key);
+    return !!agent && !agent.isStopped && (agent.isBusy || agent.hasPending);
+  }
+
+  /** True when NO agent is mid-turn or holding queued messages AND no failed-
+   *  start mail is parked for re-delivery — the only moment a self-restart may
+   *  replace the process without eating a reply (or erasing held mail). */
   allIdle(): boolean {
     for (const a of this.agents.values()) {
       if (a.isBusy || a.hasPending) return false;
     }
-    return true;
+    return !this.hasHeldMail();
   }
 
   get defaults(): { model: string; effort?: Effort } {

@@ -652,6 +652,18 @@ const CALL_TOOL_WHITELIST = new Set<string>([
   // the same story server-side from history + re-validating the graph that ran.
   // Read-only.
   "diagnose_run",
+  // Read-only training surface: flow/model discovery + progress polling +
+  // docker/GPU/image preflight for the panel/mobile Training tab.
+  "train_list_flows",
+  "train_status",
+  "train_doctor",
+  // User-initiated training ops (panel/mobile Training wizard): stage a dataset,
+  // launch a GPU-container training run, cancel one. All validation lives in the
+  // tools themselves (dataset checks, docker/image preflight, liveness-verified
+  // cancel); the whitelist only gates reachability.
+  "train_prepare_dataset",
+  "train_start",
+  "train_cancel",
 ]);
 
 /** Lazily build ONE in-process MCP client wired to the full comfyui tool surface,

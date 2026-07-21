@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.42.0] - 2026-07-20
+
 ### MCP
 
 #### Fixed
@@ -31,6 +33,16 @@ All notable changes to this project are documented here. This project adheres to
   down. API keys still work; set a restricted Gemini API key (Google AI Studio) in
   `~/.comfyui-mcp/.env`. Failure messages now point at the key path rather than a
   dead sign-in flow.
+
+### MCP
+
+#### Added
+- diagnose_run — canvas-less 'why did my render fail?' (mobile parity with panel_view_errored_nodes) (#243)
+
+#### Fixed
+- API-key auth over stale OAuth + refresh the dead model catalog (#242)
+- Blind mechanically gates every image-returning tool (fixes comfyui-mcp-panel#90) (#245)
+
 
 ## [0.41.0] - 2026-07-20
 

@@ -17,8 +17,14 @@ const RUNPOD_GRAPHQL_ENDPOINT = "https://api.runpod.io/graphql";
 export const RUNPOD_TEMPLATE_ID = process.env.RUNPOD_TEMPLATE_ID?.trim() || "bnqtkvcer3";
 /** Our RunPod referral code — a user deploying via the link below credits us. */
 export const RUNPOD_REF_CODE = process.env.RUNPOD_REF_CODE?.trim() || "dkx71w9b";
-/** ComfyUI's port inside the pod (RunPod HTTP-proxies it at <podId>-<port>). */
-export const RUNPOD_COMFYUI_PORT = 8188;
+/** ComfyUI's external port on a RunPod pod. RunPod ComfyUI templates front ComfyUI
+ *  via nginx on port 3000 BY CONVENTION (ComfyUI itself runs on 3001 inside; 3000 is
+ *  the proxied entrypoint) — NOT 8188. RunPod HTTP-proxies it at <podId>-<port>.
+ *  Override with RUNPOD_COMFYUI_PORT for a template that uses a different port. */
+export const RUNPOD_COMFYUI_PORT = (() => {
+  const v = Number(process.env.RUNPOD_COMFYUI_PORT);
+  return Number.isInteger(v) && v > 0 ? v : 3000;
+})();
 
 /** Attribution — this connector's pod-lifecycle + idle-auto-stop UX is modeled on
  *  gpu-cli (https://gpu-cli.sh), a great cloud-GPU CLI. Surfaced in the control

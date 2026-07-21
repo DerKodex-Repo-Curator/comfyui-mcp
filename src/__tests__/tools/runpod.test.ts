@@ -14,11 +14,11 @@ vi.mock("../../services/runpod-client.js", () => ({
   resumePod: (...a: unknown[]) => resumePodMock(...a),
   stopPod: (...a: unknown[]) => stopPodMock(...a),
   createPod: (...a: unknown[]) => createPodMock(...a),
-  RUNPOD_COMFYUI_PORT: 8188,
+  RUNPOD_COMFYUI_PORT: 3000,
   RUNPOD_DEFAULT_GPU_TYPES: ["NVIDIA GeForce RTX 4090", "NVIDIA RTX A5000", "NVIDIA A40"],
   comfyuiPortExposed: (pod: { runtime?: { ports?: Array<{ privatePort: number; type: string }> } }) =>
-    (pod.runtime?.ports ?? []).some((p) => p.privatePort === 8188 && p.type === "http"),
-  runpodProxyUrl: (id: string, port = 8188) => `https://${id}-${port}.proxy.runpod.net`,
+    (pod.runtime?.ports ?? []).some((p) => p.privatePort === 3000 && p.type === "http"),
+  runpodProxyUrl: (id: string, port = 3000) => `https://${id}-${port}.proxy.runpod.net`,
   runpodDeployLink: () => "https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b",
   GPU_CLI_CREDIT: "Pod control inspired by gpu-cli.sh (https://gpu-cli.sh) — a cloud-GPU CLI worth checking out.",
 }));
@@ -39,7 +39,7 @@ vi.mock("../../services/runpod-watch.js", () => ({
 const setComfyuiTargetMock = vi.fn(() => true);
 vi.mock("../../config.js", () => ({
   setComfyuiTarget: (...a: unknown[]) => setComfyuiTargetMock(...a),
-  getLocalComfyuiUrl: () => "http://127.0.0.1:8188",
+  getLocalComfyuiUrl: () => "http://127.0.0.1:3000",
 }));
 const resetClientMock = vi.fn();
 vi.mock("../../comfyui/client.js", () => ({ resetClient: () => resetClientMock() }));
@@ -63,7 +63,7 @@ const runningPod = (over: Record<string, unknown> = {}) => ({
   machine: { gpuDisplayName: "RTX 4090" },
   runtime: {
     uptimeInSeconds: 3720,
-    ports: [{ ip: "1.2.3.4", isIpPublic: true, privatePort: 8188, publicPort: 8188, type: "http" }],
+    ports: [{ ip: "1.2.3.4", isIpPublic: true, privatePort: 3000, publicPort: 3000, type: "http" }],
     gpus: [{ id: "g0", gpuUtilPercent: 12, memoryUtilPercent: 30 }],
   },
   ...over,
@@ -84,7 +84,7 @@ describe("runpod_pod_status", () => {
     expect(t).toContain("pod123");
     expect(t).toContain("RUNNING");
     expect(t).toContain("RTX 4090");
-    expect(t).toContain("https://pod123-8188.proxy.runpod.net");
+    expect(t).toContain("https://pod123-3000.proxy.runpod.net");
     expect(t).toContain("$0.440/hr");
   });
   it("reports cleanly when the pod doesn't exist", async () => {
@@ -135,7 +135,7 @@ describe("runpod_pod_start / stop", () => {
     stopPodMock.mockResolvedValue({ id: "pod123", desiredStatus: "EXITED" });
     const t = (await getHandler("runpod_pod_stop")({ pod_id: "pod123" })).content[0].text;
     expect(unwatchMock).toHaveBeenCalled();
-    expect(setComfyuiTargetMock).toHaveBeenCalledWith("http://127.0.0.1:8188");
+    expect(setComfyuiTargetMock).toHaveBeenCalledWith("http://127.0.0.1:3000");
     expect(resetClientMock).toHaveBeenCalled();
     expect(t).toContain("switched back to local");
   });
@@ -175,7 +175,7 @@ describe("runpod_use_local", () => {
     watcherState.watched = "pod123";
     const t = (await getHandler("runpod_use_local")({})).content[0].text;
     expect(unwatchMock).toHaveBeenCalled();
-    expect(setComfyuiTargetMock).toHaveBeenCalledWith("http://127.0.0.1:8188");
+    expect(setComfyuiTargetMock).toHaveBeenCalledWith("http://127.0.0.1:3000");
     expect(resetClientMock).toHaveBeenCalled();
     expect(t).toContain("local ComfyUI");
     expect(t).toContain("still running"); // reminds you the pod bills until stopped
@@ -198,7 +198,7 @@ describe("runpod_pod_troubleshoot", () => {
     getPodMock.mockResolvedValue(runningPod({ runtime: { uptimeInSeconds: 60, ports: [{ privatePort: 22, type: "tcp" }], gpus: [] } }));
     const t = (await getHandler("runpod_pod_troubleshoot")({ pod_id: "pod123" })).content[0].text;
     expect(t).toContain("not exposed");
-    expect(t).toContain("8188");
+    expect(t).toContain("3000");
   });
   it("flags exposed-but-not-answering ComfyUI", async () => {
     getPodMock.mockResolvedValue(runningPod());
@@ -218,7 +218,7 @@ describe("runpod_pod_connect", () => {
   it("retargets comfyui-mcp when the pod is healthy", async () => {
     getPodMock.mockResolvedValue(runningPod());
     const t = (await getHandler("runpod_pod_connect")({ pod_id: "pod123" })).content[0].text;
-    expect(setComfyuiTargetMock).toHaveBeenCalledWith("https://pod123-8188.proxy.runpod.net");
+    expect(setComfyuiTargetMock).toHaveBeenCalledWith("https://pod123-3000.proxy.runpod.net");
     expect(resetClientMock).toHaveBeenCalled();
     expect(t).toContain("Connected");
   });

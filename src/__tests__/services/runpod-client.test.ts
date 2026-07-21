@@ -30,10 +30,10 @@ describe("runpod-client helpers", () => {
     expect(runpodDeployLink()).toBe("https://console.runpod.io/deploy?template=bnqtkvcer3&ref=dkx71w9b");
   });
   it("builds the pod proxy URL for ComfyUI's port", () => {
-    expect(runpodProxyUrl("abc123")).toBe("https://abc123-8188.proxy.runpod.net");
+    expect(runpodProxyUrl("abc123")).toBe("https://abc123-3000.proxy.runpod.net");
   });
   it("detects an exposed ComfyUI http port", () => {
-    const pod = { runtime: { ports: [{ privatePort: 8188, type: "http" }] } } as unknown as RunpodPod;
+    const pod = { runtime: { ports: [{ privatePort: 3000, type: "http" }] } } as unknown as RunpodPod;
     expect(comfyuiPortExposed(pod)).toBe(true);
     expect(comfyuiPortExposed({ runtime: { ports: [{ privatePort: 22, type: "tcp" }] } } as unknown as RunpodPod)).toBe(false);
   });
@@ -83,7 +83,7 @@ describe("createPod (GPU fallback)", () => {
     expect(body.variables.input.templateId).toBe("bnqtkvcer3");
     expect(body.variables.input.cloudType).toBe("COMMUNITY");
     expect(body.variables.input.gpuTypeId).toBe("NVIDIA A40");
-    expect(body.variables.input.ports).toBe("8188/http");
+    expect(body.variables.input.ports).toBe("3000/http");
   });
 
   it("has sane default GPU types (24GB+ cards)", () => {

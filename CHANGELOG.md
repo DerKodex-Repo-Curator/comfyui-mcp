@@ -6,6 +6,24 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Added
+- **CLI LoRA trainer (P1) — character LoRAs on FLUX.1-dev, driven by the agent.**
+  Seven `train_*` tools (`train_list_flows`, `train_prepare_dataset`,
+  `train_start`, `train_status`, `train_cancel`, `train_build_image`,
+  `train_doctor`) wrap ostris **ai-toolkit**'s `run.py` inside a headless
+  GPU Docker image, so training is an agent-orchestrated flow rather than a
+  hardcoded UI. Includes an ai-toolkit config generator, a job registry with
+  cross-process persistence + recovery (a cancel from another process is never
+  clobbered by finalize), live step/loss/sample progress parsing, and an output
+  handoff that drops the finished `.safetensors` into `models/loras/` and
+  upserts it into the LoRA catalog. Ships the `train-character-lora` skill.
+  `train_list_flows` / `train_status` are mobile-whitelisted (read-only).
+  End-to-end proven on a 4090 (200-step character LoRA, validated in a live Flux
+  workflow); the ai-toolkit ref is pinned to the commit that run was validated
+  against.
+
 ## [0.42.0] - 2026-07-20
 
 ### MCP

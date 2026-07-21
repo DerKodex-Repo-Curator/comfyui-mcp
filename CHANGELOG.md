@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.43.1] - 2026-07-20
+
 ### MCP
 
 #### Fixed
@@ -20,7 +22,8 @@ All notable changes to this project are documented here. This project adheres to
   for image-only runs). Tolerates the shapes seen in the wild — `{text:[…]}`,
   `{text:"…"}`, and packs that use `string` — and the parser is pinned by a
   regression test using a payload captured verbatim from a live ComfyUI run.
-  (reported by seanmcmagic)
+  (reported by seanmcmagic, #247)
+
 
 ## [0.43.0] - 2026-07-20
 

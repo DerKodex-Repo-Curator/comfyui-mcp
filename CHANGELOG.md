@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.43.0] - 2026-07-20
+
 ### MCP
 
 #### Added
@@ -22,7 +24,7 @@ All notable changes to this project are documented here. This project adheres to
   `train_list_flows` / `train_status` are mobile-whitelisted (read-only).
   End-to-end proven on a 4090 (200-step character LoRA, validated in a live Flux
   workflow); the ai-toolkit ref is pinned to the commit that run was validated
-  against.
+  against. (#237)
 
 ## [0.42.0] - 2026-07-20
 

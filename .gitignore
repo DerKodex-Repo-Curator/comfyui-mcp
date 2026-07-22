@@ -63,3 +63,15 @@ arena-results-quality-probe/
 /*.jpeg
 orch.log
 orch.err.log
+
+# Dev-only docs — untracked so the repo/package ships clean.
+# Contributors bring their own agent instructions (CLAUDE.md, etc.).
+/CLAUDE.md
+/AGENTS.md
+/GEMINI.md
+/TODO.md
+/PACK-SPLIT-STATUS.md
+/design/embedded-agent-panel.md
+/design/mobile-agent-client.md
+/design/remote-and-cloud-modes.md
+/blog/comfyui-mcp-tdqs-case-study.md

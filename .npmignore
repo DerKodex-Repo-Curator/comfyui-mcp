@@ -19,3 +19,13 @@ docs/
 .github/
 tests/
 vitest.config.*
+
+# Dev-only docs — never ship to npm.
+/CLAUDE.md
+/AGENTS.md
+/GEMINI.md
+/TODO.md
+/PACK-SPLIT-STATUS.md
+/ROADMAP.md
+/design/
+/blog/

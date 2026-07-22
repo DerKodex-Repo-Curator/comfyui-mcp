@@ -94,7 +94,7 @@ const CATEGORIES: Array<{
       "enqueue_workflow", "rerun_generation", "get_system_stats", "get_queue", "get_job_status",
       "get_queued_workflow", "move_queued_job", "edit_queued_job",
       "cancel_job", "cancel_queued_job", "clear_queue", "get_history", "get_logs",
-      "health_check", "calculate",
+      "health_check", "calculate", "diagnose_run",
     ],
   },
   {
@@ -106,7 +106,7 @@ const CATEGORIES: Array<{
       "create_workflow", "modify_workflow", "validate_workflow", "get_node_info",
       "workflow_to_dsl", "dsl_to_workflow", "visualize_workflow",
       "visualize_workflow_hierarchical", "mermaid_to_workflow",
-      "prompt_director_inspect",
+      "prompt_director_inspect", "query_workflow",
     ],
   },
   {
@@ -133,9 +133,10 @@ const CATEGORIES: Array<{
     group: "Models",
     slug: "models",
     icon: "box",
-    description: "Search, download, list, and remove models; manage embeddings and VRAM.",
+    description: "Search (HuggingFace + CivitAI), download, list, and remove models; resolve a workflow's missing models with VRAM-aware candidates; manage embeddings and VRAM.",
     tools: [
-      "search_models", "download_model", "download_civitai_model", "list_local_models",
+      "search_models", "search_civitai_models", "search_civitai_creators",
+      "download_model", "download_civitai_model", "resolve_missing_models", "list_local_models",
       "remove_model", "list_extra_paths", "add_extra_path", "remove_extra_path",
       "get_embeddings", "clear_vram",
       "model_metadata_read", "model_metadata_propose", "model_metadata_fetch_civitai",
@@ -190,6 +191,37 @@ const CATEGORIES: Array<{
     tools: [
       "get_defaults", "set_defaults", "get_comfyui_settings", "set_comfyui_setting",
       "suggest_settings", "generation_stats", "generate_node_skill",
+    ],
+  },
+  {
+    group: "RunPod (cloud GPU)",
+    slug: "runpod",
+    icon: "server",
+    description: "Deploy, connect, monitor, and stop RunPod cloud GPU pods, and switch rendering between your local rig and a pod — the tools behind the panel/mobile RunPod control panel.",
+    tools: [
+      "runpod_pod_create", "runpod_pod_connect", "runpod_use_local",
+      "runpod_pod_start", "runpod_pod_stop", "runpod_pod_status", "runpod_list_pods",
+      "runpod_pod_troubleshoot", "runpod_watch", "runpod_unwatch", "runpod_deploy_link",
+    ],
+  },
+  {
+    group: "LoRA Training",
+    slug: "training",
+    icon: "graduation-cap",
+    description: "Train character LoRAs (FLUX.1-dev) via ostris ai-toolkit — locally in a GPU Docker image or on a rented RunPod pod — with a crash-safe job registry and streamed progress.",
+    tools: [
+      "train_list_flows", "train_doctor", "train_build_image", "train_bootstrap",
+      "train_prepare_dataset", "train_start", "train_status", "train_cancel",
+    ],
+  },
+  {
+    group: "comfy-cli",
+    slug: "comfy-cli",
+    icon: "terminal",
+    description: "Drive the official comfy-cli — managed server lifecycle, jobs, loaded-node search, workflow validation/execution, uploads/downloads, model discovery, and official agent skills.",
+    tools: [
+      "comfy_cli_status", "comfy_cli_server", "comfy_cli_jobs", "comfy_cli_search_nodes",
+      "comfy_cli_workflow", "comfy_cli_transfer", "comfy_cli_models", "comfy_cli_skills",
     ],
   },
 ];

@@ -6,6 +6,39 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+### MCP
+
+#### Added
+- **Train a LoRA on a rented GPU (RunPod P4).** The CLI LoRA trainer now has a
+  dockerless native driver + an SSH transport that bootstraps ai-toolkit on a
+  RunPod pod (clone@pin → venv → torch cu128 → requirements), rsyncs the dataset
+  up, streams training progress back, and stops/prunes via ssh — so `train_*`
+  runs on a pod GPU with the same job-registry plumbing as local/GPU-Docker
+  training. Companion to the P1 local trainer. (#263)
+- **`resolve_missing_models`** — one call finds every model a workflow needs but
+  the server doesn't have, and proposes VRAM-aware download candidates. Detection
+  is mapping-free (a model-looking value absent from its own ComfyUI combo is
+  missing), so it covers checkpoints, LoRAs, VAEs, ControlNets, UNets, CLIP and
+  custom-pack types alike; candidates carry size, source, precision/quant and a
+  fits/too-big verdict against real `/system_stats` VRAM. (#267)
+- **Provider model discoverability** — the api-key credential card now says which
+  model a provider is actually on (env override if set, else the pinned default)
+  and names the env var to change it, generated from the registry so it can't
+  drift. Answers "why am I not on the model I set?" for GLM/Kimi/Moonshot. (#264)
+
+#### Fixed
+- Antigravity (agy) backend hardening — no secrets at rest, ownership-aware config
+  lifecycle, turn-settlement guarantees, `--effort` support; idle-interrupt
+  poisoning, 32K argv preflight, console backend list; verified live against agy
+  1.1.5 with catalog-aware model guard. (#262, #271)
+- prefer `HF_TOKEN` over `HUGGINGFACE_TOKEN` for the Hugging Face token
+- close deferred RunPod/training/review findings (#268, #269, #273, #274, #276, #277)
+
+### RunPod image
+
+#### Fixed
+- close a live secret-leak + billing bug path on RunPod pod control (#270)
+
 ## [0.44.0] - 2026-07-21
 
 ### RunPod image

@@ -1,0 +1,72 @@
+---
+title: "July 21: rent a GPU from the panel — RunPod connector and cloud LoRA training"
+description: "A first-party RunPod connector deploys and drives a cloud GPU pod from the panel and phone with an honest local⇄pod host switch, live cost/GPU status, and idle auto-stop; the LoRA trainer learns to train on rented pods; plus resolve_missing_models and provider model discoverability."
+---
+
+_July 21, 2026_
+
+v0.44.0 plus the unreleased 0.45.0 line, panel, and mobile — the week ComfyUI
+went to the cloud without leaving your custom canvas behind.
+
+## Rent a GPU without leaving the panel
+
+The **first-party RunPod connector** lands (v0.44.0): `runpod_pod_create`
+one-tap-deploys the project's own RunPod template through the referral link,
+falling back across GPU types and COMMUNITY→SECURE cloud when capacity is tight,
+and the existing status/start/stop/troubleshoot/connect tools manage any live pod
+by ID. The pod runs the **full comfyui-mcp environment**, so the agent installs
+your custom nodes + LoRAs and downloads your models onto it — **exact canvas
+parity**, not a stripped-down managed template.
+
+An **honest host switch** ties it together: a `comfyui_target` broadcast pushed on
+every retarget drives a panel host pill that reads **🟢 Local · your rig** or
+**🔵 RunPod · <pod> · GPU · $/hr**, so where a render runs is never ambiguous, and
+`runpod_use_local` flips between them in one tap. A `runpod_status` broadcast feeds
+a live card (GPU / VRAM / uptime / $·hr), and **idle auto-stop** shuts an idle pod
+down for you — but only while you're actually rendering on it, so it never yanks a
+pod mid-session (`RUNPOD_IDLE_STOP_MINUTES`, default 15). RunPod serves ComfyUI on
+port 3000 by convention, and the connector targets 3000 for you.
+[The full walk-through](/blog/runpod-comfyui).
+
+## Train a LoRA on a rented GPU
+
+The [CLI LoRA trainer](/blog/lora-trainer-p1) gains a **dockerless native driver**
+and an **SSH transport** that stands ai-toolkit up on a RunPod pod (#263): an
+idempotent bootstrap (clone@pin → venv → torch cu128 → requirements), a dataset
+rsynced up, live step/loss progress streamed back over ssh, and stop/liveness via
+pkill/pgrep — all behind the **same seven `train_*` tools and the same crash-safe
+job registry** as local training. FLUX.1-dev LoRA training no longer needs a
+24 GB card you own; borrow one for the hour the run takes. [The story](/blog/train-lora-runpod).
+
+## Also new
+
+- **`resolve_missing_models`** (#267) — one call finds every model a workflow needs
+  but the server doesn't have, and proposes VRAM-aware download candidates (size,
+  source, precision/quant, and a fits/too-big verdict against real `/system_stats`
+  VRAM). Detection is mapping-free — a model-looking value absent from its own
+  ComfyUI combo is missing — so it covers checkpoints, LoRAs, VAEs, ControlNets,
+  UNets, CLIP and custom-pack types alike. "Open this Template and make it
+  runnable" is now one hop, not two.
+- **Provider model discoverability** (#264) — the api-key credential card now says
+  which model a provider is actually on (env override if set, else the pinned
+  default) and names the env var to change it, generated from the registry so it
+  can't drift. Answers "why am I not on the model I set?" for GLM / Kimi / Moonshot.
+- **Antigravity (agy) backend** (#262) for Google-subscription users, hardened this
+  week: no secrets at rest, ownership-aware config lifecycle, turn-settlement
+  guarantees, and `--effort`, verified live against agy 1.1.5 (#271).
+
+## Mobile
+
+- **RunPod control sheet + honest host indicator** (#22) — the phone gets the same
+  cloud control surface as the panel: a host banner, a live status card, a pod
+  dropdown by name, Connect / Start / Stop / Use-Local, and a confirm-armed Deploy.
+- **One-tap Diagnose on a failed render** (#21) — the queue bar notices when the
+  run it was watching failed and offers a Diagnose action that root-causes it via
+  the read-only `diagnose_run` tool, instead of leaving you to copy the error back
+  into chat.
+
+## Fixes
+
+- close a live secret-leak + billing bug path on RunPod pod control (#270)
+- prefer `HF_TOKEN` over `HUGGINGFACE_TOKEN` for the Hugging Face token
+- close deferred RunPod / training / review findings (#268, #269, #273, #274, #276, #277)

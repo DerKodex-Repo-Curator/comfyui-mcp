@@ -1,0 +1,146 @@
+---
+title: "Train a FLUX LoRA in the Cloud on RunPod (2026 Guide)"
+description: "Train a FLUX.1-dev character LoRA on a RunPod cloud GPU — no 24GB card required. Upload your dataset by SSH and get a ComfyUI-ready .safetensors file."
+keywords:
+  - train LoRA cloud GPU
+  - FLUX LoRA training RunPod
+  - how to train FLUX LoRA on RunPod
+  - train LoRA without a GPU
+  - rent GPU LoRA training
+  - RunPod LoRA training
+  - best RunPod GPU for LoRA training
+  - character LoRA FLUX.1-dev
+  - ai-toolkit ComfyUI
+  - cloud GPU FLUX training
+---
+
+_July 21, 2026_
+
+Short answer to the question everyone asks: **no, you don't need a 24GB card to
+train a FLUX LoRA anymore.** You rent one for the hour or two the run takes,
+train on it by asking the agent, and get the `.safetensors` back on your own
+machine. This is P4 — the cloud sequel to
+[the local LoRA trainer (P1)](/blog/lora-trainer-p1) — and it runs the exact same
+`train_*` tools, just pointed at rented hardware.
+
+## How much VRAM does FLUX LoRA training need?
+
+FLUX.1-dev LoRA training is greedy. Even with quantization on, a real character
+run wants roughly **24 GB of VRAM** — RTX 4090 class. That's the wall a lot of
+people hit the moment they read [P1](/blog/lora-trainer-p1): the flow is a
+conversation, the trainer is proven, the handoff is honest… and their local card
+is a 12 GB laptop GPU that can't fit the model. Training simply doesn't start.
+
+Buying a 4090 to train a handful of LoRAs is a bad trade. Which leaves the
+obvious question P1 promised to answer next.
+
+## RunPod LoRA training cost and GPU requirements
+
+A cloud GPU costs **per GPU-hour**. A character LoRA — 10–30 varied images,
+1500–3000 steps — is roughly an hour of training on a 4090-class card. You spin
+a pod up, train, pull the file down, and shut it off. You pay for the run, not
+for owning the silicon, and the LoRA is yours forever after — a `.safetensors`
+sitting in `models/loras/` that loads on any GPU big enough to *infer* with it
+(far less than training needs).
+
+comfyui-mcp already knows how to talk to RunPod: it's the same pods the
+[RunPod connector](/blog/runpod-comfyui) uses for remote rendering, and the same
+`RUNPOD_API_KEY` you set once in the [panel](/panel)'s API-Keys card.
+P4 teaches the trainer to borrow that hardware for a training run.
+
+## How the pod bootstrap works
+
+Two new pieces made this possible. First, the trainer grew a **dockerless native
+driver** — it can run ai-toolkit directly against a Python venv instead of only
+inside the GPU Docker image from P1. Second, an **SSH transport** that stands
+that native driver up on a remote pod.
+
+The bootstrap on the pod is **idempotent** — safe to re-run, it skips whatever's
+already done:
+
+1. **Clone ai-toolkit** at a pinned git ref (same ref P1's image pins, so runs
+   are reproducible across local and cloud).
+2. **Create a venv** under the training root on the pod.
+3. **Install torch cu128**, then the ai-toolkit requirements.
+
+Every step streams its logs back to you and is **persisted under the training
+root** on the pod, so a reconnect picks up where you were instead of starting
+over. Nothing about ai-toolkit itself changes — same unmodified `run.py`, same
+presets. It's the *transport* that's new, not the trainer.
+
+## How to train a FLUX LoRA on RunPod
+
+This is the part that matters: **there is no separate "cloud training" surface to
+learn.** It's the same seven tools from P1 —
+`train_doctor`, `train_build_image`, `train_prepare_dataset`, `train_start`,
+`train_status`, `train_cancel`, `train_list_flows` — backed by the **same
+crash-safe job registry**. "Train on a pod" is the same conversation as "train
+locally," just pointed at rented iron:
+
+- **`train_doctor`** preflights the pod instead of your local Docker: is the SSH
+  endpoint reachable, is the bootstrap complete, is `HF_TOKEN` present (FLUX.1-dev
+  is gated — the first run downloads it)?
+- **`train_prepare_dataset`** stages your images with captions and a trigger word
+  exactly as before (validate-everything-first, then atomic swap; your originals
+  are copied, never touched).
+- **`train_start`** launches the run on the pod and returns a job id immediately.
+- **`train_status`** streams step/loss/sample progress back the same way — and
+  because job records are refreshed from disk on every read, status still works
+  **cross-process**: your phone can poll a pod run your desktop kicked off.
+- **`train_cancel`** stops the remote trainer with `pkill` and confirms it's
+  actually dead via `pgrep` before it dares report success — the same
+  "don't claim a cancel you can't prove" rule P1 is built on.
+
+If you already know the P1 flow, you already know this one.
+
+## Dataset up, safetensors back
+
+The mechanics of getting bits to and from the pod:
+
+- **Dataset up.** The SSH transport resolves the pod's SSH endpoint — RunPod
+  exposes container port 22 as a public `ip:port` — and **rsyncs your staged
+  dataset up** to the training root. rsync means a re-send only moves what
+  changed.
+- **Training runs over SSH**, streaming the same step/loss ticks P1 parses, so
+  the progress you watch is real training progress (a step count is only trusted
+  when it arrives with a loss reading — dataset-scan progress bars never do).
+- **Safetensors back.** When the run finishes, the finished LoRA comes home and
+  lands in ComfyUI's `models/loras/`, catalogued with its trigger keyword and
+  base model — identical to the local handoff. Load it in a Flux workflow with
+  the trigger word in your prompt and it's yours.
+
+## Cost and honesty
+
+The honest notes, because rented GPUs come with real trade-offs:
+
+- **You pay per GPU-hour while it trains.** A smoke test is minutes; a real
+  character run is an hour or two. Stop the pod when you're done — an idle pod
+  you forgot about still bills.
+- **The job registry is crash-safe**, and recovery only ever triggers when the
+  owner process is **provably dead**. A run keyed on its final save, not on
+  intermediate checkpoints — checkpoints prove a run *reached* a step, not that
+  it *finished*.
+- **Your dataset leaves your machine.** It goes up to the pod over rsync/ssh.
+  That's inherent to renting someone else's GPU; if that's a dealbreaker for a
+  given dataset, [train it locally](/blog/lora-trainer-p1) instead.
+
+## RunPod FLUX LoRA training setup
+
+1. Install [comfyui-mcp](https://github.com/artokun/comfyui-mcp) and the
+   [Panel](/panel). Set your `RUNPOD_API_KEY` **once** in the panel's API-Keys
+   card — the same key the [RunPod connector](/blog/runpod-comfyui) already uses.
+2. Make sure an `HF_TOKEN` with FLUX.1-dev access is in the MCP server env
+   (FLUX.1-dev is gated; the pod downloads it on the first run).
+3. Ask: *"train a character LoRA from these photos on a RunPod pod."* The agent
+   runs `train_doctor` against the pod, bootstraps ai-toolkit if needed, walks
+   you through dataset and trigger-word choices, rsyncs the dataset up, launches
+   the run, and streams progress until your `.safetensors` is sitting in
+   `models/loras/`.
+
+That's the whole pitch of P4: the local trainer from
+[P1](/blog/lora-trainer-p1) proved the flow; the cloud transport removes the one
+requirement not everyone can meet. You no longer need to *own* a 24GB GPU to
+train a FLUX LoRA — you just need to borrow one for an hour.
+
+File what you want trainable next at
+[artokun/comfyui-mcp](https://github.com/artokun/comfyui-mcp/issues).

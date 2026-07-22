@@ -1,14 +1,14 @@
 ---
 title: "Models"
-description: "Search, download, list, and remove models; manage embeddings and VRAM."
+description: "Search (HuggingFace + CivitAI), download, list, and remove models; resolve a workflow's missing models with VRAM-aware candidates; manage embeddings and VRAM."
 icon: "box"
 ---
 
-<Info>13 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>16 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## search_models
 
-Search for models usable in ComfyUI (checkpoints, LoRAs, VAEs, ControlNets, etc.) — this searches HuggingFace Hub ONLY. Read-only and network-only: queries HuggingFace over HTTP, does NOT require a running ComfyUI or COMFYUI_PATH and does not download anything. Returns a ranked list with modelId, author, downloads, likes, and tags. Pick a result's download URL and pass it to download_model to install it locally. NOTE — CIVITAI: searching Civitai by keyword ('find a Flux LoRA on Civitai') is NOT possible from this server; there is no civitai search tool. If the user already has a Civitai model id or model-version id, use download_civitai_model; to browse Civitai by keyword, install the separate official Civitai MCP server (mcp.civitai.com/mcp) alongside this one. Do NOT keep re-searching for a Civitai search tool — it does not exist here. For packs of custom nodes (not models) use search_custom_nodes.
+Search HuggingFace Hub for models usable in ComfyUI (checkpoints, LoRAs, VAEs, ControlNets, etc.). Read-only and network-only: queries HuggingFace over HTTP, does NOT require a running ComfyUI or COMFYUI_PATH and does not download anything. Returns a ranked list with modelId, author, downloads, likes, and tags. Pick a result's download URL and pass it to download_model to install it locally. For CIVITAI searches ('find a Flux LoRA on Civitai') use search_civitai_models instead — it filters by type + base model and returns ids for download_civitai_model. For packs of custom nodes (not models) use search_custom_nodes.
 
 ### Parameters
 
@@ -32,6 +32,76 @@ Search for models usable in ComfyUI (checkpoints, LoRAs, VAEs, ControlNets, etc.
   "arguments": {
     "query": "<query>"
   }
+}
+```
+
+---
+
+## search_civitai_models
+
+Search CivitAI by keyword for checkpoints, LoRAs, embeddings, VAEs, and ControlNets — THE tool for 'find me a &lt;base model&gt; LoRA on Civitai'. Read-only and network-only (public CivitAI REST API; no token or running ComfyUI required; CIVITAI_API_TOKEN unlocks gated results). Filter by `types` (LORA, Checkpoint, TextualInversion, VAE, Controlnet, …) and `base_models` (CivitAI labels: 'Flux.1 D', 'SDXL 1.0', 'SD 1.5', 'Pony', 'Illustrious', 'Wan Video') — ALWAYS pass base_models when the user's checkpoint family is known, so results actually fit their setup. Each hit returns the model_id and version_id that download_civitai_model takes directly, plus trigger words to use in the prompt after installing. Flow: search_civitai_models → pick a hit → download_civitai_model &#123;model_version_id, target_subfolder&#125; → wire/prompt with the trained words. Pass `creator` (exact username, e.g. from search_civitai_creators) to list ONE creator's models — with or without a query. SFW-only by default. For HuggingFace search use search_models.
+
+### Parameters
+
+<ParamField path="query" type="string">
+  Keyword search (e.g. 'detail enhancer', 'anime style', a character name). Optional when creator is given (then it narrows that creator's models).
+</ParamField>
+<ParamField path="creator" type="string">
+  Only models by this CivitAI creator (EXACT username — find it with search_civitai_creators). At least one of query/creator is required.
+</ParamField>
+<ParamField path="types" type="enum[]">
+  Only these model types (e.g. ['LORA']).
+</ParamField>
+<ParamField path="base_models" type="string[]">
+  Only these base-model families, CivitAI labels: 'Flux.1 D', 'SDXL 1.0', 'SD 1.5', 'Pony', 'Illustrious', 'Wan Video', …
+</ParamField>
+<ParamField path="sort" type="enum">
+  Ranking (default 'Highest Rated'). Options: `Highest Rated`, `Most Downloaded`, `Newest`.
+</ParamField>
+<ParamField path="nsfw" type="boolean">
+  Include NSFW results (default false).
+</ParamField>
+<ParamField path="limit" type="integer">
+  Max results (default 10).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "search_civitai_models",
+  "arguments": {}
+}
+```
+
+---
+
+## search_civitai_creators
+
+Find CivitAI CREATORS — THE tool for 'who are the top creators on Civitai' and 'find creator &lt;name&gt;'. Read-only and network-only (no token or running ComfyUI required). Two modes: with NO query it returns the site's creator LEADERBOARD (civitai.com/leaderboard — rank, score, downloads, likes; pick a `board`: 'overall' [default], 'overall_90' [last 90 days], 'overall_nsfw' [mature], 'new_creators' [first model &lt;30 days ago]); with a `query` it searches usernames (public /api/v1/creators; partial match, returns model counts, NOT ranked). Each hit's username feeds search_civitai_models &#123;creator: &lt;username&gt;&#125; directly. Flow: search_civitai_creators → pick a creator → search_civitai_models &#123;creator, types?&#125; → download_civitai_model.
+
+### Parameters
+
+<ParamField path="query" type="string">
+  Username search (partial match, e.g. 'alcait'). Omit to get the top-creators leaderboard instead.
+</ParamField>
+<ParamField path="board" type="enum">
+  Leaderboard to rank by when no query is given (default 'overall'). Ignored with a query. Options: `overall`, `overall_90`, `overall_nsfw`, `new_creators`.
+</ParamField>
+<ParamField path="limit" type="integer">
+  Max results (default 10).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "search_civitai_creators",
+  "arguments": {}
 }
 ```
 
@@ -106,9 +176,37 @@ Download a model from CivitAI into the connected ComfyUI's models/ directory. Re
 
 ---
 
+## resolve_missing_models
+
+Find the model files a workflow needs but this ComfyUI does NOT have, and search CivitAI + HuggingFace for installable candidates. THE tool for 'this Template says a model is missing — go get it'. Detects by comparing each model widget against the option list the server actually publishes, so it covers checkpoints, LoRAs, VAEs, ControlNets, UNets, CLIP and custom-pack model types without any per-node mapping. Each candidate reports size, source, precision/quantisation (fp16 / fp8 / GGUF Q4_K_M …) and whether it FITS this GPU's VRAM — so when the exact file is too big you can see the quantised variant that isn't. Read-only: it downloads nothing. Pass a chosen candidate to download_model (url) or download_civitai_model (id), using the reported directory as target_subfolder. For missing custom NODE PACKS (not models) use install_workflow_dependencies instead.
+
+### Parameters
+
+<ParamField path="workflow" type="string | object" required>
+  ComfyUI workflow in API format (JSON string or object)
+</ParamField>
+<ParamField path="limit" type="integer">
+  Max candidates per missing model (default 8).
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "resolve_missing_models",
+  "arguments": {
+    "workflow": "<workflow>"
+  }
+}
+```
+
+---
+
 ## list_local_models
 
-List model files available to the connected ComfyUI, grouped by type. Read-only. Queries ComfyUI's /models REST endpoint first (works with remote ComfyUI and respects extra_model_paths.yaml — symlinked / mounted dirs the install-path filesystem scan would miss), then falls back to a filesystem scan of COMFYUI_PATH/models/ when the REST endpoint is unavailable. Size and modified time are only available on the filesystem fallback path. Use to see which models are already available before generating or downloading; use search_models to discover new models on HuggingFace, then download_model to fetch them. For models fetched via download_civitai_model, any CivitAI trigger/activation words and base model are shown inline (read from the `&lt;file&gt;.civitai.json` sidecar) — apply those trigger words in your prompt when generating with that model.
+List model files available to the connected ComfyUI, grouped by type. Read-only. Queries ComfyUI's /models REST endpoint first (works with remote ComfyUI and respects extra_model_paths.yaml — symlinked / mounted dirs the install-path filesystem scan would miss), then falls back to a filesystem scan of COMFYUI_PATH/models/ when the REST endpoint is unavailable. Size and modified time are only available on the filesystem fallback path. Use to see which models are already available before generating or downloading; use search_models to discover new models on HuggingFace, then download_model to fetch them. For models fetched via download_civitai_model, any CivitAI trigger/activation words and base model are shown inline (read from the `&lt;file&gt;.civitai.json` sidecar) — apply those trigger words in your prompt when generating with that model. A `civitai:` line under an entry is that model's CivitAI page URL (modelId + INSTALLED modelVersionId, from the same sidecar) — use it to reference the source or check for newer versions.
 
 ### Parameters
 

@@ -1,0 +1,236 @@
+---
+title: "LoRA Training"
+description: "Train character LoRAs (FLUX.1-dev) via ostris ai-toolkit — locally in a GPU Docker image or on a rented RunPod pod — with a crash-safe job registry and streamed progress."
+icon: "graduation-cap"
+---
+
+<Info>8 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+
+## train_list_flows
+
+List the LoRA training flows and base models the local trainer supports (phase 1: character LoRA on FLUX.1-dev), with the default training params. Read-only — call this first to see what train_start accepts.
+
+<Note>This tool takes no parameters.</Note>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_list_flows",
+  "arguments": {}
+}
+```
+
+---
+
+## train_doctor
+
+Preflight the local trainer: docker daemon reachable, `--gpus all` GPU passthrough working (NVIDIA Container Toolkit), trainer image built. Returns per-check booleans + setup hints. Also reports the training data root and whether HF_TOKEN is set (needed to download FLUX.1-dev on first run).
+
+<Note>This tool takes no parameters.</Note>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_doctor",
+  "arguments": {}
+}
+```
+
+---
+
+## train_build_image
+
+Build the headless GPU trainer image (comfyui-mcp-trainer:latest) from docker/trainer/Dockerfile — one-time, several minutes (CUDA + torch + ai-toolkit). Requires a reachable docker daemon. aiToolkitRef pins the ai-toolkit commit/tag for reproducibility.
+
+### Parameters
+
+<ParamField path="aiToolkitRef" type="string">
+  ai-toolkit git ref (commit/tag) to build against. Default: the Dockerfile's pinned ref.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_build_image",
+  "arguments": {}
+}
+```
+
+---
+
+## train_bootstrap
+
+Set up the NATIVE (dockerless) trainer on this machine or a pod: clone ai-toolkit at the pinned commit, create its venv, install torch + requirements. One-time per machine/pod (~10 min fresh, idempotent; a pod's /workspace persists it across restarts). Needed before target 'pod' train_start on a fresh pod (no docker there).
+
+### Parameters
+
+<ParamField path="target" type="enum" required default="local">
+  Options: `local`, `pod`.
+</ParamField>
+<ParamField path="pod_id" type="string">
+  Pod to bootstrap (target 'pod'). Default: the connected pod.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_bootstrap",
+  "arguments": {
+    "target": "local"
+  }
+}
+```
+
+---
+
+## train_prepare_dataset
+
+Stage training images + captions into a dataset dir the trainer consumes. Each item is an image path with an optional caption (a missing caption falls back to defaultCaption — typically the trigger word). Returns the datasetPath to pass to train_start. Character LoRA guidance: 10-30 varied images; caption what changes between images, keep the trigger word constant.
+
+### Parameters
+
+<ParamField path="name" type="string" required>
+  Dataset name (becomes the staging dir name).
+</ParamField>
+<ParamField path="items" type="object[]" required>
+  —
+</ParamField>
+<ParamField path="defaultCaption" type="string">
+  Fallback caption for items without one — usually the trigger word.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_prepare_dataset",
+  "arguments": {
+    "name": "<name>",
+    "items": []
+  }
+}
+```
+
+---
+
+## train_start
+
+Start a LoRA training job: target 'local' builds the config and launches the GPU trainer container (docker run --gpus all); target 'pod' ssh-drives pod-native training on a connected RunPod pod (pod_id, or the connector's currently connected pod). Returns a job id for train_status/train_cancel. Long-running — returns immediately; poll train_status. On completion the LoRA is delivered per deliverTo (pod/local/both) and cataloged when local. Run train_doctor first if unsure the image/docker/GPU (local) or bootstrap (pod) are ready.
+
+### Parameters
+
+<ParamField path="name" type="string" required>
+  Job name — becomes the output .safetensors basename (e.g. 'aria_character').
+</ParamField>
+<ParamField path="flow" type="enum" required default="character">
+  Options: `character`.
+</ParamField>
+<ParamField path="model" type="enum" required default="flux1-dev">
+  Options: `flux1-dev`.
+</ParamField>
+<ParamField path="datasetPath" type="string" required>
+  Dataset dir from train_prepare_dataset (images + same-basename .txt captions).
+</ParamField>
+<ParamField path="trigger" type="string">
+  Unique trigger word (e.g. 'ohwx person') — injected as trigger_word and usable in prompts.
+</ParamField>
+<ParamField path="params" type="object">
+  —
+</ParamField>
+<ParamField path="device" type="string">
+  GPU selector, default cuda:0.
+</ParamField>
+<ParamField path="target" type="enum" required default="local">
+  'local' = docker on this rig; 'pod' = pod-native over ssh on a RunPod pod. Options: `local`, `pod`.
+</ParamField>
+<ParamField path="pod_id" type="string">
+  RunPod pod to train on (target 'pod'). Default: the connector's currently connected/watched pod.
+</ParamField>
+<ParamField path="deliverTo" type="enum" required default="both">
+  Pod jobs only: where the finished LoRA lands. Options: `pod`, `local`, `both`.
+</ParamField>
+<ParamField path="model_path" type="string">
+  Override the base model path AS THE TRAINER SEES IT (pod path for target 'pod', container path for 'local') — e.g. a pre-uploaded local HF snapshot dir when the default HF repo id is gated/unreachable.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_start",
+  "arguments": {
+    "name": "<name>",
+    "flow": "character",
+    "model": "flux1-dev",
+    "datasetPath": "<datasetPath>",
+    "target": "local",
+    "deliverTo": "pod"
+  }
+}
+```
+
+---
+
+## train_status
+
+Check training progress: pass an id for one job (step/total, loss, recent samples, log tail, result paths when done) or omit for all jobs newest-first.
+
+### Parameters
+
+<ParamField path="id" type="string">
+  Job id from train_start. Omit to list all jobs.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_status",
+  "arguments": {}
+}
+```
+
+---
+
+## train_cancel
+
+Stop a running training job (docker stop) and mark it cancelled. Checkpoints already saved stay in the job's output dir; no LoRA is handed off to models/loras. Returns ok:false when the container could not be confirmed stopped (the job reverts to running).
+
+### Parameters
+
+<ParamField path="id" type="string" required>
+  Job id from train_start.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "train_cancel",
+  "arguments": {
+    "id": "<id>"
+  }
+}
+```
+
+---

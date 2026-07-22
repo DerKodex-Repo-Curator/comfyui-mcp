@@ -84,6 +84,9 @@
               "tools/install-environment",
               "tools/process-control",
               "tools/defaults-stats-skills",
+              "tools/runpod",
+              "tools/training",
+              "tools/comfy-cli",
               "tools/skills-knowledge"
             ]
           }
@@ -96,6 +99,8 @@
             "group": "Blog",
             "pages": [
               "blog/index",
+              "blog/runpod-comfyui",
+              "blog/train-lora-runpod",
               "blog/lora-trainer-p1",
               "blog/blind-mode-privacy",
               "blog/gpt-5-6-comfyui",

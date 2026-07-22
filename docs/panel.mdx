@@ -317,6 +317,26 @@ thinking" even though the turn had finished. The reply now finalizes synchronous
 when the tab is hidden, and a `visibilitychange` handler flushes any pending reply on
 hide and resumes the typewriter on return. Foreground animation is unchanged.
 
+## RunPod cloud control
+
+A toolbar **host pill** reads **🟢 Local · your rig** or **🔵 RunPod · <pod> ·
+GPU · $/hr** and opens a **RunPod control panel**: a live status card (GPU / VRAM
+/ uptime / $·hr / ComfyUI URL / idle auto-stop countdown), a pod dropdown that
+lists your pods **by name**, Connect / Start / Stop / **Use Local**, and a
+confirm-armed **Deploy**. Set `RUNPOD_API_KEY` once in the API-Keys card and you
+can deploy, monitor, switch local⇄pod, and stop a cloud GPU without touching the
+RunPod console — the host pill always tells you where the next render runs. See
+[Cloud deployment](/cloud-deployment) and the blog
+[Run ComfyUI on a rented cloud GPU](/blog/runpod-comfyui).
+
+## CivitAI browser
+
+The **Civitai** toolbar button opens a full CivitAI browser — images, videos,
+checkpoints, LoRAs and workflows with search, filters, and a fullscreen viewer.
+Pick a result to **share it with the agent**, **download it to your machine**, or
+**save an embedded workflow** to the canvas. The story:
+[CivitAI inside ComfyUI](/blog/civitai-in-comfyui).
+
 ## See also
 
 - [Mobile app (beta)](/mobile) — pair your phone with the panel and chat with the agent on the go

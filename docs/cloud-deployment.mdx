@@ -1,6 +1,6 @@
 ---
 title: "Cloud deployment (RunPod)"
-description: "Run ComfyUI on a cloud GPU pod with the Agent Panel + ComfyUI-Manager v2 preinstalled, then drive its live graph from the agent on your own machine — one command, no agent login on the box."
+description: "Deploy, connect, monitor, and stop a cloud GPU pod for ComfyUI without leaving the Agent Panel — one-tap deploy, an honest local⇄pod host switch, live cost/GPU status, and idle auto-stop. Or drive an existing pod with one command."
 icon: "cloud"
 ---
 
@@ -31,6 +31,40 @@ ComfyUI-Manager v2 are baked in, no setup:
    serves until it's ready (~30–60s ComfyUI init).
 
 Then jump to [Connect from your machine](#connect-from-your-machine).
+
+## Deploy & control it from the Agent Panel (v0.44+)
+
+Since **comfyui-mcp 0.44**, you don't have to touch the RunPod console or run a
+CLI command at all — the [Agent Panel](/panel) has a **RunPod control panel** that
+deploys, connects, monitors, and stops a pod for you, and the same control sheet
+ships in the [mobile app](/mobile).
+
+1. **Set your key once.** In the panel's **API-Keys** card, paste your
+   `RUNPOD_API_KEY`. It's stored server-side in `~/.comfyui-mcp/.env` — never in
+   the browser.
+2. **Open the RunPod control panel** from the host pill in the panel toolbar (it
+   reads **🟢 Local · your rig** to start).
+3. **Deploy or connect.** Hit **Deploy** for a one-tap pod (it routes through the
+   template's deploy link and falls back across GPU types / COMMUNITY→SECURE when
+   capacity is tight), or pick an existing pod **by name** from the dropdown and
+   **Connect**.
+4. **Watch it live.** The status card shows GPU / VRAM / uptime / **$·hr** and an
+   **idle auto-stop** countdown, and the host pill flips to **🔵 RunPod · <pod> ·
+   GPU · $/hr** — so where a render runs is never ambiguous. The agent installs
+   your custom nodes + LoRAs and downloads your models onto the pod, so you get
+   **exact canvas parity** with your local rig.
+5. **Switch back and stop.** **Use Local** retargets rendering to your own rig
+   instantly; **Stop** shuts the pod down. Idle auto-stop
+   (`RUNPOD_IDLE_STOP_MINUTES`, default 15; only counts while you're actually
+   rendering on the pod) is the cost backstop if you forget.
+
+<Note>
+New to renting GPUs for ComfyUI? The blog walks the whole flow end to end:
+[Run ComfyUI on a rented cloud GPU](/blog/runpod-comfyui).
+</Note>
+
+The rest of this page is the **manual / CLI path** — still fully supported, and
+what the control panel drives under the hood.
 
 ## Connect from your machine
 

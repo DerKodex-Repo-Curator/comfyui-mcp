@@ -4,7 +4,7 @@ description: "Enqueue workflows and inspect the queue, jobs, history, and system
 icon: "play"
 ---
 
-<Info>15 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
+<Info>16 tools. Generated from the live MCP tool schemas — do not edit by hand; run `npm run docs:gen`.</Info>
 
 ## enqueue_workflow
 
@@ -107,7 +107,7 @@ Get the current ComfyUI execution queue: the job running now plus all pending jo
 
 ## get_job_status
 
-Check the status of ONE ComfyUI job by its prompt_id (the id returned by enqueue_workflow). Queries the connected ComfyUI server; requires it to be running. Returns JSON with running, pending, and done booleans, plus optional status_str, error details, and execution_stats from ComfyUI history once the job is done. Use get_queue to see the whole queue at once, and get_history for full output filenames.
+Check the status of ONE ComfyUI job by its prompt_id (the id returned by enqueue_workflow). Queries the connected ComfyUI server; requires it to be running. Returns JSON with running, pending, and done booleans, plus optional status_str, error details, and execution_stats from ComfyUI history once the job is done. Also returns text_outputs when the workflow contained text-preview nodes (Preview as Text, ShowText, …) — those produce no image file, so this is the ONLY way to read their result; report that text back to the user. Use get_queue to see the whole queue at once, and get_history for full output filenames.
 
 ### Parameters
 
@@ -290,7 +290,7 @@ Clear all pending jobs from the ComfyUI queue. Does not affect the currently run
 
 ## get_history
 
-Get execution history for a ComfyUI prompt. Returns status, timing, cached nodes, output details, and full error information including Python tracebacks. Use after a failed enqueue_workflow to diagnose what went wrong.
+Get execution history for a ComfyUI prompt: status, timing, cached nodes, and output details (media filenames for get_image). Also carries the raw error/traceback. To diagnose WHY a run FAILED or what's missing, prefer `diagnose_run` — it returns the same failure info PLUS missing models (with the file + widget) and missing node types, which this tool does not. Use get_history when you need the run's OUTPUTS or timing for a specific prompt_id.
 
 ### Parameters
 
@@ -389,6 +389,29 @@ Evaluate a batch of math expressions exactly — no ComfyUI connection needed, s
   "arguments": {
     "spec": "<spec>"
   }
+}
+```
+
+---
+
+## diagnose_run
+
+WHY DID MY RENDER FAIL / WHAT'S MISSING? Explains a failed run in ONE call, without needing a canvas — the headless counterpart to the panel's panel_view_errored_nodes ("why is this red?"), so mobile/remote sessions get the same answer. Returns: the failed node (id, type) with its `exception_type` + message and a trimmed traceback; **missing_models** (the exact model file that isn't installed and the widget holding it — feed the filename to search_civitai_models/download_model to fix it); **missing_node_types** (node classes this install lacks — feed to search_custom_nodes/install_custom_node); and any other per-input validation errors. Call this whenever a run fails, an enqueue is rejected, or the user asks what's missing — instead of guessing from raw logs. With no prompt_id it diagnoses the most recent FAILED run (falling back to the most recent run). Read-only.
+
+### Parameters
+
+<ParamField path="prompt_id" type="string">
+  Specific run to diagnose (the prompt_id from enqueue_workflow). Omit to diagnose the most recent FAILED run — preferred over a newer successful one — falling back to the most recent run if nothing failed.
+</ParamField>
+
+### Example
+
+<Note>Example coming soon — the call below is a generated skeleton.</Note>
+
+```json
+{
+  "tool": "diagnose_run",
+  "arguments": {}
 }
 ```
 

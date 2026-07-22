@@ -54,7 +54,10 @@ placeholder follows the active backend ("Ask Claude…" / "Ask Ollama…").
   tools through a merge-safe workspace `.agents/mcp_config.json`. Reduced
   capabilities by design (no documented machine-readable event stream): final
   answer text streams in, but there's no per-tool progress and no image
-  input. `COMFYUI_MCP_ANTIGRAVITY_MODEL` pins a model,
+  input. Conversation continuity uses `agy --continue` (the account's latest
+  conversation), so run ONE antigravity tab at a time — a second tab, or an
+  interactive `agy` session in a terminal, can steal the thread.
+  `COMFYUI_MCP_ANTIGRAVITY_MODEL` pins a model,
   `COMFYUI_MCP_ANTIGRAVITY_PATH` points at a non-standard install.
 - **Grok** — install the Grok CLI (xAI / Grok Build) and run `grok` once to
   sign in; the backend drives it in ACP mode. The panel also offers an

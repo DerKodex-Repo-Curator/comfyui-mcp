@@ -40,8 +40,13 @@
 //     no per-tool progress for agy turns (onActivity still fires on every stdout
 //     chunk, keeping the idle watchdog armed).
 //   - `--continue` binds to the account's LATEST conversation; a user running
-//     `agy` interactively in parallel can steal continuity. The supported
-//     surface offers no way to read the new conversation's id from -p output.
+//     `agy` interactively in parallel — or a SECOND antigravity panel tab —
+//     can steal continuity (tab A's next turn continues tab B's thread). The
+//     supported surface offers no way to read the new conversation's id from
+//     -p output; revisit if a future agy prints one.
+//   - The prompt rides argv, so it is visible in the OS process list for the
+//     child's lifetime (same-host processes can read the conversation) and is
+//     capped at ~32K chars on Windows (preflighted with a legible error).
 //   - No documented image-input path for -p → vision=false (image refs are
 //     already named in the turn text as a fallback).
 
@@ -63,7 +68,7 @@ type AgyChild = ChildProcessByStdio<null, Readable, Readable>;
 //   NOTE: if a future agy version documents API-key env auth (e.g. GEMINI_API_KEY),
 //   re-admit that specific key deliberately here via buildAgentSpawnEnv(..., { keep })
 //   with a justification — do not blanket-keep.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
@@ -150,6 +155,13 @@ export function resolveAgyBin(home: string = homedir()): string | null {
   return null;
 }
 
+/** Parse a Go-style duration ("45m", "5m0s", "1h30m") to ms; null when unparseable. */
+export function parseGoDurationMs(s: string): number | null {
+  const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(s.trim());
+  if (!m || (!m[1] && !m[2] && !m[3])) return null;
+  return (Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0)) * 1000;
+}
+
 /** Strip ANSI escape sequences (agy's TUI heritage may color even -p output). */
 function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex
@@ -206,7 +218,17 @@ export function mergeAgyMcpConfig(
 ): string {
   let root: Record<string, unknown> = {};
   try {
-    if (existingText?.trim()) root = JSON.parse(existingText) as Record<string, unknown>;
+    if (existingText?.trim()) {
+      const parsed: unknown = JSON.parse(existingText);
+      // Parseable-but-non-object (array/scalar): named keys set on an array are
+      // silently dropped by stringify, and spreading a scalar makes garbage —
+      // neither is a valid mcp config, so start from a fresh wrapper instead.
+      // (ensureMcpConfig refuses to touch such a file at all; this guard keeps
+      // the pure function safe for direct callers.)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        root = parsed as Record<string, unknown>;
+      }
+    }
   } catch {
     // Unparseable user file: do NOT clobber it — merge into a fresh wrapper and
     // let the caller decide; we keep the unparseable original under a backup key
@@ -223,13 +245,97 @@ export function mergeAgyMcpConfig(
     ? root
     : ((root.mcpServers as Record<string, unknown>) ?? {});
   for (const [name, spec] of Object.entries(servers)) {
-    target[name] =
-      spec.transport === "stdio"
-        ? { command: spec.command, args: spec.args ?? [], env: spec.env ?? {} }
-        : { serverUrl: spec.url };
+    target[name] = specToAgyEntry(spec);
   }
   const merged = bareLayout ? target : { ...root, mcpServers: target };
   return `${JSON.stringify(merged, null, 2)}\n`;
+}
+
+/** Remove OUR server entries from an agy mcp_config.json, preserving everything
+ *  else. OWNERSHIP-AWARE (codex review): an entry is deleted only when its
+ *  current content deep-equals the snapshot WE wrote — a same-named entry
+ *  overwritten meanwhile by another tab/process is someone else's live config
+ *  and is left alone. Returns the new text, or null when there is nothing to
+ *  change (missing/unparseable/non-object file, or no owned keys present). */
+export function removeAgyMcpServers(
+  existingText: string | null,
+  written: Record<string, string>, // name -> JSON.stringify of the entry we wrote
+): string | null {
+  if (!existingText?.trim()) return null;
+  let root: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(existingText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    root = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const hasWrapper =
+    typeof root.mcpServers === "object" && root.mcpServers !== null && !Array.isArray(root.mcpServers);
+  const target = hasWrapper ? (root.mcpServers as Record<string, unknown>) : root;
+  let changed = false;
+  for (const [name, snapshot] of Object.entries(written)) {
+    if (name in target && JSON.stringify(target[name]) === snapshot) {
+      delete target[name];
+      changed = true;
+    }
+  }
+  if (!changed) return null;
+  return `${JSON.stringify(root, null, 2)}\n`;
+}
+
+/** May this env var be written to disk? STRICT ALLOWLIST (codex review: a
+ *  denylist can't satisfy a "no secrets" guarantee — PRIVATE_KEY, AUTHORIZATION,
+ *  DB_PASS, cookies, connection strings all slip past name patterns): only
+ *  our own operational namespace goes to disk, and even there anything
+ *  credential-shaped (COMFYUI_AUTH_TOKEN…) is excluded. Everything else is
+ *  withheld — the comfyui MCP server re-reads every stored token itself at boot
+ *  (~/.comfyui-mcp/.env + panel secrets, the same canonical store the
+ *  orchestrator's spawn-env merge draws from), so withholding loses nothing. */
+function isDiskSafeEnvKey(key: string): boolean {
+  if (!/^COMFYUI(_MCP)?_[A-Z0-9_]+$/.test(key) && key !== "COMFYUI_URL" && key !== "COMFYUI_PATH")
+    return false;
+  return !/(API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE|PRIVATE)/i.test(key);
+}
+
+/** Reduce a spec's env to disk-safe keys before it is written. Returns the
+ *  sanitized servers plus the withheld key names (for an honest log line).
+ *  Exported for tests. */
+export function sanitizeMcpServersForDisk(
+  servers: Record<string, GeminiMcpServerSpec>,
+): { servers: Record<string, GeminiMcpServerSpec>; withheld: string[] } {
+  const out: Record<string, GeminiMcpServerSpec> = {};
+  const withheld: string[] = [];
+  for (const [name, spec] of Object.entries(servers)) {
+    if (spec.transport !== "stdio" || !spec.env) {
+      out[name] = spec;
+      continue;
+    }
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(spec.env)) {
+      if (isDiskSafeEnvKey(k)) env[k] = v;
+      else withheld.push(k);
+    }
+    out[name] = { ...spec, env };
+  }
+  return { servers: out, withheld };
+}
+
+/** The exact JSON entry written for a spec (shared by merge + the ownership
+ *  snapshot so the close()-time content compare can never drift). */
+export function specToAgyEntry(spec: GeminiMcpServerSpec): Record<string, unknown> {
+  return spec.transport === "stdio"
+    ? { command: spec.command, args: spec.args ?? [], env: spec.env ?? {} }
+    : { serverUrl: spec.url };
+}
+
+/** Atomic write: tmp file + rename, so a crash mid-write can never leave the
+ *  user's global config truncated (the unparseable-file guard would then
+ *  refuse to touch it forever). */
+function writeFileAtomic(file: string, text: string): void {
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, text, "utf8");
+  renameSync(tmp, file);
 }
 
 /** The MCP config file agy 1.1.5 actually honors — VERIFIED LIVE 2026-07-21:
@@ -289,6 +395,14 @@ export class AntigravityBackend implements AgentBackend {
   private continueNext = false;
   private needsSystemPreamble = false;
   private mcpConfigWritten = false;
+  /** The file ensureMcpConfig actually wrote to (cleanup target for close()). */
+  private mcpConfigFile: string | null = null;
+  /** Per-entry snapshot of what we wrote (name -> JSON), for ownership-aware
+   *  removal on close(). */
+  private mcpWrittenEntries: Record<string, string> | null = null;
+  /** Reasoning effort for turns (`--effort low|medium|high`), from opts.effort
+   *  when it is on agy's scale; other providers' scales are ignored. */
+  private effort: string | undefined;
 
   constructor(deps: AntigravityBackendDeps = {}) {
     this.deps = deps;
@@ -325,8 +439,10 @@ export class AntigravityBackend implements AgentBackend {
    *  Failure is non-fatal: the agent still answers, just without ComfyUI tools —
    *  logged so the gap is visible. */
   private ensureMcpConfig(): void {
-    if (this.mcpConfigWritten || !this.deps.mcpServers || !Object.keys(this.deps.mcpServers).length)
-      return;
+    // Re-merge on EVERY run(), not once per instance: another tab's close() (or
+    // the user) may have removed/overwritten our entries since — a session must
+    // start from a config that actually contains ITS servers (codex review).
+    if (!this.deps.mcpServers || !Object.keys(this.deps.mcpServers).length) return;
     const file = this.deps.mcpConfigPath ?? agyMcpConfigPath();
     const dir = dirname(file);
     try {
@@ -337,21 +453,66 @@ export class AntigravityBackend implements AgentBackend {
         existing = null;
       }
       if (existing) {
+        let parsed: unknown;
         try {
-          JSON.parse(existing);
+          parsed = JSON.parse(existing);
         } catch {
           logger.warn(
             `[antigravity-backend] ${file} exists but is not valid JSON — leaving it untouched (ComfyUI MCP tools will be unavailable to agy until it parses)`,
           );
           return;
         }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          logger.warn(
+            `[antigravity-backend] ${file} is valid JSON but not an object — leaving it untouched (ComfyUI MCP tools will be unavailable to agy until it is an object)`,
+          );
+          return;
+        }
       }
+      // NO SECRETS AT REST: strip credential-looking env keys before the write —
+      // the comfyui MCP server re-reads its tokens from ~/.comfyui-mcp at boot.
+      const { servers, withheld } = sanitizeMcpServersForDisk(this.deps.mcpServers);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(file, mergeAgyMcpConfig(existing, this.deps.mcpServers), "utf8");
+      writeFileAtomic(file, mergeAgyMcpConfig(existing, servers));
       this.mcpConfigWritten = true;
-      logger.info(`[antigravity-backend] merged comfyui/panel MCP servers into ${file}`);
+      this.mcpConfigFile = file;
+      // Ownership snapshot: exactly what we wrote, per entry — close() deletes
+      // an entry only while its content still matches this (another tab's
+      // overwrite is theirs to keep).
+      this.mcpWrittenEntries = Object.fromEntries(
+        Object.entries(servers).map(([n, s]) => [n, JSON.stringify(specToAgyEntry(s))]),
+      );
+      logger.info(
+        `[antigravity-backend] merged comfyui/panel MCP servers into ${file}` +
+          (withheld.length ? ` (withheld secret env keys: ${withheld.join(", ")} — the MCP server reloads them from its own store)` : ""),
+      );
     } catch (err) {
       logger.warn(`[antigravity-backend] could not write ${file}: ${msgOf(err)}`);
+    }
+  }
+
+  /** Undo ensureMcpConfig on dispose: delete OUR keys from the global file so a
+   *  later interactive `agy` run doesn't keep spawning our tool server against a
+   *  possibly-stale ComfyUI URL and a dead per-tab panel URL. Everything else in
+   *  the file is preserved; re-merged on the next run(). Best-effort. */
+  private removeMcpConfig(): void {
+    if (!this.mcpConfigWritten || !this.mcpConfigFile || !this.mcpWrittenEntries) return;
+    const file = this.mcpConfigFile;
+    this.mcpConfigWritten = false;
+    try {
+      let existing: string | null = null;
+      try {
+        existing = readFileSync(file, "utf8");
+      } catch {
+        return;
+      }
+      const cleaned = removeAgyMcpServers(existing, this.mcpWrittenEntries);
+      if (cleaned !== null) {
+        writeFileAtomic(file, cleaned);
+        logger.info(`[antigravity-backend] removed our MCP server entries from ${file}`);
+      }
+    } catch (err) {
+      logger.debug(`[antigravity-backend] mcp_config cleanup skipped: ${msgOf(err)}`);
     }
   }
 
@@ -371,6 +532,11 @@ export class AntigravityBackend implements AgentBackend {
     // Non-claude ids are honored directly — they can only have come from our own
     // picker (fed by listModels) or explicit config.
     if (opts.model) this.model = (await this.acceptableModel(opts.model)) ?? this.model;
+    // agy has a real --effort flag (low|medium|high). Honor opts.effort when it
+    // is on that scale; other providers' scales (e.g. Codex xhigh) are ignored.
+    if (opts.effort && /^(low|medium|high)$/i.test(opts.effort)) {
+      this.effort = opts.effort.toLowerCase();
+    }
     const cwd = opts.cwd ?? this.deps.cwd ?? process.cwd();
     this.ensureMcpConfig();
 
@@ -421,6 +587,7 @@ export class AntigravityBackend implements AgentBackend {
       // block on an interactive prompt that nothing will ever answer.
       "--dangerously-skip-permissions",
       ...(this.model ? ["--model", this.model] : []),
+      ...(this.effort ? ["--effort", this.effort] : []),
     ];
 
     // NOTE: `interrupted` is deliberately NOT cleared here. A Stop can land
@@ -503,6 +670,27 @@ export class AntigravityBackend implements AgentBackend {
     }, 15_000);
     heartbeat.unref?.();
 
+    // HARD CEILING: the heartbeat above defers turn-length policing to agy's
+    // own --print-timeout — but a frozen agy that never honors it would then
+    // hang the turn unbounded. Enforce the same budget ourselves, +2min grace:
+    // if the child is still alive past it, kill the tree; settle() then ends
+    // the turn with a legible timeout error instead of a generic exit code.
+    let ceilingHit = false;
+    let ceilingForce: ReturnType<typeof setTimeout> | null = null;
+    const ceilingMs = (parseGoDurationMs(timeout) ?? 45 * 60_000) + 120_000;
+    const ceiling = setTimeout(() => {
+      ceilingHit = true;
+      killProcessTree(child.pid);
+      // INDEPENDENT finalization (codex review): if the kill fails or the child
+      // never emits exit/error, nothing else would ever settle the turn — the
+      // generator (and PanelAgent's gate) would block forever. Give the kill a
+      // beat to surface the natural exit event, then force-settle; settle() is
+      // idempotent, so a late real exit becomes a no-op.
+      ceilingForce = setTimeout(() => settle(null), 10_000);
+      ceilingForce.unref?.();
+    }, ceilingMs);
+    ceiling.unref?.();
+
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -534,12 +722,22 @@ export class AntigravityBackend implements AgentBackend {
       if (settled) return;
       settled = true;
       clearInterval(heartbeat);
+      clearTimeout(ceiling);
+      if (ceilingForce) clearTimeout(ceilingForce);
       if (this.child === child) this.child = null;
       if (streamOpen) push({ type: "stream_end" });
       const finalText = out.trim();
       if (this.interrupted) {
         if (finalText) push({ type: "assistant", text: finalText });
         push({ type: "result", ok: false, subtype: "cancelled" });
+      } else if (ceilingHit) {
+        push({
+          type: "error",
+          message:
+            `agy did not finish within ${timeout} (+2m grace) and was terminated — its own --print-timeout never fired, which usually means a frozen CLI. ` +
+            "Try again; raise COMFYUI_MCP_ANTIGRAVITY_PRINT_TIMEOUT for genuinely long jobs.",
+        });
+        push({ type: "result", ok: false, subtype: "timeout" });
       } else if (spawnErr || code !== 0) {
         const stderrTail = stripAnsi(errOut).trim().split(/\r?\n/).slice(-3).join(" ").trim();
         const authish = /sign.?in|log.?in|auth|credential|unauthoriz/i.test(stderrTail + finalText);
@@ -576,15 +774,35 @@ export class AntigravityBackend implements AgentBackend {
     // never settles (exactly what hung the interrupt test).
     if (this.interrupted) killProcessTree(child.pid);
 
-    // Drain the bridged queue until the child settles.
-    while (true) {
+    // Drain the bridged queue until the child settles. The finally guards the
+    // ABANDONMENT path: a consumer that drops this generator mid-turn without
+    // close() (generator .return() runs finally blocks) must not leave the
+    // child running for up to 45m with the heartbeat bumping a dead turn.
+    try {
+      while (true) {
+        while (queue.length) yield queue.shift()!;
+        if (done) break;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
       while (queue.length) yield queue.shift()!;
-      if (done) break;
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
+    } finally {
+      if (!settled) {
+        // ABANDONED mid-turn (consumer dropped the generator without close()).
+        // Mark settled FIRST: the kill below triggers the child's exit event,
+        // and without this it would run settle() against shared state that may
+        // already belong to a subsequent turn (codex review).
+        settled = true;
+        clearInterval(heartbeat);
+        clearTimeout(ceiling);
+        if (ceilingForce) clearTimeout(ceilingForce);
+        killProcessTree(child.pid);
+        if (this.child === child) this.child = null;
+        this.turnActive = false;
+        this.interrupted = false;
+      }
     }
-    while (queue.length) yield queue.shift()!;
   }
 
   /** Stop the current turn: kill the in-flight child's process tree. The next
@@ -621,13 +839,20 @@ export class AntigravityBackend implements AgentBackend {
    *  the backend's lifetime. Null when the probe fails (unauthenticated etc.) —
    *  callers then fall back to the claude-prefix heuristic. */
   private catalog: Set<string> | null = null;
+  /** When the last catalog probe FAILED (ms epoch) — negative-cached so an
+   *  unauthenticated CLI doesn't eat a fresh 30s `agy models` spawn on every
+   *  claude-shaped model check (each connect re-runs run()). */
+  private catalogFailedAt = 0;
+  private static readonly CATALOG_RETRY_MS = 60_000;
   private async ensureCatalog(): Promise<Set<string> | null> {
     if (this.catalog) return this.catalog;
+    if (Date.now() - this.catalogFailedAt < AntigravityBackend.CATALOG_RETRY_MS) return null;
     try {
       this.catalog = new Set((await this.listModels()).map((m) => m.id));
     } catch (err) {
       logger.debug(`[antigravity-backend] catalog probe failed: ${msgOf(err)}`);
       this.catalog = null;
+      this.catalogFailedAt = Date.now();
     }
     return this.catalog;
   }
@@ -715,5 +940,14 @@ export class AntigravityBackend implements AgentBackend {
       this.interrupted = true;
       killProcessTree(child.pid);
     }
+    if (this.idleInterruptExpiry) {
+      clearTimeout(this.idleInterruptExpiry);
+      this.idleInterruptExpiry = null;
+    }
+    // Leave no standing footprint: our entries in the global mcp_config.json
+    // would otherwise make every later interactive `agy` run spawn our tool
+    // server (stale COMFYUI_URL, dead per-tab panel URL) — and the file is
+    // read by another product. Re-merged by the next session's run().
+    this.removeMcpConfig();
   }
 }

@@ -50,18 +50,20 @@ vi.mock("node:child_process", async (importOriginal) => {
       stdout: ["ok"],
       exit: 0,
     };
-    if (!step.hang) {
-      setTimeout(() => {
-        for (const chunk of step.stdout ?? []) stdout.write(chunk);
-        if (step.stderr) stderr.write(step.stderr);
+    // hang:true still writes any scripted stdout (a child can stream partial
+    // output and then freeze) — it only withholds the exit.
+    setTimeout(() => {
+      for (const chunk of step.stdout ?? []) stdout.write(chunk);
+      if (step.stderr) stderr.write(step.stderr);
+      if (!step.hang) {
         setTimeout(() => {
           if (proc.exitCode === null) {
             proc.exitCode = step.exit ?? 0;
             proc.emit("exit", step.exit ?? 0, null);
           }
         }, 5);
-      }, 5);
-    }
+      }
+    }, 5);
     return proc;
   }
 
@@ -88,7 +90,10 @@ import {
   AntigravityBackend,
   agyMcpConfigPath,
   parseAgyModels,
+  parseGoDurationMs,
   mergeAgyMcpConfig,
+  removeAgyMcpServers,
+  sanitizeMcpServersForDisk,
   resolveAgyBin,
 } from "../../orchestrator/antigravity-backend.js";
 import { backendReadiness } from "../../orchestrator/backend-readiness.js";
@@ -197,6 +202,146 @@ describe("mergeAgyMcpConfig", () => {
     expect(merged.mcpServers).toBeUndefined();
     expect(merged.github).toEqual({ command: "gh-mcp" });
     expect(merged.comfyui.command).toBe("node");
+  });
+});
+
+describe("mcp_config hardening (#271)", () => {
+  it("parseGoDurationMs handles agy duration forms", () => {
+    expect(parseGoDurationMs("45m")).toBe(45 * 60_000);
+    expect(parseGoDurationMs("5m0s")).toBe(5 * 60_000);
+    expect(parseGoDurationMs("1h30m")).toBe(90 * 60_000);
+    expect(parseGoDurationMs("banana")).toBeNull();
+  });
+
+  it("sanitizeMcpServersForDisk keeps ONLY allowlisted operational keys", () => {
+    const { servers, withheld } = sanitizeMcpServersForDisk({
+      comfyui: {
+        transport: "stdio",
+        command: "node",
+        args: [],
+        env: {
+          COMFYUI_URL: "http://127.0.0.1:8188",
+          COMFYUI_MCP_BLIND: "1",
+          CIVITAI_API_TOKEN: "secret1",
+          HF_TOKEN: "secret2",
+          OPENROUTER_API_KEY: "secret3",
+          // Allowlist means secret-SHAPED names never matter — but also that
+          // arbitrary non-secret-looking vars stay off disk too.
+          PRIVATE_KEY: "secret4",
+          AUTHORIZATION: "secret5",
+          DB_PASS: "secret6",
+          RANDOM_VAR: "not-secret-but-not-ours",
+          COMFYUI_AUTH_TOKEN: "secret7", // our namespace but credential-shaped
+        },
+      },
+      panel: { transport: "http", url: "http://x/" },
+    });
+    const env = (servers.comfyui as { env: Record<string, string> }).env;
+    expect(Object.keys(env).sort()).toEqual(["COMFYUI_MCP_BLIND", "COMFYUI_URL"]);
+    expect(withheld).toHaveLength(8);
+  });
+
+  it("removeAgyMcpServers deletes only entries whose content WE wrote", () => {
+    const ours = { command: "x", args: [], env: {} };
+    const existing = JSON.stringify({
+      mcpServers: {
+        comfyui: ours, // untouched since we wrote it → removed
+        panel: { serverUrl: "OVERWRITTEN-BY-TAB-B" }, // changed → kept
+        github: { command: "z" }, // never ours → kept
+      },
+      other: 1,
+    });
+    const written = {
+      comfyui: JSON.stringify(ours),
+      panel: JSON.stringify({ serverUrl: "http://ours/" }),
+    };
+    const cleaned = JSON.parse(removeAgyMcpServers(existing, written)!);
+    expect(cleaned.mcpServers).toEqual({
+      panel: { serverUrl: "OVERWRITTEN-BY-TAB-B" },
+      github: { command: "z" },
+    });
+    expect(cleaned.other).toBe(1);
+    expect(removeAgyMcpServers(existing, { nope: "{}" })).toBeNull();
+    expect(removeAgyMcpServers("{ not json", written)).toBeNull();
+    expect(removeAgyMcpServers(JSON.stringify([1, 2]), written)).toBeNull();
+  });
+
+  it("mergeAgyMcpConfig treats a non-object file as empty instead of corrupting it", () => {
+    const merged = JSON.parse(
+      mergeAgyMcpConfig(JSON.stringify(["oops"]), {
+        comfyui: { transport: "stdio", command: "node", args: [], env: {} },
+      }),
+    );
+    expect(merged.mcpServers.comfyui.command).toBe("node");
+  });
+
+  it("close() removes our entries from the config it wrote (no secrets, atomic)", async () => {
+    hoisted.script.push({ stdout: ["ok"], exit: 0 });
+    const cfg = join(workDir, "gemini-config", "mcp_config.json");
+    mkdirSync(dirname(cfg), { recursive: true });
+    writeFileSync(cfg, JSON.stringify({ mcpServers: { github: { command: "gh" } } }), "utf8");
+    const backend = new AntigravityBackend({
+      cwd: workDir,
+      mcpConfigPath: cfg,
+      mcpServers: {
+        comfyui: {
+          transport: "stdio",
+          command: "node",
+          args: [],
+          env: { COMFYUI_URL: "http://x", HF_TOKEN: "supersecret" },
+        },
+      },
+    });
+    await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+    const written = readFileSync(cfg, "utf8");
+    expect(written).not.toContain("supersecret"); // secrets never at rest
+    expect(JSON.parse(written).mcpServers.comfyui.env).toEqual({ COMFYUI_URL: "http://x" });
+    await backend.close();
+    const after = JSON.parse(readFileSync(cfg, "utf8"));
+    expect(after.mcpServers.comfyui).toBeUndefined(); // cleaned up on dispose
+    expect(after.mcpServers.github).toEqual({ command: "gh" }); // user entry preserved
+  });
+
+  it("refuses to touch a valid-JSON-but-non-object config file", async () => {
+    hoisted.script.push({ stdout: ["ok"], exit: 0 });
+    const cfg = join(workDir, "gemini-config", "mcp_config.json");
+    mkdirSync(dirname(cfg), { recursive: true });
+    writeFileSync(cfg, "[1,2,3]", "utf8");
+    const backend = new AntigravityBackend({
+      cwd: workDir,
+      mcpConfigPath: cfg,
+      mcpServers: { panel: { transport: "http", url: "http://x/" } },
+    });
+    await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+    expect(readFileSync(cfg, "utf8")).toBe("[1,2,3]");
+  });
+});
+
+describe("effort + abandonment (#271)", () => {
+  it("passes a valid --effort through and ignores foreign scales", async () => {
+    hoisted.script.push({ stdout: ["a"], exit: 0 }, { stdout: ["b"], exit: 0 });
+    const backend = new AntigravityBackend({ cwd: workDir });
+    await collect(backend.run({ effort: "high", channel: channelOf([{ text: "q" }]) }));
+    const t1 = hoisted.spawns[0]!;
+    expect(t1.args[t1.args.indexOf("--effort") + 1]).toBe("high");
+    const b2 = new AntigravityBackend({ cwd: workDir });
+    await collect(b2.run({ effort: "xhigh", channel: channelOf([{ text: "q" }]) }));
+    expect(hoisted.spawns[1]!.args).not.toContain("--effort");
+  });
+
+  it("kills the child when the generator is abandoned mid-turn without close()", async () => {
+    // Child streams a partial answer then freezes. The consumer pulls up to a
+    // mid-stream yield and abandons the generator (.return(), what a for-await
+    // break does) — the finally must kill the child and clear turn state.
+    hoisted.script.push({ stdout: ["partial "], hang: true });
+    const backend = new AntigravityBackend({ cwd: workDir });
+    const gen = backend.run({ channel: channelOf([{ text: "long" }]) });
+    let ev = await gen.next(); // session
+    while (!ev.done && (ev.value as { type: string }).type !== "stream_start") {
+      ev = await gen.next();
+    }
+    await gen.return(undefined); // abandon at a yield — finally must run
+    expect(hoisted.killed).toContain(hoisted.procs[0]!.pid);
   });
 });
 

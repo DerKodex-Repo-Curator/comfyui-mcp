@@ -7,10 +7,11 @@
 // panel JS executors implement), and that the McpServer HTTP path registers the
 // identical set.
 
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setNsfwConsent } from "../../services/panel-settings.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   buildPanelToolDefs,
@@ -552,6 +553,256 @@ describe("panel_connect slot aliases (live panel finding: stripped aliases → a
       ctx,
     );
     expect(calls[0]).toMatchObject({ from_output: "LATENT", to_input: "samples" });
+  });
+});
+
+describe("panel-tools: agent-driven CivitAI + training modals", () => {
+  it("registers every new drive tool in the shared def list", () => {
+    const names = buildPanelToolDefs().map((d) => d.name);
+    for (const expected of [
+      "panel_civitai_results",
+      "panel_civitai_highlight",
+      "panel_civitai_clear_highlight",
+      "panel_civitai_switch_tab",
+      "panel_civitai_search",
+      "panel_civitai_open_lightbox",
+      "panel_training_open",
+      "panel_training_get_state",
+      "panel_training_set_field",
+      "panel_training_goto_step",
+      "panel_training_set_target",
+      "panel_training_highlight",
+    ]) {
+      expect(names).toContain(expected);
+    }
+  });
+
+  it("panel_open_civitai forwards a dock flag alongside the existing args", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler({ query: "flux", dock: true }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "open_civitai", query: "flux", dock: true });
+  });
+
+  it("panel_civitai_results forwards civitai_results with limit and clamps the range", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_results").handler({ limit: 20 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_results", limit: 20 });
+    const limit = defByName("panel_civitai_results").schema.limit as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(limit.safeParse(0).success).toBe(false);
+    expect(limit.safeParse(51).success).toBe(false);
+    expect(limit.safeParse(undefined).success).toBe(true);
+  });
+
+  it("panel_civitai_highlight forwards ids + kind, and requires at least one id", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_highlight").handler({ ids: [1, "abc"], kind: "media" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_highlight", ids: [1, "abc"], kind: "media" });
+    const ids = defByName("panel_civitai_highlight").schema.ids as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(ids.safeParse([]).success).toBe(false);
+    const kind = defByName("panel_civitai_highlight").schema.kind as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(kind.safeParse("model").success).toBe(true);
+    expect(kind.safeParse("nope").success).toBe(false);
+  });
+
+  it("panel_civitai_clear_highlight forwards civitai_clear_highlight with no args", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    expect(Object.keys(defByName("panel_civitai_clear_highlight").schema)).toEqual([]);
+    await defByName("panel_civitai_clear_highlight").handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_clear_highlight" });
+  });
+
+  it("panel_civitai_switch_tab forwards civitai_switch_tab with a real tab enum", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_switch_tab").handler({ tab: "loras" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_switch_tab", tab: "loras" });
+    const tab = defByName("panel_civitai_switch_tab").schema.tab as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(tab.safeParse("favorites").success).toBe(true);
+    expect(tab.safeParse("nope").success).toBe(false);
+  });
+
+  it("panel_civitai_search forwards query + filters", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_search").handler(
+      { query: "ghibli", filters: { baseModels: ["Flux.1 D"] } },
+      ctx,
+    );
+    expect(calls[0]).toMatchObject({
+      cmd: "civitai_search",
+      query: "ghibli",
+      filters: { baseModels: ["Flux.1 D"] },
+    });
+  });
+
+  it("panel_training_get_state forwards training_get_state with no args", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    expect(Object.keys(defByName("panel_training_get_state").schema)).toEqual([]);
+    await defByName("panel_training_get_state").handler({}, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_get_state" });
+  });
+
+  it("panel_civitai_open_lightbox forwards civitai_open_lightbox with a string|number id", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_civitai_open_lightbox").handler({ id: 42 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "civitai_open_lightbox", id: 42 });
+    const id = defByName("panel_civitai_open_lightbox").schema.id as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(id.safeParse("abc").success).toBe(true);
+    expect(id.safeParse(1).success).toBe(true);
+  });
+
+  it("panel_training_open forwards open_training with an optional dock flag", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_open").handler({ dock: false }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "open_training", dock: false });
+  });
+
+  it("panel_training_set_field forwards an allowlisted name + value, rejecting others", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_set_field").handler({ name: "datasetName", value: "my-lora" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_set_field", name: "datasetName", value: "my-lora" });
+    // name is a real enum: only the four allowlisted fields pass.
+    const name = defByName("panel_training_set_field").schema.name as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    for (const ok of ["datasetName", "trigger", "preset", "target"]) {
+      expect(name.safeParse(ok).success).toBe(true);
+    }
+    for (const bad of ["learning_rate", "name", "steps", "dataset_path"]) {
+      expect(name.safeParse(bad).success).toBe(false);
+    }
+    const value = defByName("panel_training_set_field").schema.value as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(value.safeParse("standard").success).toBe(true);
+    expect(value.safeParse(true).success).toBe(true);
+    expect(value.safeParse({}).success).toBe(false);
+  });
+
+  it("panel_training_goto_step forwards a 1-based int step clamped to 1..4", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_goto_step").handler({ step: 2 }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_goto_step", step: 2 });
+    const step = defByName("panel_training_goto_step").schema.step as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(step.safeParse(1).success).toBe(true);
+    expect(step.safeParse(4).success).toBe(true);
+    expect(step.safeParse(0).success).toBe(false);
+    expect(step.safeParse(5).success).toBe(false);
+    expect(step.safeParse(1.5).success).toBe(false);
+  });
+
+  it("panel_training_set_target forwards a local|pod enum", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_set_target").handler({ target: "pod" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_set_target", target: "pod" });
+    const target = defByName("panel_training_set_target").schema.target as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(target.safeParse("local").success).toBe(true);
+    expect(target.safeParse("cloud").success).toBe(false);
+  });
+
+  it("panel_training_highlight forwards refs and requires at least one", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_training_highlight").handler({ refs: ["step:2", "field:lr"] }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "training_highlight", refs: ["step:2", "field:lr"] });
+    const refs = defByName("panel_training_highlight").schema.refs as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(refs.safeParse([]).success).toBe(false);
+  });
+});
+
+describe("panel-tools: NSFW consent enforced server-side on CivitAI browsing levels", () => {
+  const origSettings = process.env.COMFYUI_MCP_PANEL_SETTINGS;
+
+  beforeAll(() => {
+    // Isolate the persistent consent store to a throwaway file for this suite.
+    const dir = mkdtempSync(join(tmpdir(), "nsfw-consent-"));
+    process.env.COMFYUI_MCP_PANEL_SETTINGS = join(dir, "panel-settings.json");
+  });
+  afterAll(() => {
+    if (origSettings === undefined) delete process.env.COMFYUI_MCP_PANEL_SETTINGS;
+    else process.env.COMFYUI_MCP_PANEL_SETTINGS = origSettings;
+  });
+  beforeEach(() => {
+    setNsfwConsent(false); // default: no consent
+  });
+
+  it("panel_open_civitai clamps adult levels out when un-consented, keeping SFW", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler(
+      { query: "x", browsingLevels: [1, 2, 4, 8, 16] },
+      ctx,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].browsingLevels).toEqual([1, 2]);
+  });
+
+  it("panel_open_civitai REJECTS an all-adult request when un-consented (no bridge call)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_open_civitai").handler({ browsingLevels: [16] }, ctx);
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("panel_open_civitai passes adult levels through when consent IS granted", async () => {
+    setNsfwConsent(true);
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler({ browsingLevels: [1, 16] }, ctx);
+    expect(calls[0].browsingLevels).toEqual([1, 16]);
+  });
+
+  it("panel_open_civitai rejects an unknown level value", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_open_civitai").handler({ browsingLevels: [3] }, ctx);
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("panel_open_civitai leaves omitted browsingLevels undefined (panel default applies)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    await defByName("panel_open_civitai").handler({ query: "cats" }, ctx);
+    expect(calls[0]).toMatchObject({ cmd: "open_civitai", query: "cats" });
+    expect(calls[0].browsingLevels).toBeUndefined();
+  });
+
+  it("panel_civitai_search enforces the SAME gate on its post-open browsingLevels", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    // Un-consented: adult stripped, SFW kept.
+    await defByName("panel_civitai_search").handler(
+      { query: "y", browsingLevels: [2, 8] },
+      ctx,
+    );
+    expect(calls[0].browsingLevels).toEqual([2]);
+
+    // Consented: passes through.
+    setNsfwConsent(true);
+    await defByName("panel_civitai_search").handler(
+      { query: "y", browsingLevels: [8] },
+      ctx,
+    );
+    expect(calls[1].browsingLevels).toEqual([8]);
+  });
+
+  it("panel_civitai_search rejects an all-adult un-consented search (no bridge call)", async () => {
+    const { ctx, calls } = makeFakeCtx();
+    const res = await defByName("panel_civitai_search").handler(
+      { query: "z", browsingLevels: [8, 16] },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(calls).toHaveLength(0);
   });
 });
 

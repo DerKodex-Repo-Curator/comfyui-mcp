@@ -83,6 +83,49 @@ function fail(err: unknown): ToolResult {
 
 const slotRef = z.union([z.string(), z.number().int().min(0)]);
 
+// CivitAI browsing-level bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16.
+const KNOWN_BROWSING_LEVELS = [1, 2, 4, 8, 16];
+// R/X/XXX are adult and gated behind the persistent NSFW consent (getNsfwConsent()).
+const ADULT_BROWSING_LEVELS = [4, 8, 16];
+
+/**
+ * SERVER-SIDE enforcement of the persistent NSFW consent gate on any
+ * agent-supplied browsing levels. The agent can pass arbitrary bitmask values;
+ * this walls them before they reach the panel so adult content is never
+ * surfaced without consent (matching panel_get_content_mode / the consent gate).
+ *
+ * - Rejects unknown levels (not in the PG..XXX enum).
+ * - Rejects a supplied-but-empty array.
+ * - When consent is NOT granted, strips R/X/XXX (4/8/16); if that leaves nothing,
+ *   THROWS so the agent gets an honest, actionable error instead of silent SFW.
+ * - Returns the sanitized, de-duped levels, or undefined when none were supplied
+ *   (preserving the panel's own default, currently [1] = PG).
+ */
+function sanitizeBrowsingLevels(levels: unknown): number[] | undefined {
+  if (levels === undefined || levels === null) return undefined;
+  if (!Array.isArray(levels) || levels.length === 0) {
+    throw new Error(
+      "browsingLevels must be a non-empty array of level values (PG=1, PG-13=2, R=4, X=8, XXX=16).",
+    );
+  }
+  const nums = levels.map((l) => Number(l));
+  for (const n of nums) {
+    if (!KNOWN_BROWSING_LEVELS.includes(n)) {
+      throw new Error(
+        `Unknown browsing level ${String(n)}. Allowed: 1 (PG), 2 (PG-13), 4 (R), 8 (X), 16 (XXX).`,
+      );
+    }
+  }
+  if (getNsfwConsent().allowed) return [...new Set(nums)];
+  const safe = [...new Set(nums.filter((n) => !ADULT_BROWSING_LEVELS.includes(n)))];
+  if (safe.length === 0) {
+    throw new Error(
+      "Adult content (R/X/XXX) requires consent, which the user hasn't granted. Call panel_request_adult_consent first, or request SFW levels only (PG=1, PG-13=2).",
+    );
+  }
+  return safe;
+}
+
 // ---- server-side pack workflow resolution (for panel_load_workflow) --------
 // Read a bundled pack's UI workflow.json on the SERVER so the (large) graph
 // never has to shuttle through the agent's conversation. Mirrors the package-
@@ -1162,7 +1205,7 @@ export function buildPanelToolDefs(): PanelToolDef[] {
         browsingLevels: z
           .array(z.number())
           .optional()
-          .describe("Content levels to show, as a set of bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16. e.g. [1,2] for SFW only, [1,2,4,8,16] for everything. Default [1]. Match the user's stated comfort."),
+          .describe("Content levels to show, as a set of bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16. e.g. [1,2] for SFW only, [1,2,4,8,16] for everything. Default [1]. Match the user's stated comfort. Adult levels (R/X/XXX = 4/8/16) are enforced server-side against the persistent NSFW consent gate and stripped/rejected unless the user has consented (panel_request_adult_consent)."),
         filters: z
           .object({
             period: z.string().optional(),
@@ -1172,18 +1215,174 @@ export function buildPanelToolDefs(): PanelToolDef[] {
           })
           .optional()
           .describe("Optional filter hints: period, a sort, and base-model names (e.g. ['Flux.1 D'])."),
+        dock: z
+          .boolean()
+          .optional()
+          .describe(
+            "Side-dock the browser beside the chat instead of a centered overlay, so chat and results stay visible together while you drive it. Default true (agent-opened browsers dock). Set false to force the old full-screen centered overlay.",
+          ),
       },
-      async (args: A, ctx) =>
-        ctx.call(
-          {
-            cmd: "open_civitai",
-            query: args.query,
-            tab: args.tab,
-            browsingLevels: args.browsingLevels,
-            filters: args.filters,
-          },
-          10000,
-        ),
+      async (args: A, ctx) => {
+        try {
+          const browsingLevels = sanitizeBrowsingLevels(args.browsingLevels);
+          return await ctx.call(
+            {
+              cmd: "open_civitai",
+              query: args.query,
+              tab: args.tab,
+              browsingLevels,
+              filters: args.filters,
+              dock: args.dock,
+            },
+            10000,
+          );
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_civitai_results",
+      "READ the CivitAI browser's CURRENT results as text (metadata + media URLs only — you will NOT be shown the images; you reason from the text and pick which URLs matter). Open the browser first with panel_open_civitai. Returns { items, total, loading }. Each item carries EXACTLY these fields and nothing else — a MEDIA item is { id, kind:'image'|'video', title:null, creator, baseModel, type, stats:{ reactions }, prompt (length-capped ~600 chars), urls:[] }; a MODEL item is { id, kind:'model', title (the model's name), creator, baseModel, type, stats:{ downloadCount, thumbsUp }, prompt:null, urls:[] }. Note: stats is a NESTED object (reactions for media; downloadCount+thumbsUp for models), urls is an ARRAY of media URL(s), and media items have title:null while models have prompt:null. Model descriptions are NOT included (they require a separate detail fetch) — do not expect them. Use this to see what's on screen before you highlight, switch tabs, or open the lightbox. `loading:true` means a fetch is still in flight and the panel is reporting what it has so far. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("Max results to serialize (1–50, default 20). The grid is ordered as shown to the user."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_results", limit: args.limit }, 10000),
+    ),
+    def(
+      "panel_civitai_highlight",
+      "Draw the user's attention to specific results by wrapping their cards in a glowing green outline (and scrolling the first into view) — this is how you say 'these are the ones I mean.' Call panel_civitai_results FIRST to get the ids. Pass a LIST of ids to light up several at once ('these three'). The browser must be open — otherwise the panel replies with an honest error. Non-destructive; it only changes what's highlighted, never downloads or selects.",
+      {
+        ids: z
+          .array(z.union([z.string(), z.number()]))
+          .min(1)
+          .describe("Result ids to glow green (from panel_civitai_results). Pass several to highlight a set."),
+        kind: z
+          .enum(["media", "model"])
+          .optional()
+          .describe("Which result kind these ids refer to (media = images/videos, model = checkpoints/loras/workflows). Match the active tab if omitted."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_highlight", ids: args.ids, kind: args.kind }, 10000),
+    ),
+    def(
+      "panel_civitai_clear_highlight",
+      "Remove any green highlight glow from the CivitAI results — clears what panel_civitai_highlight set. The browser must be open — otherwise the panel replies with an honest error.",
+      {},
+      async (_args: A, ctx) => ctx.call({ cmd: "civitai_clear_highlight" }, 10000),
+    ),
+    def(
+      "panel_civitai_switch_tab",
+      "Switch the OPEN CivitAI browser to a different tab (crossfades and re-fetches that tab's results). Use to move between images, videos, checkpoints, loras, workflows, or the user's favorites while driving the browse. Follow with panel_civitai_results to read what loaded. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        tab: z
+          .enum(["images", "videos", "checkpoints", "loras", "workflows", "favorites"])
+          .describe("The tab to switch to."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_switch_tab", tab: args.tab }, 10000),
+    ),
+    def(
+      "panel_civitai_search",
+      "Run a NEW search inside the already-open CivitAI browser (re-queries the current tab with a fresh term and optional filters). Use this to refine or pivot the browse after reading results — e.g. narrow by base model or change the sort. Follow with panel_civitai_results to read the new results. To open the browser in the first place, use panel_open_civitai instead. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        query: z.string().describe("The new search term (e.g. 'ghibli background', 'Flux portrait')."),
+        filters: z
+          .object({
+            period: z.string().optional().describe("Time window filter (e.g. 'Week', 'Month', 'AllTime')."),
+            modelSort: z.string().optional().describe("Sort for model tabs (e.g. 'Most Downloaded')."),
+            imageSort: z.string().optional().describe("Sort for image/video tabs (e.g. 'Most Reactions')."),
+            baseModels: z.array(z.string()).optional().describe("Base-model names to filter to (e.g. ['Flux.1 D'])."),
+          })
+          .optional()
+          .describe("Optional filters applied to this search."),
+        browsingLevels: z
+          .array(z.number())
+          .optional()
+          .describe("Content levels for this search, as bitmask values: PG=1, PG-13=2, R=4, X=8, XXX=16. Omit to keep the browser's current levels. Adult levels (R/X/XXX = 4/8/16) are enforced server-side against the persistent NSFW consent gate and stripped/rejected unless the user has consented (panel_request_adult_consent)."),
+      },
+      async (args: A, ctx) => {
+        try {
+          const browsingLevels = sanitizeBrowsingLevels(args.browsingLevels);
+          return await ctx.call(
+            { cmd: "civitai_search", query: args.query, filters: args.filters, browsingLevels },
+            10000,
+          );
+        } catch (err) {
+          return fail(err);
+        }
+      },
+    ),
+    def(
+      "panel_civitai_open_lightbox",
+      "Open the full-size lightbox viewer for one result by id, so the user gets a big look at that specific image/video. Get the id from panel_civitai_results. Use sparingly — as the finishing flourish after you've highlighted your pick. The browser must be open — otherwise the panel replies with an honest error.",
+      {
+        id: z
+          .union([z.string(), z.number()])
+          .describe("The result id to open in the lightbox (from panel_civitai_results)."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "civitai_open_lightbox", id: args.id }, 10000),
+    ),
+    def(
+      "panel_training_open",
+      "Open the in-panel LoRA/model TRAINING wizard for the user, so they can configure a training run visually while you guide them. Opens side-docked beside the chat by default so the wizard and chat stay visible together. After it's open, read it with panel_training_get_state and drive it with panel_training_set_field, panel_training_goto_step, panel_training_set_target, and panel_training_highlight. This only OPENS and configures the wizard — you have NO command to start a run; the user reviews the setup and launches training themselves from the wizard's Launch control.",
+      {
+        dock: z
+          .boolean()
+          .optional()
+          .describe("Side-dock the wizard beside chat (default true). Set false for the centered overlay."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "open_training", dock: args.dock }, 10000),
+    ),
+    def(
+      "panel_training_get_state",
+      "READ the OPEN training wizard's current state so you can drive it SAFELY. Returns the current view/step, which transitions are allowed right now (so you know if a step's prerequisites are met), the current field values, target availability (e.g. whether a remote pod is SSH-ready), and any async/loading status. Call this BEFORE panel_training_goto_step or panel_training_set_target — the wizard enforces the same gates as its own buttons and will reject a premature move, so check readiness here first. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
+      {},
+      async (_args: A, ctx) => ctx.call({ cmd: "training_get_state" }, 10000),
+    ),
+    def(
+      "panel_training_set_field",
+      "Set one field in the OPEN training wizard. The panel applies a strict per-field ALLOWLIST — the ONLY accepted `name` values are: 'datasetName' (string — the LoRA/dataset name), 'trigger' (string — the trigger word), 'preset' (one of 'smoke' | 'standard' | 'custom'), and 'target' (one of 'local' | 'pod', same as panel_training_set_target). Any other name is rejected server-side. There is NO learning-rate/step-count/base-model/dataset-path field here — those come from the chosen preset. Open the wizard first with panel_training_open. This configures only — you have no command to launch training. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        name: z
+          .enum(["datasetName", "trigger", "preset", "target"])
+          .describe("The wizard field to set. Only these four are accepted; anything else is rejected."),
+        value: z
+          .union([z.string(), z.number(), z.boolean()])
+          .describe("The value: datasetName/trigger are strings; preset is 'smoke'|'standard'|'custom'; target is 'local'|'pod'."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_set_field", name: args.name, value: args.value }, 10000),
+    ),
+    def(
+      "panel_training_goto_step",
+      "Navigate the OPEN training wizard to one of its four steps (1-based): 1 = dataset (gather images), 2 = label (caption them), 3 = launch (choose target + start), 4 = monitor (watch progress). Move the user forward/back as you explain each stage. This enforces the SAME gates as the wizard's Next button (backend capability, a valid name, uploads settled, images present); if the step's prerequisites aren't met the panel rejects it and throws honestly, so call panel_training_get_state first to check readiness. Open the wizard first with panel_training_open. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        step: z.number().int().min(1).max(4).describe("The step to jump to: 1=dataset, 2=label, 3=launch, 4=monitor."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_goto_step", step: args.step }, 10000),
+    ),
+    def(
+      "panel_training_set_target",
+      "Set WHERE the training run will execute — 'local' (this machine) or 'pod' (a remote GPU pod). Use this in the wizard to steer the user toward the right compute for their job. Choosing 'pod' runs the same preflight as the wizard's own button (a train_doctor check) and is REJECTED if there is no SSH-ready pod — call panel_training_get_state first to confirm pod availability. Open the wizard first with panel_training_open. This only configures the target; you have no command to launch the run. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        target: z.enum(["local", "pod"]).describe("Execution target: 'local' machine or remote 'pod'."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_set_target", target: args.target }, 10000),
+    ),
+    def(
+      "panel_training_highlight",
+      "Draw the user's attention to specific parts of the OPEN training wizard (steps or fields) with a glowing green outline — this is how you point at 'set this here.' Pass a LIST of refs to light up several. Open the wizard first with panel_training_open. Non-destructive. The wizard must be open — otherwise the panel replies with an honest error.",
+      {
+        refs: z
+          .array(z.string())
+          .min(1)
+          .describe("Wizard step/field refs to glow green (as the wizard labels them). Pass several to highlight a set."),
+      },
+      async (args: A, ctx) => ctx.call({ cmd: "training_highlight", refs: args.refs }, 10000),
     ),
     def(
       "panel_ask",

@@ -51,10 +51,23 @@ import type { Readable } from "node:stream";
 /** The per-turn child: stdin ignored (agy takes the prompt via argv), stdout +
  *  stderr piped. */
 type AgyChild = ChildProcessByStdio<null, Readable, Readable>;
+
+// SECURITY: agy is Google's LLM-vendor CLI — its subprocess must NOT inherit the
+// user's TOOL secrets (RunPod/CivitAI/HF/RunComfy/Registry tokens, AND the
+// GEMINI/GOOGLE keys, which panel-secrets classifies as tool secrets). The
+// official Antigravity CLI docs (antigravity.google/docs/cli) say agy
+// authenticates via the native system keyring + browser/SSH OAuth — it does NOT
+// document any API-key env auth — so there is NO confirmed need to re-admit the
+// GEMINI/GOOGLE keys, and doing so would expose tool credentials to the agy
+// subprocess. We therefore strip EVERY tool-only secret (no keep-list).
+//   NOTE: if a future agy version documents API-key env auth (e.g. GEMINI_API_KEY),
+//   re-admit that specific key deliberately here via buildAgentSpawnEnv(..., { keep })
+//   with a justification — do not blanket-keep.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
+import { buildAgentSpawnEnv } from "../services/panel-secrets.js";
 import {
   type AgentBackend,
   type AgentEvent,
@@ -464,7 +477,7 @@ export class AntigravityBackend implements AgentBackend {
     try {
       child = spawn(bin, args, {
         cwd,
-        env: process.env,
+        env: buildAgentSpawnEnv(), // no keep-list: strip ALL tool-only secrets (agy uses OAuth/keyring)
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         detached: process.platform !== "win32",
@@ -655,7 +668,7 @@ export class AntigravityBackend implements AgentBackend {
       try {
         child = spawn(bin, ["models"], {
           cwd: this.deps.cwd ?? process.cwd(),
-          env: process.env,
+          env: buildAgentSpawnEnv(), // no keep-list: strip ALL tool-only secrets (agy uses OAuth/keyring)
           stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
         }) as AgyChild;

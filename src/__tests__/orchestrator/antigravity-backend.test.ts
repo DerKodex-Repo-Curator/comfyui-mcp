@@ -227,6 +227,37 @@ describe("resolveAgyBin / readiness", () => {
 });
 
 describe("AntigravityBackend turns", () => {
+  it("spawns agy WITHOUT any tool-only secrets in its env (incl. GEMINI/GOOGLE — agy uses OAuth/keyring)", async () => {
+    // SECURITY (PR #270): agy is Google's LLM-vendor CLI — the user's TOOL
+    // secrets (RunPod/CivitAI/HF…) must NOT reach it. Per the official Antigravity
+    // CLI docs agy authenticates via native keyring + browser/SSH OAuth, with NO
+    // documented API-key env auth, so the GEMINI/GOOGLE keys (which panel-secrets
+    // classifies as tool secrets) are ALSO stripped — no keep-list.
+    const saved = {
+      RUNPOD_API_KEY: process.env.RUNPOD_API_KEY,
+      CIVITAI_API_TOKEN: process.env.CIVITAI_API_TOKEN,
+      GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    };
+    process.env.RUNPOD_API_KEY = "rp-tool-secret";
+    process.env.CIVITAI_API_TOKEN = "civ-tool-secret";
+    process.env.GEMINI_API_KEY = "AIza-own-key";
+    try {
+      hoisted.script.push({ stdout: ["ok"], exit: 0 });
+      const backend = new AntigravityBackend({ cwd: workDir });
+      await collect(backend.run({ channel: channelOf([{ text: "hi" }]) }));
+      const env = hoisted.spawns[0]!.opts.env as Record<string, string | undefined>;
+      expect(env.RUNPOD_API_KEY).toBeUndefined();
+      expect(env.CIVITAI_API_TOKEN).toBeUndefined();
+      expect(env.GEMINI_API_KEY).toBeUndefined(); // tool secret — stripped, no keep-list
+      expect(env.PATH ?? env.Path).toBeDefined();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
   it("streams stdout as deltas, commits the text, and continues with -c on turn 2", async () => {
     hoisted.script.push(
       { stdout: ["Hello ", "world"], exit: 0 },

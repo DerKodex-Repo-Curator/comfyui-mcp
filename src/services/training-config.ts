@@ -99,6 +99,10 @@ export interface TrainingConfigInput {
   params?: Partial<TrainParams>;
   /** Optional sample prompts; `[trigger]` is substituted. Defaults provided. */
   samplePrompts?: string[];
+  /** Override for `model.name_or_path` — a local model dir as the TRAINING
+   *  process sees it (e.g. a pod path to a pre-uploaded HF snapshot), used
+   *  when the default HF repo id can't be fetched (gated/offline). */
+  modelPath?: string;
 }
 
 const DEFAULT_CHARACTER_PROMPTS = [
@@ -125,6 +129,10 @@ function sanitizeName(name: string): string {
   if (!cleaned || /^\.+$/.test(cleaned)) return "lora";
   return cleaned;
 }
+
+/** Exported for callers that build job-scoped paths (pod job dirs) with the
+ *  same rules the config generator applies internally. */
+export const sanitizeJobName = sanitizeName;
 
 /**
  * Build an ai-toolkit training config for the given request.
@@ -193,7 +201,7 @@ export function buildTrainingConfig(input: TrainingConfigInput): BuiltTrainingCo
       dtype: spec.dtype,
     },
     model: {
-      name_or_path: spec.nameOrPath,
+      name_or_path: input.modelPath ?? spec.nameOrPath,
       ...spec.modelFlags,
       // Honor an explicit quantize override (e.g. off on a big card).
       quantize: p.quantize,

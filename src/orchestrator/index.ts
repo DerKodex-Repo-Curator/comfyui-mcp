@@ -85,6 +85,7 @@ import type { AgentBackend } from "./agent-backend.js";
 import { readComfyuiCrashLog, formatCrashNote } from "../services/crash-log.js";
 import { QueueMonitor, type StallReport } from "../services/queue-monitor.js";
 import { initRunpodWatcher, getRunpodWatcher } from "../services/runpod-watch.js";
+import { hasActiveTrainingJob, reconcileStaleTrainingJobs } from "../services/training-jobs.js";
 import {
   buildQueueStatusFrame,
   createQueueStatusBroadcaster,
@@ -3353,7 +3354,11 @@ export async function runPanelOrchestrator(): Promise<void> {
     push: (frame) => void bridge.push(frame),
     comfyuiIdle: () => {
       const s = QueueMonitor.snapshot();
-      return s.connected && !s.running && s.queueDepth === 0;
+      // NOT idle while a training job is alive on the pod: training isn't a
+      // ComfyUI queue job, so the queue alone would call an hours-long LoRA
+      // run "idle" and auto-stop the pod mid-flight (P4 guard; review finding
+      // on the connector). hasActiveTrainingJob is a probe-free file scan.
+      return s.connected && !s.running && s.queueDepth === 0 && !hasActiveTrainingJob("pod");
     },
     // Idle auto-stop only applies to a pod we're actually rendering on: the active
     // ComfyUI target is that pod's proxy (its id appears in the URL). A pod we
@@ -3362,6 +3367,24 @@ export async function runPanelOrchestrator(): Promise<void> {
     renderingOnPod: (podId) => !isTargetingLocal() && getComfyUIBaseUrl().includes(podId),
     idleStopMinutes: runpodIdleStopMinutes,
   });
+
+  // Money guard (codex #263): the idle predicate above trusts persisted
+  // training records blindly (hasActiveTrainingJob is a probe-free file scan),
+  // and owner-death reconciliation otherwise only runs via getJob/listJobs —
+  // so if the harness that launched a pod training run dies and nobody ever
+  // calls train_status again, the stale "running" record would suppress the
+  // pod auto-stop FOREVER. Periodically reconcile dead-owner records (probes
+  // fire only for dead/stale owners, so a healthy run costs nothing here).
+  const trainingReconcileTimer = setInterval(() => {
+    void reconcileStaleTrainingJobs()
+      .then((n) => {
+        if (n > 0) logger.info(`[panel-orchestrator] reconciled ${n} dead-owner training job(s) — pod idle auto-stop unblocked`);
+      })
+      .catch((err) => {
+        logger.debug(`[panel-orchestrator] training reconcile: ${err instanceof Error ? err.message : String(err)}`);
+      });
+  }, 5 * 60_000);
+  trainingReconcileTimer.unref?.();
 
   // Honest host indicator: whenever the ComfyUI target moves (RunPod connect,
   // pod stop → local fallback, "Local" switch), broadcast a `comfyui_target`

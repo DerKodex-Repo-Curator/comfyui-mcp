@@ -15,6 +15,9 @@ All notable changes to this project are documented here. This project adheres to
   up, streams training progress back, and stops/prunes via ssh — so `train_*`
   runs on a pod GPU with the same job-registry plumbing as local/GPU-Docker
   training. Companion to the P1 local trainer. (#263)
+- **Dockerless local training** — `train_start` now falls back to the native
+  trainer when Docker/the image is missing, gated on a complete bootstrap, with
+  full lifecycle parity (config-scoped cancel + dead-owner recovery). (#275)
 - **`resolve_missing_models`** — one call finds every model a workflow needs but
   the server doesn't have, and proposes VRAM-aware download candidates. Detection
   is mapping-free (a model-looking value absent from its own ComfyUI combo is

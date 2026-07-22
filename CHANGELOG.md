@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.45.0] - 2026-07-22
+
 ### MCP
 
 #### Added
@@ -41,6 +43,20 @@ All notable changes to this project are documented here. This project adheres to
 
 #### Fixed
 - close a live secret-leak + billing bug path on RunPod pod control (#270)
+
+### MCP
+
+#### Added
+- lean toward the docked CivitAI browser over text-only answers (#284)
+- panel_* tools to drive the CivitAI browser + training wizard (#281)
+
+#### Fixed
+- close deferred RunPod/training/codex review findings (#268/#269/#273/#274/#276/#277) (#278)
+- #271 hardening — no secrets at rest, ownership-aware config lifecycle, turn-settlement guarantees, --effort (#271)
+- review fixes — idle-interrupt poisoning, 32K argv preflight, console backend list (#262)
+- verified live against agy 1.1.5 — real MCP path + catalog-aware model guard (#262)
+- prefer HF_TOKEN over HUGGINGFACE_TOKEN for the HF token
+
 
 ## [0.44.0] - 2026-07-21
 

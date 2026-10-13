@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.206-beta.1] - 2026-10-13
+
+### MCP
+
+#### Fixed
+- the panel-skew assertions tolerate a prerelease version
+
+
 ## [0.52.206-beta.0] - 2026-10-13
 
 ### MCP

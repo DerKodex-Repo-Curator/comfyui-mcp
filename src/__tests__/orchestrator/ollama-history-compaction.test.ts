@@ -122,10 +122,14 @@ describe("#2231 — the text history is bounded so the window cannot eat the sys
     const last = openaiChatRequests[3];
     const texts = textsOf(last);
 
-    // The oldest turn's text is gone — that is the reclaimed context.
-    expect(texts.some((t) => t.includes("MARKER_ONE"))).toBe(false);
+    // The oldest turn lost its bulk (that is the reclaimed context) but kept its
+    // opening words as a gist, plus a handle back to the full text.
+    const oldest = texts.find((t) => t.includes("MARKER_ONE"));
+    expect(oldest).toBeDefined();
+    expect(oldest!.length).toBeLessThan(bigTurn("MARKER_ONE").text.length / 10);
+    expect(oldest).toMatch(/archived as h\d+/);
     // Replaced by a stub, not deleted: the message count still covers every turn.
-    expect(texts.some((t) => t.includes("you did see it"))).toBe(true);
+    expect(last.messages.length).toBe(8);
     // The live turn is untouched (it is inside the protected tail).
     expect(texts.some((t) => t.includes("MARKER_FOUR"))).toBe(true);
 

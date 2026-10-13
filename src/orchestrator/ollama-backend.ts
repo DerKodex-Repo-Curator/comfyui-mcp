@@ -177,7 +177,42 @@ type ChatMessage = {
    *  demonstrably did. Fabricating a non-delivery for an accepted attachment is
    *  the same class of error as hiding a real one. */
   mediaDelivered?: boolean;
+  /** True once this message's text has been replaced by a compaction stub
+   *  (#2231). Guards against re-stubbing an already-stubbed message, which
+   *  would stack notes without reclaiming a single token, and keeps the
+   *  "did the model ever see this" wording honest on later turns. */
+  compacted?: boolean;
 };
+
+/** Fraction of the context window the re-serialized TEXT history may occupy
+ *  before compaction fires. Headroom is not optional: the budget has to leave
+ *  room for the model's own reply plus the tool results this turn has not
+ *  produced yet, and the window is a hard wall rather than a soft one. */
+const HISTORY_BUDGET_FRACTION = 0.75;
+
+/** Chars per token for the history estimate. Deliberately 3.5, not the usual
+ *  prose figure of 4: this history is dominated by TOOL RESULTS, which are JSON
+ *  and tokenize denser than English (braces, quotes and node ids rarely merge
+ *  into one token). A prose-calibrated 4 therefore UNDER-counts exactly the
+ *  payload that fills the window, and under-counting here is the failure this
+ *  whole function exists to prevent. Erring high costs a little context; erring
+ *  low costs the system prompt. */
+const HISTORY_CHARS_PER_TOKEN = 3.5;
+
+/** Messages shorter than this are left alone — stubbing them reclaims nothing
+ *  and the note is longer than the text it replaces. */
+const HISTORY_SHRINK_FLOOR_CHARS = 240;
+
+/** How many messages at the TAIL are never compacted: the live user turn and
+ *  the tool exchange in flight around it. Compacting those would blank the
+ *  very thing the model is reasoning about right now. */
+const HISTORY_TAIL_KEEP = 6;
+
+/** Budget fraction override, same env convention as the other Ollama knobs. */
+function historyBudgetFraction(): number {
+  const raw = Number(process.env.COMFYUI_MCP_OLLAMA_HISTORY_BUDGET);
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : HISTORY_BUDGET_FRACTION;
+}
 
 type OllamaToolCall = {
   id?: string;
@@ -1771,6 +1806,100 @@ export class OllamaBackend implements AgentBackend {
     return { droppedImages, undeliveredImages, budget, bytesBefore };
   }
 
+  /** Approximate token cost of one message's TEXT (content + tool-call args).
+   *  Images are deliberately excluded — they are bounded separately by
+   *  trimImagePayloadToBudget, and double-counting them here would make this
+   *  budget fire on a history whose text is actually small. */
+  private estimateTextTokens(m: ChatMessage): number {
+    let chars = m.content.length;
+    for (const call of m.tool_calls ?? []) {
+      const args = call.function?.arguments;
+      chars += (call.function?.name?.length ?? 0) + (typeof args === "string" ? args.length : JSON.stringify(args ?? {}).length);
+    }
+    return Math.ceil(chars / HISTORY_CHARS_PER_TOKEN);
+  }
+
+  /**
+   * Bound the TEXT history so the next request cannot overflow num_ctx (#2231).
+   *
+   * Ollama does NOT error when a prompt exceeds the context window — it
+   * truncates the prompt from the FRONT. The front of this history is
+   * `history[0]`, the system prompt, followed by the tool-surface instructions.
+   * So the observed failure of a long local-model session is not a crash: the
+   * model silently loses its instructions and its tool vocabulary, stops
+   * emitting valid tool calls, and the turn collapses with no error anywhere.
+   * The pressure telltale in chatStream reports that this is ABOUT to happen;
+   * this is what actually prevents it.
+   *
+   * Two rules make the result safe to send:
+   *
+   *  1. Messages are SHRUNK IN PLACE, never removed. Both wire dialects pair a
+   *     tool result to the assistant message that requested it (`tool_call_id`
+   *     on the OpenAI side, `tool_name` on Ollama's), and a strict endpoint 400s
+   *     on a tool message whose call has vanished — or worse, on an assistant
+   *     `tool_calls` whose result has. Rewriting `content` and leaving the
+   *     envelope alone keeps every pairing structurally intact by construction,
+   *     so no amount of compaction can produce an unsendable history. For the
+   *     same reason `tool_calls` arguments are left untouched even though they
+   *     can be bulky: correctness outranks the extra tokens.
+   *
+   *  2. `history[0]` and the last HISTORY_TAIL_KEEP messages are never touched.
+   *     Index 0 is the pin — the thing front-truncation would have eaten, and
+   *     what the rest of this class assumes is the system prompt. The tail is
+   *     the live turn.
+   *
+   * Eviction order is cheapest-value-first: tool results before prose. A tool
+   * result is re-obtainable (call the tool again) and is usually the bulk of the
+   * window; a user's sentence is not re-obtainable at all. Within each class the
+   * sweep runs oldest-first.
+   *
+   * Every stub says plainly that the model DID see the content at the time, so
+   * it reports a gap in its memory instead of concluding the step never happened.
+   */
+  private compactHistoryToBudget(): {
+    shrunkMessages: number;
+    tokensBefore: number;
+    tokensAfter: number;
+    budgetTokens: number;
+    window: number;
+  } {
+    const window = this.contextWindow();
+    const budgetTokens = Math.floor(window * historyBudgetFraction());
+    let tokensBefore = 0;
+    for (const m of this.history) tokensBefore += this.estimateTextTokens(m);
+    if (tokensBefore <= budgetTokens) {
+      return { shrunkMessages: 0, tokensBefore, tokensAfter: tokensBefore, budgetTokens, window };
+    }
+
+    const lastTouchable = Math.max(1, this.history.length - HISTORY_TAIL_KEEP);
+    let remaining = tokensBefore;
+    let shrunkMessages = 0;
+
+    const stubFor = (m: ChatMessage): string =>
+      m.role === "tool"
+        ? `[note: this tool result was removed from your context to keep the conversation inside the model's ${window}-token window. You DID receive it at the time and acted on it — nothing in the conversation was lost, but you can no longer read it. If you need these details, call the tool again rather than guessing at what it said.]`
+        : `[note: the text of this message was removed from your context to keep the conversation inside the model's ${window}-token window. It was really part of this conversation and you did see it — you simply cannot re-read it now. Ask the user to restate anything you need instead of inventing what it said.]`;
+
+    // Pass 1 tool results, pass 2 prose. Oldest-first inside each pass.
+    for (const roles of [["tool"], ["assistant", "user"]] as ReadonlyArray<ReadonlyArray<ChatMessage["role"]>>) {
+      for (let i = 1; i < lastTouchable; i++) {
+        if (remaining <= budgetTokens) break;
+        const m = this.history[i];
+        if (!roles.includes(m.role)) continue;
+        if (m.compacted) continue;
+        if (m.content.length < HISTORY_SHRINK_FLOOR_CHARS) continue;
+        const before = this.estimateTextTokens(m);
+        m.content = stubFor(m);
+        m.compacted = true;
+        remaining -= before - this.estimateTextTokens(m);
+        shrunkMessages++;
+      }
+      if (remaining <= budgetTokens) break;
+    }
+
+    return { shrunkMessages, tokensBefore, tokensAfter: remaining, budgetTokens, window };
+  }
+
   /**
    * Drop audio the ACTIVE model must not be handed (#1972).
    *
@@ -2041,11 +2170,38 @@ export class OllamaBackend implements AgentBackend {
     // NOT here — describing many distinct tools is legitimate exploration.
     const discoveryCounts = new Map<string, number>();
     let emptyFinalRetried = false;
+    // Compaction can fire on several rounds of one turn; the user is told once.
+    let compactionNotified = false;
     let attachmentsStripped = false;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // Drain the chat stream manually: yield each delta event as it arrives,
         // and capture the generator's RETURN value (the accumulated message).
+        // #2231 — bound the text history before EVERY request, not once per
+        // turn. Tool results land mid-turn and are the fastest-growing part of
+        // the context, so a turn that starts with room to spare can still walk
+        // into the window by round six. Runs after the image trim, which bounds
+        // a different budget on a different axis.
+        const compacted = this.compactHistoryToBudget();
+        if (compacted.shrunkMessages && !compactionNotified) {
+          compactionNotified = true;
+          logger.warn(
+            `[ollama-backend] history ~${compacted.tokensBefore} tokens over the ${compacted.budgetTokens}-token budget (num_ctx ${compacted.window}) — compacted ${compacted.shrunkMessages} message(s) to ~${compacted.tokensAfter}`,
+          );
+          // Two different facts, and the user is owed the second one: compaction
+          // that GOT under the window, versus compaction that did all it could
+          // and is still over. The protected tail is not evictable, so a single
+          // turn bigger than the window cannot be fixed by any amount of
+          // trimming — and reporting that as "staying inside the window" would
+          // promise a safety that is not there.
+          const stillOver = compacted.tokensAfter > compacted.budgetTokens;
+          yield {
+            type: "assistant",
+            text: stillOver
+              ? `🧠 This conversation is bigger than ${this.model} can hold at once. I condensed the oldest tool results, but the recent turns alone still fill the window, so the model may start losing the beginning of this conversation. Raising \`COMFYUI_MCP_OLLAMA_NUM_CTX\` (or starting a fresh chat) is the real fix.`
+              : `🧠 This conversation has grown past what ${this.model} can hold at once, so I condensed the oldest tool results to stay inside the window. I acted on them at the time and nothing you said was lost, but I can't re-read them — if I seem to have forgotten a detail, say it again. Raising \`COMFYUI_MCP_OLLAMA_NUM_CTX\` or starting a fresh chat both buy more room.`,
+          };
+        }
         const stream = this.chatStream(this.history, tools, abort.signal, opts.onActivity);
         let content = "";
         let toolCalls: OllamaToolCall[] = [];

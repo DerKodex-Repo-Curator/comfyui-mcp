@@ -209,6 +209,25 @@ const HISTORY_SHRINK_FLOOR_CHARS = 240;
 const HISTORY_TAIL_KEEP = 6;
 
 /** Budget fraction override, same env convention as the other Ollama knobs. */
+/** The tool a compacted stub points at. Registered only once something has been
+ *  archived (see buildModelTools), so a session that never compacts carries
+ *  exactly the tool surface it always did. */
+const HISTORY_RECALL_TOOL = "history_recall";
+
+/** Cap on one recall. A recalled message re-enters the live context, so an
+ *  unbounded one could undo the compaction that archived it. */
+const HISTORY_RECALL_MAX_CHARS = 6000;
+
+/** How much of the original each stub keeps inline. A user's words get more room
+ *  than tool output: intent cannot be re-obtained by calling a tool again. */
+const HISTORY_EXCERPT_CHARS = { tool: 160, assistant: 160, user: 300 } as const;
+
+/** Whitespace-collapsed head of `text`, ellipsized past `max`. */
+function excerptOf(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1).trimEnd()}…`;
+}
+
 function historyBudgetFraction(): number {
   const raw = Number(process.env.COMFYUI_MCP_OLLAMA_HISTORY_BUDGET);
   return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : HISTORY_BUDGET_FRACTION;
@@ -871,6 +890,11 @@ export class OllamaBackend implements AgentBackend {
   protected panelTools: McpToolInfo[] = [];
   /** Conversation history for the live session (Ollama is stateless per request). */
   private history: ChatMessage[] = [];
+  /** Full text of every message compaction stubbed, by handle (h1, h2, …).
+   *  Lives exactly as long as `history` does: it is reset wherever history is,
+   *  so a handle can never resolve to a message from another conversation. */
+  private historyArchive = new Map<string, { role: ChatMessage["role"]; toolName?: string; content: string }>();
+  private historyArchiveSeq = 0;
   private sessionId: string | null = null;
 
   /** Wire dialect (see OllamaBackendDeps.api). */
@@ -1177,6 +1201,21 @@ export class OllamaBackend implements AgentBackend {
         },
       );
     }
+    if (this.historyArchive.size > 0) {
+      defs.push({
+        type: "function",
+        function: {
+          name: HISTORY_RECALL_TOOL,
+          description:
+            "Read back the full text of an earlier message that was compacted out of your context to save space. Compacted messages say 'archived as h<N>'; pass that id.",
+          parameters: {
+            type: "object",
+            properties: { id: { type: "string", description: "The archive handle, e.g. h3." } },
+            required: ["id"],
+          },
+        },
+      });
+    }
     return defs;
   }
 
@@ -1194,6 +1233,7 @@ export class OllamaBackend implements AgentBackend {
     }
 
     try {
+      if (name === HISTORY_RECALL_TOOL && this.historyArchive.size > 0) return this.recallArchived(args);
       const comfyTool = this.comfyTools.find((t) => t.name === name);
       if (comfyTool) {
         if (!this.comfy) return { text: "comfyui tools are unavailable in this session.", isError: true };
@@ -1682,6 +1722,8 @@ export class OllamaBackend implements AgentBackend {
       // systemPromptForSurface(), which the post-model-switch rewrite also uses,
       // so the two writers cannot disagree about what this session was told.
       this.history = [{ role: "system", content: this.systemPromptForSurface() }];
+      this.historyArchive.clear();
+      this.historyArchiveSeq = 0;
     }
     yield { type: "session", sessionId: this.sessionId, model: this.model };
 
@@ -1875,10 +1917,21 @@ export class OllamaBackend implements AgentBackend {
     let remaining = tokensBefore;
     let shrunkMessages = 0;
 
-    const stubFor = (m: ChatMessage): string =>
-      m.role === "tool"
-        ? `[note: this tool result was removed from your context to keep the conversation inside the model's ${window}-token window. You DID receive it at the time and acted on it — nothing in the conversation was lost, but you can no longer read it. If you need these details, call the tool again rather than guessing at what it said.]`
-        : `[note: the text of this message was removed from your context to keep the conversation inside the model's ${window}-token window. It was really part of this conversation and you did see it — you simply cannot re-read it now. Ask the user to restate anything you need instead of inventing what it said.]`;
+    // A stub is a GIST plus a HANDLE. The gist keeps the part a small model most
+    // needs in place, at the message's own position (never in history[0], which
+    // the surface reconnect rewrites wholesale); the handle reaches the full text
+    // through history_recall. Each still says the model DID see the original, so
+    // a gap reads as "I can look that up", not "that never happened".
+    const stubFor = (m: ChatMessage, id: string): string => {
+      const recall = `${HISTORY_RECALL_TOOL} {"id":"${id}"}`;
+      if (m.role === "tool") {
+        return `[compacted ${m.tool_name ?? "tool"} result, archived as ${id}. Gist: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.tool)}". You DID receive the full result earlier; to read it again call ${recall} rather than guessing.]`;
+      }
+      if (m.role === "user") {
+        return `[compacted user message, archived as ${id}. They said: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.user)}". You did see the whole message; full text: ${recall}.]`;
+      }
+      return `[compacted earlier reply of yours, archived as ${id}. Gist: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.assistant)}". Full text: ${recall}.]`;
+    };
 
     // Pass 1 tool results, pass 2 prose. Oldest-first inside each pass.
     for (const roles of [["tool"], ["assistant", "user"]] as ReadonlyArray<ReadonlyArray<ChatMessage["role"]>>) {
@@ -1888,8 +1941,19 @@ export class OllamaBackend implements AgentBackend {
         if (!roles.includes(m.role)) continue;
         if (m.compacted) continue;
         if (m.content.length < HISTORY_SHRINK_FLOOR_CHARS) continue;
+        // Peek the handle so the stub can be sized BEFORE anything is archived: a
+        // gist plus a handle can outgrow a short message, and stubbing that would
+        // spend context to "save" it.
+        const reused = this.recalledHandleOf(m);
+        const id = reused ?? `h${this.historyArchiveSeq + 1}`;
+        const stub = stubFor(m, id);
+        if (stub.length >= m.content.length) continue;
+        if (!reused) {
+          this.historyArchiveSeq++;
+          this.historyArchive.set(id, { role: m.role, ...(m.tool_name ? { toolName: m.tool_name } : {}), content: m.content });
+        }
         const before = this.estimateTextTokens(m);
-        m.content = stubFor(m);
+        m.content = stub;
         m.compacted = true;
         remaining -= before - this.estimateTextTokens(m);
         shrunkMessages++;
@@ -1898,6 +1962,33 @@ export class OllamaBackend implements AgentBackend {
     }
 
     return { shrunkMessages, tokensBefore, tokensAfter: remaining, budgetTokens, window };
+  }
+
+  /** A history_recall RESULT that gets compacted again keeps its original handle.
+   *  Archiving it afresh would store a second copy of the same text under a new
+   *  id on every recall-then-compact cycle. */
+  private recalledHandleOf(m: ChatMessage): string | undefined {
+    if (m.role !== "tool" || m.tool_name !== HISTORY_RECALL_TOOL) return undefined;
+    const id = /^\[recalled (h\d+)\]/.exec(m.content)?.[1];
+    return id && this.historyArchive.has(id) ? id : undefined;
+  }
+
+  /** history_recall: the archived full text, capped so a recall cannot undo the
+   *  compaction that archived it. Unknown ids answer with the ids that DO exist,
+   *  so a mistyped handle is one retry, not a dead end. */
+  private recallArchived(args: Record<string, unknown>): { text: string; isError: boolean } {
+    const id = typeof args.id === "string" ? args.id.trim() : "";
+    const hit = id ? this.historyArchive.get(id) : undefined;
+    if (!hit) {
+      const known = [...this.historyArchive.keys()].slice(-12).join(", ") || "none";
+      return { text: `No archived message "${id}". Archived ids in this conversation: ${known}.`, isError: true };
+    }
+    const from = hit.role === "tool" ? `${hit.toolName ?? "tool"} result` : hit.role === "user" ? "user message" : "your earlier reply";
+    const body =
+      hit.content.length <= HISTORY_RECALL_MAX_CHARS
+        ? hit.content
+        : `${hit.content.slice(0, HISTORY_RECALL_MAX_CHARS)}\n[…truncated: the original is ${hit.content.length} chars; this recall shows the first ${HISTORY_RECALL_MAX_CHARS}.]`;
+    return { text: `[recalled ${id}] (${from})\n${body}`, isError: false };
   }
 
   /**
@@ -2078,7 +2169,9 @@ export class OllamaBackend implements AgentBackend {
     // #1972 — same reason, for audio the history is still carrying: the model
     // selected NOW may not be the one that was verified when it was attached.
     this.stripUnverifiedAudioFromHistory();
-    const tools = this.buildModelTools();
+    // `let`: compaction can archive mid-turn, and the stubs it writes point at
+    // history_recall, so the tool list is rebuilt the moment that tool exists.
+    let tools = this.buildModelTools();
     // Vision is a per-MODEL property (gemma4 sees images, qwen3 doesn't;
     // DeepSeek's API rejects image parts outright), so ALWAYS attempt delivery:
     // resolve the ComfyUI refs inline and let the strip-and-retry below handle
@@ -2183,6 +2276,9 @@ export class OllamaBackend implements AgentBackend {
         // into the window by round six. Runs after the image trim, which bounds
         // a different budget on a different axis.
         const compacted = this.compactHistoryToBudget();
+        if (this.historyArchive.size > 0 && !tools.some((t) => (t.function as { name?: string } | undefined)?.name === HISTORY_RECALL_TOOL)) {
+          tools = this.buildModelTools();
+        }
         if (compacted.shrunkMessages && !compactionNotified) {
           compactionNotified = true;
           logger.warn(
@@ -2199,7 +2295,7 @@ export class OllamaBackend implements AgentBackend {
             type: "assistant",
             text: stillOver
               ? `🧠 This conversation is bigger than ${this.model} can hold at once. I condensed the oldest tool results, but the recent turns alone still fill the window, so the model may start losing the beginning of this conversation. Raising \`COMFYUI_MCP_OLLAMA_NUM_CTX\` (or starting a fresh chat) is the real fix.`
-              : `🧠 This conversation has grown past what ${this.model} can hold at once, so I condensed the oldest tool results to stay inside the window. I acted on them at the time and nothing you said was lost, but I can't re-read them — if I seem to have forgotten a detail, say it again. Raising \`COMFYUI_MCP_OLLAMA_NUM_CTX\` or starting a fresh chat both buy more room.`,
+              : `🧠 This conversation has grown past what ${this.model} can hold at once, so I condensed the oldest tool results to stay inside the window. I kept a short gist of each in place and can pull any of them back in full, so nothing is lost — if I still seem to have forgotten a detail, say it again. Raising \`COMFYUI_MCP_OLLAMA_NUM_CTX\` or starting a fresh chat both buy more room.`,
           };
         }
         const stream = this.chatStream(this.history, tools, abort.signal, opts.onActivity);

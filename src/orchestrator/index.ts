@@ -235,7 +235,8 @@ import { PiBackend } from "./pi-backend.js";
 import { GrokBackend, GROK_DEFAULT_MODEL } from "./grok-backend.js";
 import { QwenBackend, QWEN_DEFAULT_MODEL } from "./qwen-backend.js";
 import { OllamaBackend, OLLAMA_SYSTEM_PROMPT, type OllamaBackendDeps } from "./ollama-backend.js";
-import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
+import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL, resolveChatGptDefaultModel } from "./chatgpt-oauth-backend.js";
+import { pickTopClaudeModel } from "./model-defaults.js";
 import { KimiBackend } from "./kimi-backend.js";
 import {
   OPENAI_KEY_PROVIDER_IDS,
@@ -1430,6 +1431,9 @@ export async function runPanelOrchestrator(): Promise<void> {
       ? { COMFYUI_MCP_FORCE_REMOTE: "1" }
       : {};
   const model = process.env.COMFYUI_MCP_PANEL_MODEL ?? "claude-opus-5";
+  // Unset = "first rank": the probe below adopts the newest Opus the account
+  // advertises, and `model` is only the fallback until it answers. Set = pinned.
+  const claudeModelExplicit = !!process.env.COMFYUI_MCP_PANEL_MODEL?.trim();
   const envEffort = process.env.COMFYUI_MCP_PANEL_EFFORT;
   const effort: Effort | undefined = isEffort(envEffort) ? envEffort : undefined;
   // Single-port multi-provider: ONE orchestrator on ONE bridge port serves ALL
@@ -1643,7 +1647,13 @@ export async function runPanelOrchestrator(): Promise<void> {
   const persistedAgent = getAgentSettings();
   let ollamaModel =
     process.env.COMFYUI_MCP_OLLAMA_MODEL ?? persistedAgent.ollama?.model ?? "artokun/gemma4-comfyui-mcp:e4b";
-  const chatgptModel = process.env.COMFYUI_MCP_CHATGPT_MODEL ?? CHATGPT_DEFAULT_MODEL;
+  // First rank: the Codex catalog's top-ranked model unless one is pinned in env.
+  // Resolved once here so the backend, the ready banner and the picker's "current"
+  // all name the same model.
+  const chatgptModel = await resolveChatGptDefaultModel();
+  if (!process.env.COMFYUI_MCP_CHATGPT_MODEL?.trim() && chatgptModel !== CHATGPT_DEFAULT_MODEL) {
+    logger.info(`[panel-orchestrator] chatgpt default model → ${chatgptModel} (top of the Codex catalog)`);
+  }
   // kimi keeps a local model var (its bespoke KimiBackend takes it). glm/moonshot
   // read their model straight from the registry via the shared factory, so no
   // per-provider model var is needed for them anymore. All three still resolve to
@@ -3789,6 +3799,17 @@ export async function runPanelOrchestrator(): Promise<void> {
         : fetchSupportedModels(model);
       p = probe.then((list) => {
         if (!list.length) modelsByBackend.delete(backend); // don't cache a failed probe
+        // First-rank Claude default: adopt the newest Opus this account advertises.
+        if (backend === "claude" && !claudeModelExplicit && list.length) {
+          const top = pickTopClaudeModel(list);
+          if (top && top !== manager.defaultModel) {
+            void manager.adoptDefaultModel(top, (key) => backendOf(key) === "claude").then((switched) => {
+              logger.info(
+                `[panel-orchestrator] claude default model → ${top} (newest advertised Opus)${switched.length ? `; switched ${switched.length} live tab(s) at their next turn` : ""}`,
+              );
+            });
+          }
+        }
         // LM Studio / llama.cpp ship no sane hardcoded default (the model is
         // whatever the user downloaded/launched) — adopt the server's first
         // offering when unset. llama-server serves exactly one model, so this
@@ -3839,6 +3860,12 @@ export async function runPanelOrchestrator(): Promise<void> {
     }
     return p;
   }
+  // First-rank Claude default: probe at startup rather than at the first hello, so
+  // a tab opened right away spawns on the adopted model instead of racing the probe
+  // on the fallback. Only when Claude is the default backend and no model is pinned
+  // (other users would pay for a Claude subprocess they never use). A failed probe
+  // is not cached, so the hello path still retries.
+  if (defaultBackend === "claude" && !claudeModelExplicit) void ensureModels("claude");
   // The model to highlight as "current" for a backend: the panel's configured
   // model for claude; the env override (or account default = the list's own
   // current) for codex/gemini.
@@ -3858,7 +3885,10 @@ export async function runPanelOrchestrator(): Promise<void> {
     const reg = openAiKeyProvider(backend);
     if (reg) return openAiKeyProviderModel(reg); // glm / kimi / moonshot
     if (backend === "copilot") return copilotModel;
-    return model;
+    // The manager's LIVE default, not the startup `model`: once the probe adopts the
+    // account's top-ranked Claude, the picker's "current" and the agent identity
+    // stamp must name it, not the fallback it replaced.
+    return manager.defaultModel;
   }
   /**
    * Publish WHICH LLM is driving an agent, so report_issue can stamp it into the
@@ -4659,7 +4689,7 @@ export async function runPanelOrchestrator(): Promise<void> {
                       ? (openrouterModel ?? (models[0] as { value?: string }).value ?? "OpenRouter")
                       : isCp
                         ? (copilotModel ?? (models[0] as { value?: string }).value ?? "Copilot")
-                        : model;
+                        : manager.defaultModel;
             // llama.cpp launch gotchas (issue #161): a reachable server can still
             // be useless for us — tool calling needs --jinja (rejected requests),
             // and a launch-time -c under ~16K silently truncates the tool payload.

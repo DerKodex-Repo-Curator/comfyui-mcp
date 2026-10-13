@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.206-beta.2] - 2026-10-13
+
+_No user-facing changes._
+
+
 ## [0.52.206-beta.1] - 2026-10-13
 
 ### MCP

@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.206-beta.4] - 2026-10-13
+
+### MCP
+
+#### Added
+- compacted messages keep a gist and can be recalled in full
+
+#### Fixed
+- the model list follows the Codex catalog, so new generations appear
+
+
 ## [0.52.206-beta.3] - 2026-10-13
 
 ### MCP

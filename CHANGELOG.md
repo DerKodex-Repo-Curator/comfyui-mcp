@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.206-beta.3] - 2026-10-13
+
+### MCP
+
+#### Fixed
+- the text history is bounded so the window cannot eat the system prompt
+
+
 ## [0.52.206-beta.2] - 2026-10-13
 
 _No user-facing changes._

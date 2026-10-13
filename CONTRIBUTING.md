@@ -177,7 +177,7 @@ identifier:
 
 | Tag              | npm dist-tag | Installed by                 |
 | ---------------- | ------------ | ---------------------------- |
-| `v0.53.0`        | `latest`     | everyone (and `self_update`) |
+| `v0.53.0`        | `latest`     | everyone, incl. auto-update  |
 | `v0.53.0-beta.1` | `beta`       | `npx comfyui-mcp@beta`       |
 | `v0.53.0-rc.1`   | `next`       | `npx comfyui-mcp@next`       |
 

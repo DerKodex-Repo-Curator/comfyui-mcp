@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.206-beta.5] - 2026-10-13
+
+### MCP
+
+#### Added
+- default to the top-ranked model the account offers
+
+
 ## [0.52.206-beta.4] - 2026-10-13
 
 ### MCP

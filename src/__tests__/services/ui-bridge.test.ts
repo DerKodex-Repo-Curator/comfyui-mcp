@@ -5515,7 +5515,11 @@ describe("UiBridge.send (graceful gate end-to-end)", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     await expect(bridge.send({ cmd: "graph_query" }, { tabId: "skew-tab" })).rejects.toThrow(
-      /too old for "graph_query" \(detected panel 0\.6\.8, mcp \d+\.\d+\.\d+\)/i,
+      // The version suffix is optional on purpose: a prerelease build reports
+      // `mcp 0.52.206-beta.0`, and a bare `\d+\.\d+\.\d+\)` cannot match it —
+      // which made every `-beta.N` / `-rc.N` tag fail this test and so made the
+      // whole prerelease channel unpublishable (caught by v0.52.206-beta.0).
+      /too old for "graph_query" \(detected panel 0\.6\.8, mcp \d+\.\d+\.\d+(?:-[\w.]+)?\)/i,
     );
   });
 
@@ -5562,7 +5566,8 @@ describe("UiBridge.send (graceful gate end-to-end)", () => {
         (e: Error) => e,
       );
     expect(gated.message).toMatch(
-      /too old for "refresh_nodes" \(detected panel 0\.7\.0, mcp \d+\.\d+\.\d+\).*≥0\.11\.28/is,
+      // Prerelease-tolerant for the same reason as the graph_query case above.
+      /too old for "refresh_nodes" \(detected panel 0\.7\.0, mcp \d+\.\d+\.\d+(?:-[\w.]+)?\).*≥0\.11\.28/is,
     );
     expect(gated.message).not.toContain("0.6.8");
   });

@@ -125,9 +125,19 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           if [[ "${version}" == *-* ]]; then
-            echo "value=next" >> "$GITHUB_OUTPUT"
+            # Route by the prerelease IDENTIFIER so `npx comfyui-mcp@beta` is a
+            # real channel: v0.53.0-beta.1 -> 'beta', everything else (rc, alpha,
+            # anything malformed) keeps the historical 'next'. Only the dist-tag
+            # differs — both are non-'latest', which is the property that makes
+            # them safe (see the comment above).
+            prerelease="${version#*-}"
+            case "${prerelease%%.*}" in
+              beta) channel="beta" ;;
+              *) channel="next" ;;
+            esac
+            echo "value=${channel}" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "${GITHUB_REF_NAME} is a prerelease -> npm dist-tag 'next'"
+            echo "${GITHUB_REF_NAME} is a prerelease -> npm dist-tag '${channel}'"
           else
             echo "value=latest" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"

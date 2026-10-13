@@ -137,6 +137,32 @@ function atLeastGpt56(id: string): boolean {
   return !!v && (v[0] > 5 || (v[0] === 5 && v[1] >= 6));
 }
 
+/** What the server offers for a picker, in the server's own order. */
+function listedByPriority(entries: CodexModelEntry[]): CodexModelEntry[] {
+  return entries
+    .filter((e) => e.visibility !== "hide")
+    .sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER));
+}
+
+/**
+ * The ChatGPT model a session starts on when the user named none: the Codex
+ * catalog's top-ranked listed model (priority 1).
+ *
+ * A baked id here goes stale the day a generation ships — gpt-5.6-luna was still
+ * the default after the catalog described it as an "Older fast and efficient
+ * model". The catalog is per-account and refreshed by the Codex CLI, so its top
+ * pick is both current and something this account can use. An explicit
+ * COMFYUI_MCP_CHATGPT_MODEL always wins, and a cache without catalog metadata
+ * (older Codex) falls back to the baked default, so nothing gets worse offline.
+ */
+export async function resolveChatGptDefaultModel(home = homedir()): Promise<string> {
+  const explicit = process.env.COMFYUI_MCP_CHATGPT_MODEL?.trim();
+  if (explicit) return explicit;
+  const entries = await loadCodexModels(home);
+  if (!hasCatalogMetadata(entries)) return CHATGPT_DEFAULT_MODEL;
+  return listedByPriority(entries)[0]?.id ?? CHATGPT_DEFAULT_MODEL;
+}
+
 function isRetired(entry: CodexModelEntry | undefined, now = Date.now()): boolean {
   if (!entry?.upgrade) return false;
   const at = entry.upgrade.retirementAt ? Date.parse(entry.upgrade.retirementAt) : NaN;
@@ -574,21 +600,17 @@ export class ChatGptOAuthBackend extends OllamaBackend {
    */
   private listFromCatalog(entries: CodexModelEntry[]): ModelChoice[] {
     const byId = new Map(entries.map((e) => [e.id, e]));
-    const listed = entries
-      .filter((e) => e.visibility !== "hide")
-      .sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER));
+    const listed = listedByPriority(entries);
     const active = byId.get(this.model);
     // Migrate the ACTIVE model only on a real signal. Re-inserting a dead model at
     // the head kept it selected and 400ing every turn (codex review), so:
     //   • retired per the server's own notice -> its named replacement;
-    //   • absent from the catalog entirely    -> the default, else the top model.
+    //   • absent from the catalog entirely    -> the catalog's top-ranked model.
     // A HIDDEN model is not dead (the user or env chose it deliberately), and a
     // model with an upgrade notice still works until its retirement date.
     let target: string | undefined;
     if (isRetired(active)) target = active?.upgrade?.model;
-    else if (!active && listed.length) {
-      target = listed.some((e) => e.id === CHATGPT_DEFAULT_MODEL) ? CHATGPT_DEFAULT_MODEL : listed[0].id;
-    }
+    else if (!active && listed.length) target = listed[0].id;
     if (target && target !== this.model) {
       logger.info(`[chatgpt-oauth-backend] active model ${this.model} is retired or unavailable — migrating to ${target}`);
       this.model = target;

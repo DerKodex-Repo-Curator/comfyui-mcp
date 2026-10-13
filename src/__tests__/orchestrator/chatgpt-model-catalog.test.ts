@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL, isChatGptModel } from "../../orchestrator/chatgpt-oauth-backend.js";
+import { ChatGptOAuthBackend, isChatGptModel } from "../../orchestrator/chatgpt-oauth-backend.js";
 import type { McpToolClient } from "../../orchestrator/ollama-backend.js";
 
 vi.mock("../../services/code-provider-auth.js", () => ({
@@ -129,9 +129,7 @@ describe("ChatGPT model list follows the Codex server catalog", () => {
     // list with it kept it selected and 400ing every turn.
     const list = await backendWith(CATALOG, "gpt-5.4-mini").listModels();
     expect(list.map((m) => m.id)).not.toContain("gpt-5.4-mini");
-    expect(list[0].id).toBe(
-      CATALOG.some((e) => e.slug === CHATGPT_DEFAULT_MODEL && e.visibility === "list") ? CHATGPT_DEFAULT_MODEL : "gpt-6.1-sol",
-    );
+    expect(list[0].id).toBe("gpt-6.1-sol"); // the catalog's top rank, not the baked default
   });
 
   it("keeps a HIDDEN model the user chose on purpose — hidden is not retired", async () => {

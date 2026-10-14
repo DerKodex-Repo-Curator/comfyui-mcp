@@ -42,9 +42,33 @@ describe("pickTopClaudeModel — the same rule as the panel's pickDefaultModel",
     expect(pickTopClaudeModel([v("claude-opus-5-5-fast"), v("claude-opus-5")])).toBe("claude-opus-5");
   });
 
-  it("with no Opus, falls back to the SDK's own first row; empty gives nothing", () => {
-    expect(pickTopClaudeModel([v("default"), v("claude-sonnet-5")])).toBe("default");
+  it("with no Opus, falls back to the first non-`default` row; empty gives nothing", () => {
+    expect(pickTopClaudeModel([v("default"), v("claude-sonnet-5")])).toBe("claude-sonnet-5");
+    expect(pickTopClaudeModel([v("default", "claude-sonnet-5")])).toBe("default"); // nothing else to pick
     expect(pickTopClaudeModel([])).toBeUndefined();
+  });
+
+  // The live supportedModels() list from a real account on 2026-10-13, verbatim.
+  // The newest Opus is advertised ONLY through aliases — no pinned claude-opus-5-5
+  // row exists — and `default` (resolving to the same model) came first. beta.5
+  // picked `default`; the panel, which drops that row, picked `opus`.
+  it("on the real account list, agrees with the panel: `opus`, never `default`", () => {
+    const live = [
+      v("default", "claude-opus-5-5"),
+      v("opus", "claude-opus-5-5"),
+      v("fable", "claude-fable-5-1"),
+      v("sonnet", "claude-sonnet-5-5"),
+      v("haiku", "claude-haiku-5-5"),
+      v("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+      v("claude-sonnet-5", "claude-sonnet-5"),
+      v("claude-opus-5", "claude-opus-5"),
+      v("claude-fable-5", "claude-fable-5"),
+      v("claude-opus-4-8", "claude-opus-4-8"),
+      v("claude-opus-4-7", "claude-opus-4-7"),
+      v("claude-opus-4-6", "claude-opus-4-6"),
+      v("claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ];
+    expect(pickTopClaudeModel(live)).toBe("opus");
   });
 });
 

@@ -6,6 +6,26 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.206] - 2026-10-14
+
+### MCP
+
+#### Added
+- Ollama sizes `num_ctx` from the model's native context window instead of a fixed 16K, configurable from the panel (Auto / Max / fixed 16K–256K).
+- Compacted Ollama messages keep a gist and can be recalled in full.
+- New sessions default to the top-ranked model the account offers, never the SDK's `default` row (matching the panel).
+- `-beta.N` tags publish to the npm `beta` dist-tag, so prereleases can't reach `latest` users.
+
+#### Fixed
+- Ollama history is bounded so the window can't eat the system prompt, and the protected tail is compacted too, so an overflow can't drop the user's request.
+- The ChatGPT model list follows the Codex catalog, so new generations appear.
+- The ready banner no longer labels a new backend with the model the previous backend resolved.
+- The panel-skew assertions tolerate a prerelease version.
+
+#### Changed
+- `@anthropic-ai/claude-agent-sdk` 0.3.240 → 0.3.296, so the Claude 5.5 family is selectable; provider and MCP SDKs updated.
+
+
 ## [0.52.205] - 2026-10-01
 
 ### MCP

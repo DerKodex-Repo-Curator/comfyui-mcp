@@ -234,7 +234,13 @@ import { AntigravityBackend } from "./antigravity-backend.js";
 import { PiBackend } from "./pi-backend.js";
 import { GrokBackend, GROK_DEFAULT_MODEL } from "./grok-backend.js";
 import { QwenBackend, QWEN_DEFAULT_MODEL } from "./qwen-backend.js";
-import { OllamaBackend, OLLAMA_SYSTEM_PROMPT, type OllamaBackendDeps } from "./ollama-backend.js";
+import {
+  OllamaBackend,
+  OLLAMA_SYSTEM_PROMPT,
+  parseOllamaContextSetting,
+  type OllamaBackendDeps,
+  type OllamaContextSetting,
+} from "./ollama-backend.js";
 import { ChatGptOAuthBackend, CHATGPT_DEFAULT_MODEL } from "./chatgpt-oauth-backend.js";
 import { KimiBackend } from "./kimi-backend.js";
 import {
@@ -1665,9 +1671,15 @@ export async function runPanelOrchestrator(): Promise<void> {
       ? "openai"
       : "ollama";
   let ollamaBaseUrl = process.env.COMFYUI_MCP_OLLAMA_BASE_URL ?? persistedAgent.ollama?.baseUrl;
+  // Panel Settings › Ollama › Context window. Unlike the fields above, an
+  // explicit panel choice beats COMFYUI_MCP_OLLAMA_NUM_CTX: the env var is the
+  // fallback for "auto", so a stale .env line can't lock the panel control.
+  // Read through a getter so a change applies to live sessions on the next turn.
+  let ollamaNumCtx: OllamaContextSetting = parseOllamaContextSetting(persistedAgent.ollama?.numCtx) ?? "auto";
   const ollamaApiKey = process.env.COMFYUI_MCP_OLLAMA_API_KEY || process.env.OPENROUTER_API_KEY;
   const ollamaDeps = () => ({
     api: ollamaApi,
+    contextSetting: () => ollamaNumCtx,
     ...(ollamaBaseUrl ? { host: ollamaBaseUrl } : {}),
     ...(ollamaApi === "openai" && ollamaApiKey ? { apiKey: ollamaApiKey } : {}),
   });
@@ -4988,8 +5000,8 @@ export async function runPanelOrchestrator(): Promise<void> {
         }
       }
       if (cfg.ollama && typeof cfg.ollama === "object") {
-        const o = cfg.ollama as { model?: unknown; api?: unknown; base_url?: unknown };
-        const patch: { model?: string; api?: "ollama" | "openai"; baseUrl?: string } = {};
+        const o = cfg.ollama as { model?: unknown; api?: unknown; base_url?: unknown; num_ctx?: unknown };
+        const patch: { model?: string; api?: "ollama" | "openai"; baseUrl?: string; numCtx?: OllamaContextSetting } = {};
         // Only count a field as changed when it's env-unset AND the value actually
         // differs from the current one — so a repeated identical heartbeat config is
         // a no-op (no re-push, no loop). An env override wins and never "changes".
@@ -5007,6 +5019,11 @@ export async function runPanelOrchestrator(): Promise<void> {
           const nb = patch.baseUrl || undefined;
           if (!process.env.COMFYUI_MCP_OLLAMA_BASE_URL && nb !== ollamaBaseUrl) { changed = true; ollamaBaseUrl = nb; }
         }
+        const nc = parseOllamaContextSetting(o.num_ctx);
+        if (nc !== undefined) {
+          patch.numCtx = nc;
+          if (nc !== ollamaNumCtx) { changed = true; ollamaNumCtx = nc; }
+        }
         if (Object.keys(patch).length && changed) {
           setAgentSettings({ ollama: patch });
           ollamaChanged = true;
@@ -5016,7 +5033,7 @@ export async function runPanelOrchestrator(): Promise<void> {
           if (pb?.close) void pb.close().catch(() => {});
           probeBackends.delete("ollama");
           logger.info(
-            `[panel-orchestrator] ollama config → model=${ollamaModel} api=${ollamaApi} host=${ollamaBaseUrl ?? "(default)"}`,
+            `[panel-orchestrator] ollama config → model=${ollamaModel} api=${ollamaApi} host=${ollamaBaseUrl ?? "(default)"} num_ctx=${ollamaNumCtx}`,
           );
         }
       }

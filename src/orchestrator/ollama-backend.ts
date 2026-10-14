@@ -91,15 +91,14 @@ export interface OllamaBackendDeps {
   mcpServers?: Record<string, GeminiMcpServerSpec>;
   /** Panel system prompt (persona), prepended to the system message. */
   systemAppend?: string;
-  /** Context window tokens for /api/chat options.num_ctx. Default is
-   *  MODEL-AWARE: for our fine-tune (artokun/gemma4-comfyui-mcp:*) num_ctx is
-   *  OMITTED so the tag's baked Modelfile window (65536) governs — request
-   *  options override Modelfile params, and a blanket 16384 here silently
-   *  clamped the fine-tune and truncated conversations mid-flight. Stock
-   *  models keep 16384 (their tags bake no window and Ollama's own default is
-   *  4096). Env COMFYUI_MCP_OLLAMA_NUM_CTX overrides everything — the
-   *  architecture allows up to 128K (e2b/e4b) / 256K (12b), VRAM permitting. */
+  /** Fixed context window tokens for /api/chat options.num_ctx. Beats every
+   *  other source; mostly a test seam. Callers that want the panel's live
+   *  choice pass `contextSetting` instead. */
   numCtx?: number;
+  /** The panel's "Context window" choice, read FRESH each turn so a Settings
+   *  change applies on the next message without reconnecting. See
+   *  OllamaContextSetting and effectiveNumCtx for what each value means. */
+  contextSetting?: () => OllamaContextSetting | undefined;
   /** Test seam: replaces the MCP client construction from mcpServers specs. */
   connectToolClients?: () => Promise<{ comfyui?: McpToolClient; panel?: McpToolClient }>;
   /** Panel backend id when reusing this driver for GLM/Kimi/Ollama (default ollama). */
@@ -261,6 +260,42 @@ function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown
 // previous arena best, 9/10). Ladder: :e2b ~2 GB VRAM at q4 / :e4b ~3.5 GB
 // (default) / :12b ~8 GB — `ollama pull artokun/gemma4-comfyui-mcp:<size>`.
 const DEFAULT_MODEL = "artokun/gemma4-comfyui-mcp:e4b";
+
+/**
+ * The user's context-window choice for the Ollama backend.
+ *  - "auto": the model's native window (from /api/show), capped at
+ *    AUTO_NUM_CTX_CAP so a 256K-capable model can't silently claim tens of GB
+ *    of KV cache on a small GPU. Our fine-tune keeps its baked Modelfile window.
+ *  - "max": the model's full native window, VRAM permitting.
+ *  - a number: that many tokens, clamped to the native window when known.
+ */
+export type OllamaContextSetting = "auto" | "max" | number;
+
+/** Ceiling for "auto". 64K holds a long tool-heavy session (the full tool list
+ *  alone can take several thousand tokens of every request) and costs a few GB
+ *  of KV cache on most architectures. */
+export const AUTO_NUM_CTX_CAP = 65536;
+/** Used when the native window can't be read (probe failed, non-Ollama host).
+ *  Ollama's own default is only 4096, far too small for the tool list. */
+const FALLBACK_NUM_CTX = 16384;
+
+/** Parse a persisted/panel value into an OllamaContextSetting, or undefined. */
+export function parseOllamaContextSetting(v: unknown): OllamaContextSetting | undefined {
+  if (v === "auto" || v === "max") return v;
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\d+$/.test(v.trim()) ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= 2048 ? n : undefined;
+}
+
+/** `<arch>.context_length` from an /api/show model_info block, or null. */
+export function nativeContextFromModelInfo(info: unknown): number | null {
+  if (!info || typeof info !== "object") return null;
+  const rec = info as Record<string, unknown>;
+  const arch = rec["general.architecture"];
+  const exact = typeof arch === "string" ? rec[`${arch}.context_length`] : undefined;
+  const v =
+    exact ?? Object.entries(rec).find(([k, val]) => k.endsWith(".context_length") && typeof val === "number")?.[1];
+  return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null;
+}
 const MAX_TOOL_ROUNDS = 32;
 
 /**
@@ -904,11 +939,68 @@ export class OllamaBackend implements AgentBackend {
   }
 
   /** num_ctx to SEND (0 = omit and let the Modelfile govern). Precedence:
-   *  deps.numCtx (settings) → COMFYUI_MCP_OLLAMA_NUM_CTX env → model-aware
-   *  default (fine-tune: omit → baked 65536; stock: 16384). */
+   *  deps.numCtx → the panel's Context window setting (unless "auto") →
+   *  COMFYUI_MCP_OLLAMA_NUM_CTX env → auto. Auto is the model's native window
+   *  capped at AUTO_NUM_CTX_CAP, except our fine-tune, which omits num_ctx so
+   *  its baked 65536 governs (a blanket 16384 once clamped it and truncated
+   *  conversations mid-flight). Every explicit size is clamped to the native
+   *  window when known: tokens past what the model was trained on buy nothing
+   *  but KV cache. */
   private effectiveNumCtx(): number {
+    if (this.deps.numCtx) return this.deps.numCtx;
+    const native = this.nativeCtx?.model === this.model ? this.nativeCtx.tokens : null;
+    const clamp = (n: number) => (native ? Math.min(n, native) : n);
+    const setting = this.deps.contextSetting?.();
+    if (typeof setting === "number") return clamp(setting);
+    if (setting === "max" && native) return native;
     const envCtx = Number(process.env.COMFYUI_MCP_OLLAMA_NUM_CTX) || 0;
-    return this.deps.numCtx ?? (envCtx > 0 ? envCtx : this.isFinetune() ? 0 : 16384);
+    if (envCtx > 0) return clamp(envCtx);
+    if (this.isFinetune()) return 0;
+    return native ? Math.min(native, AUTO_NUM_CTX_CAP) : FALLBACK_NUM_CTX;
+  }
+
+  /** Native window of the active model, from /api/show. Cached per model
+   *  name; a failed read is not cached, so the next turn retries. */
+  private nativeCtx: { model: string; tokens: number } | null = null;
+  /** Model whose failed read was already logged, so retries stay quiet. */
+  private nativeCtxWarnedFor: string | null = null;
+
+  /** Read the active model's native context length once per model. Only the
+   *  Ollama dialect has /api/show; an OpenAI-compatible host keeps the
+   *  fallback window. Never throws: an unknown window just means no clamp. */
+  protected async refreshNativeContext(): Promise<void> {
+    if (this.api !== "ollama" || this.nativeCtx?.model === this.model) return;
+    const model = this.model;
+    const warn = (msg: string) => {
+      if (this.nativeCtxWarnedFor === model) return;
+      this.nativeCtxWarnedFor = model;
+      logger.warn(`[ollama-backend] ${msg} — native context unknown, using ${this.effectiveNumCtx() || "the Modelfile's window"}`);
+    };
+    try {
+      const res = await fetch(`${this.host}/api/show`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model }),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!res.ok) {
+        warn(`/api/show for ${model} returned http ${res.status}`);
+        return;
+      }
+      const tokens = nativeContextFromModelInfo(((await res.json()) as { model_info?: unknown }).model_info);
+      if (!tokens) {
+        warn(`/api/show for ${model} reported no context_length`);
+        return;
+      }
+      if (this.model !== model) return; // switched mid-probe; the next turn re-reads
+      this.nativeCtx = { model, tokens };
+      const sent = this.effectiveNumCtx();
+      logger.info(
+        `[ollama-backend] ${model}: native context ${tokens} tokens; using ${sent || "the Modelfile's window"}`,
+      );
+    } catch (err) {
+      warn(`/api/show context probe failed for ${model}: ${msgOf(err)}`);
+    }
   }
 
   /** The context window actually in effect (for pressure warnings): the sent
@@ -1502,7 +1594,7 @@ export class OllamaBackend implements AgentBackend {
           const win = this.contextWindow();
           if (usage.input_tokens >= win * 0.85) {
             logger.warn(
-              `[ollama-backend] context ${usage.input_tokens}/${win} tokens (${Math.round((usage.input_tokens / win) * 100)}%) — history truncation imminent. Raise COMFYUI_MCP_OLLAMA_NUM_CTX (arch supports 128K on :e2b/:e4b, 256K on :12b, VRAM permitting) or start a fresh chat.`,
+              `[ollama-backend] context ${usage.input_tokens}/${win} tokens (${Math.round((usage.input_tokens / win) * 100)}%) — history truncation imminent. Raise Settings › Ollama › Context window (or COMFYUI_MCP_OLLAMA_NUM_CTX)${this.nativeCtx?.model === this.model ? ` — this model supports up to ${this.nativeCtx.tokens}` : ""}, VRAM permitting, or start a fresh chat.`,
             );
           }
         }
@@ -1946,6 +2038,9 @@ export class OllamaBackend implements AgentBackend {
     // should get. Reconcile BEFORE buildModelTools reads the catalog, and here
     // rather than in setModel because nothing is in flight at this point.
     await this.reconcileToolModeForModel();
+    // Before anything sizes the window: learn the model's native context so
+    // auto/max/clamping resolve against it (cached per model, so cheap).
+    await this.refreshNativeContext();
     // #1972 — same reason, for audio the history is still carrying: the model
     // selected NOW may not be the one that was verified when it was attached.
     this.stripUnverifiedAudioFromHistory();

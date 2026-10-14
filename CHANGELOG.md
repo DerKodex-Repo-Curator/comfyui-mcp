@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This project adheres to
 
 ## Unreleased
 
+## [0.52.206-beta.6] - 2026-10-13
+
+### MCP
+
+#### Fixed
+- never default to the SDK's `default` row, matching the panel
+
+
 ## [0.52.206-beta.5] - 2026-10-13
 
 ### MCP

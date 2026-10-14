@@ -260,7 +260,7 @@ import { handleOAuthBegin, handleOAuthStatus, handleOAuthSignout } from "./oauth
 // prompts, ack `message` fields, log lines — is read by a machine and stays English.
 import { trFor } from "../i18n/index.js";
 import { buildStartFailureNotice, startFailureSay } from "./start-failure-notice.js";
-import { readyBannerText, bannerCorrection } from "./ready-banner.js";
+import { readyBannerText, bannerCorrection, greetingLabel } from "./ready-banner.js";
 import { OAUTH_PROVIDERS } from "../services/oauth-flow.js";
 import { startPanelMcpHttpServer, type PanelMcpHttpServer } from "./panel-mcp-http.js";
 import { resolveHttpLaneComfyToolMode } from "./http-backend-tools.js";
@@ -1779,7 +1779,8 @@ export async function runPanelOrchestrator(): Promise<void> {
   // The SDK-resolved model per tab, learned from the session/init event. Kept so a
   // greeting emitted AFTER the model is already known (the onSession-before-greeting
   // race) can label itself correctly instead of showing the pre-init default.
-  const resolvedModelByTab = new Map<string, string>();
+  // Tagged with the backend that resolved it: the entry survives a backend switch.
+  const resolvedModelByTab = new Map<string, { backend: string; model: string }>();
   const headlessTabs = new Set<string>(); // tabs with no ComfyUI canvas (mobile/remote) — deliver renders in-turn
   // The UUID stamped on the NEXT panel command for a tab — the per-workflow
   // COMMAND FENCE (#570 P0c, kept under #884 because it is a ROUTING guard, not
@@ -2823,7 +2824,7 @@ export async function runPanelOrchestrator(): Promise<void> {
       // duplicates). Per tab: each participating tab advertised its own banner.
       // Banner corrections are "say" frames (mirror-safe) — viewers via mirror.
       for (const panelTab of conversationDeliveryTabs(key, "say")) {
-        if (typeof model === "string" && model.trim()) resolvedModelByTab.set(panelTab, model);
+        if (typeof model === "string" && model.trim()) resolvedModelByTab.set(panelTab, { backend: backendForTab(panelTab), model });
         const corrected = bannerCorrection({
           backend: backendForTab(panelTab),
           advertisedLabel: advertisedBannerModel.get(panelTab),
@@ -4711,7 +4712,7 @@ export async function runPanelOrchestrator(): Promise<void> {
               // greeting (#376) — otherwise the pre-init label. Remember what we
               // advertised so the onSession correction re-sends only on a real
               // mismatch.
-              const bannerLabel = resolvedModelByTab.get(panelTab) ?? agentLabel;
+              const bannerLabel = greetingLabel(resolvedModelByTab.get(panelTab), backend, agentLabel);
               advertisedBannerModel.set(panelTab, bannerLabel);
               bridge.push(
                 { type: "say", text: readyBannerText(backend, bannerLabel, customBaseUrl) },

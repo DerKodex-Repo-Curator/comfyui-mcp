@@ -66,11 +66,21 @@ function tieRank(value: string, parsed: ParsedClaudeModel): number {
 }
 
 /** The value to default to, or undefined for an empty list. Newest Opus first; with no
- *  recognizable Opus, the first opus-ish row, then the SDK's own first row. */
+ *  recognizable Opus, the first opus-ish row, then the SDK's own first row.
+ *
+ *  The SDK's `default` row ("Default (recommended)") is never a candidate, exactly as
+ *  the panel's presentableModels drops it before its own pickDefaultModel runs. It is
+ *  not a family, it is whatever Anthropic currently recommends — free to point at a
+ *  Sonnet tomorrow. And because it is not a family name, parseClaudeModel reads it
+ *  through its resolved id as if it were PINNED, so it won every tie against `opus`:
+ *  on a live account (2026-10-13) the newest Opus is advertised ONLY as the `default`
+ *  and `opus` aliases, and beta.5 picked `default` while the panel picked `opus`. */
 export function pickTopClaudeModel(
   models: ReadonlyArray<{ value: string; resolvedModel?: string }>,
 ): string | undefined {
-  const opus = models
+  const pool = models.filter((m) => m.value !== "default");
+  const candidates = pool.length ? pool : models;
+  const opus = candidates
     .map((m, i) => ({ m, i, c: parseClaudeModel(m.value, m.resolvedModel) }))
     .filter((x): x is { m: (typeof models)[number]; i: number; c: ParsedClaudeModel } => x.c?.family === "opus");
   if (opus.length) {
@@ -82,5 +92,5 @@ export function pickTopClaudeModel(
     );
     return opus[0].m.value;
   }
-  return (models.find((m) => /opus/i.test(m.value)) ?? models[0])?.value;
+  return (candidates.find((m) => /opus/i.test(m.value)) ?? candidates[0])?.value;
 }

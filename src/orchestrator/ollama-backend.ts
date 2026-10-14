@@ -220,7 +220,17 @@ const HISTORY_RECALL_MAX_CHARS = 6000;
 
 /** How much of the original each stub keeps inline. A user's words get more room
  *  than tool output: intent cannot be re-obtained by calling a tool again. */
-const HISTORY_EXCERPT_CHARS = { tool: 160, assistant: 160, user: 300 } as const;
+const HISTORY_EXCERPT_CHARS = { tool: 160, assistant: 160, user: 300, unseen: 1200 } as const;
+
+/** True when an http error means "this prompt does not fit the context window".
+ *  Two shapes, both seen live on Ollama 0.40's llama.cpp runner: an explicit
+ *  400 exceed_context_size_error, and a Qwen-family chat template raising "No
+ *  user query found in messages" (500) because the server front-truncated the
+ *  overflow and the user's request was the first message to go. */
+export function contextOverflowed(status: number | undefined, message: string): boolean {
+  if (typeof status !== "number") return false;
+  return /no user query found in messages|exceed_context_size|exceeds the available context size|context length exceeded|maximum context length/i.test(message);
+}
 
 /** Whitespace-collapsed head of `text`, ellipsized past `max`. */
 function excerptOf(text: string, max: number): string {
@@ -1885,10 +1895,23 @@ export class OllamaBackend implements AgentBackend {
    *     same reason `tool_calls` arguments are left untouched even though they
    *     can be bulky: correctness outranks the extra tokens.
    *
-   *  2. `history[0]` and the last HISTORY_TAIL_KEEP messages are never touched.
-   *     Index 0 is the pin — the thing front-truncation would have eaten, and
-   *     what the rest of this class assumes is the system prompt. The tail is
-   *     the live turn.
+   *  2. `history[0]` is never touched. Index 0 is the pin — the thing
+   *     front-truncation would have eaten, and what the rest of this class
+   *     assumes is the system prompt. The last HISTORY_TAIL_KEEP messages (the
+   *     live turn) are left alone UNLESS everything older has already been
+   *     compacted and the request still does not fit — then the tail's tool
+   *     results go too (pass 3).
+   *
+   * Pass 3 exists because "the tail is too big, let the window cope" is not a
+   * soft failure. Each tool result may carry 16000 chars, so three of them in
+   * the tail alone can outgrow a 16K window, and the server then drops messages
+   * from the FRONT — first the user's request at index 1. Qwen-family chat
+   * templates refuse a history with no user query outright ("No user query found
+   * in messages", http 500), so the turn dies instead of degrading.
+   *
+   * The budget counts the tool DEFINITIONS too (`extraTokens`): they ride every
+   * request and share the same window, and leaving them out is how a history
+   * "under budget" still overflows.
    *
    * Eviction order is cheapest-value-first: tool results before prose. A tool
    * result is re-obtainable (call the tool again) and is usually the bulk of the
@@ -1897,8 +1920,10 @@ export class OllamaBackend implements AgentBackend {
    *
    * Every stub says plainly that the model DID see the content at the time, so
    * it reports a gap in its memory instead of concluding the step never happened.
+   * The exception is a pass-3 result the model has NOT read yet (it arrived after
+   * the last assistant message): that stub says so, and keeps a longer excerpt.
    */
-  private compactHistoryToBudget(): {
+  private compactHistoryToBudget(opts: { extraTokens?: number; fraction?: number } = {}): {
     shrunkMessages: number;
     tokensBefore: number;
     tokensAfter: number;
@@ -1906,8 +1931,8 @@ export class OllamaBackend implements AgentBackend {
     window: number;
   } {
     const window = this.contextWindow();
-    const budgetTokens = Math.floor(window * historyBudgetFraction());
-    let tokensBefore = 0;
+    const budgetTokens = Math.floor(window * (opts.fraction ?? historyBudgetFraction()));
+    let tokensBefore = opts.extraTokens ?? 0;
     for (const m of this.history) tokensBefore += this.estimateTextTokens(m);
     if (tokensBefore <= budgetTokens) {
       return { shrunkMessages: 0, tokensBefore, tokensAfter: tokensBefore, budgetTokens, window };
@@ -1922,8 +1947,11 @@ export class OllamaBackend implements AgentBackend {
     // the surface reconnect rewrites wholesale); the handle reaches the full text
     // through history_recall. Each still says the model DID see the original, so
     // a gap reads as "I can look that up", not "that never happened".
-    const stubFor = (m: ChatMessage, id: string): string => {
+    const stubFor = (m: ChatMessage, id: string, unseen = false): string => {
       const recall = `${HISTORY_RECALL_TOOL} {"id":"${id}"}`;
+      if (unseen) {
+        return `[${m.tool_name ?? "tool"} result, too large to fit the context window alongside this conversation, so only its start is shown here; the full result is archived as ${id}. Start: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.unseen)}". Call ${recall} to read more of it.]`;
+      }
       if (m.role === "tool") {
         return `[compacted ${m.tool_name ?? "tool"} result, archived as ${id}. Gist: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.tool)}". You DID receive the full result earlier; to read it again call ${recall} rather than guessing.]`;
       }
@@ -1933,12 +1961,34 @@ export class OllamaBackend implements AgentBackend {
       return `[compacted earlier reply of yours, archived as ${id}. Gist: "${excerptOf(m.content, HISTORY_EXCERPT_CHARS.assistant)}". Full text: ${recall}.]`;
     };
 
-    // Pass 1 tool results, pass 2 prose. Oldest-first inside each pass.
-    for (const roles of [["tool"], ["assistant", "user"]] as ReadonlyArray<ReadonlyArray<ChatMessage["role"]>>) {
-      for (let i = 1; i < lastTouchable; i++) {
+    // Messages after the last assistant message are results the model has not
+    // read yet; only pass 3 can reach them, and their stub must not claim it did.
+    let lastAssistant = -1;
+    for (let i = this.history.length - 1; i > 0; i--) {
+      if (this.history[i].role === "assistant") {
+        lastAssistant = i;
+        break;
+      }
+    }
+
+    // Pass 1 tool results, pass 2 prose, pass 3 the tail's tool results the
+    // model has read, pass 4 the ones it has not. Oldest-first inside each pass.
+    // An unread history_recall result is never cut: the model asked for exactly
+    // that text, and HISTORY_RECALL_MAX_CHARS already sized it to fit.
+    const unreadRecall = (m: ChatMessage, i: number) => i > lastAssistant && m.tool_name === HISTORY_RECALL_TOOL;
+    const passes: ReadonlyArray<{ roles: ReadonlyArray<ChatMessage["role"]>; from: number; to: number; unseen?: boolean }> = [
+      { roles: ["tool"], from: 1, to: lastTouchable },
+      { roles: ["assistant", "user"], from: 1, to: lastTouchable },
+      { roles: ["tool"], from: lastTouchable, to: this.history.length, unseen: false },
+      { roles: ["tool"], from: lastTouchable, to: this.history.length, unseen: true },
+    ];
+    for (const pass of passes) {
+      for (let i = pass.from; i < pass.to; i++) {
         if (remaining <= budgetTokens) break;
         const m = this.history[i];
-        if (!roles.includes(m.role)) continue;
+        if (!pass.roles.includes(m.role)) continue;
+        if (pass.unseen !== undefined && pass.unseen !== i > lastAssistant) continue;
+        if (unreadRecall(m, i)) continue;
         if (m.compacted) continue;
         if (m.content.length < HISTORY_SHRINK_FLOOR_CHARS) continue;
         // Peek the handle so the stub can be sized BEFORE anything is archived: a
@@ -1946,7 +1996,7 @@ export class OllamaBackend implements AgentBackend {
         // spend context to "save" it.
         const reused = this.recalledHandleOf(m);
         const id = reused ?? `h${this.historyArchiveSeq + 1}`;
-        const stub = stubFor(m, id);
+        const stub = stubFor(m, id, i > lastAssistant);
         if (stub.length >= m.content.length) continue;
         if (!reused) {
           this.historyArchiveSeq++;
@@ -2266,6 +2316,9 @@ export class OllamaBackend implements AgentBackend {
     // Compaction can fire on several rounds of one turn; the user is told once.
     let compactionNotified = false;
     let attachmentsStripped = false;
+    // The round whose request the server refused as too long; that round is
+    // re-sent once at half the usual budget (see contextOverflowed).
+    let overflowRetryRound = -1;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // Drain the chat stream manually: yield each delta event as it arrives,
@@ -2275,7 +2328,10 @@ export class OllamaBackend implements AgentBackend {
         // the context, so a turn that starts with room to spare can still walk
         // into the window by round six. Runs after the image trim, which bounds
         // a different budget on a different axis.
-        const compacted = this.compactHistoryToBudget();
+        const compacted = this.compactHistoryToBudget({
+          extraTokens: Math.ceil(JSON.stringify(tools).length / HISTORY_CHARS_PER_TOKEN),
+          ...(overflowRetryRound === round ? { fraction: historyBudgetFraction() / 2 } : {}),
+        });
         if (this.historyArchive.size > 0 && !tools.some((t) => (t.function as { name?: string } | undefined)?.name === HISTORY_RECALL_TOOL)) {
           tools = this.buildModelTools();
         }
@@ -2356,6 +2412,16 @@ export class OllamaBackend implements AgentBackend {
           // missing data required for image input") and the OpenAI dialect with
           // 400 ("invalid image input"), both reproduced live.
           const status = (err as { httpStatus?: number } | null)?.httpStatus;
+          // The window overflowed despite compaction (the history estimate is a
+          // chars-per-token heuristic, not the model's tokenizer). Re-send this
+          // round ONCE with half the budget rather than ending the turn: the
+          // refusal is about size, and size is the one thing we can still cut.
+          if (!abort.signal.aborted && overflowRetryRound !== round && contextOverflowed(status, msgOf(err))) {
+            overflowRetryRound = round;
+            logger.warn(`[ollama-backend] request overflowed the context window (${msgOf(err).slice(0, 160)}) — compacting harder and retrying once`);
+            round--; // the refused request didn't count as a tool round
+            continue;
+          }
           const requestWasRejected = typeof status === "number" && status >= 400 && status < 500;
           // Arm ONLY when THIS turn attached media that has not yet come back
           // from a successful request. Two things follow, and both matter:
